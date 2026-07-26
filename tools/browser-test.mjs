@@ -460,9 +460,16 @@ async function main() {
       `${landmark.rise} m of rise at ${landmark.dist} m`);
 
     /* ── C2 + C4: brakes and momentum ───────────────────────────────────── */
+    /* Keep accelerating until the car is genuinely quick, or give up after three goes. A
+     * brake test that starts from 0 km/h measures nothing, and on a slow-streaming live host
+     * the first run-up sometimes ends before the car has moved. */
     await reset();
-    await hold(evalJs, 'KeyW', 9000);
-    const vTop = await evalJs(`window.WANDEROAD.car.kph`);
+    let vTop = 0;
+    for (let attempt = 0; attempt < 3 && vTop < 45; attempt++) {
+      await hold(evalJs, 'KeyW', 9000);
+      vTop = await evalJs(`window.WANDEROAD.car.kph`);
+      if (vTop < 45) await reset();
+    }
     const pBrake = await evalJs(`(() => { const c = window.WANDEROAD.car; return { x: c.x, z: c.z }; })()`);
     await hold(evalJs, 'KeyS', 6000);
     const afterBrake = await evalJs(`(() => { const c = window.WANDEROAD.car;
@@ -473,7 +480,7 @@ async function main() {
      * speed and the surface: the same brakes measure 27.6 m on tarmac in bench-car.mjs and
      * over 50 m here on gravel. 55 m is the honest bar for "stops promptly on whatever it
      * happens to be standing on"; bench-car.mjs holds the tight tarmac figure. */
-    check('C2 the brakes stop the car promptly', afterBrake.kph < 3 && scaled < 55,
+    check('C2 the brakes stop the car promptly', vTop > 45 && afterBrake.kph < 3 && scaled < 55,
       `${vTop.toFixed(0)} km/h to ${afterBrake.kph} in ${brakeDist.toFixed(0)} m (${scaled.toFixed(0)} m scaled to 100 km/h, want < 55)`);
 
     await reset();
