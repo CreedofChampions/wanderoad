@@ -35,6 +35,10 @@ const DEMOTE_AFTER = 5;
  * @param {'auto'|'base44'|'php'|'local'} [opts.backend]
  * @param {string|null} [opts.base44AppId] app id from the Base44 editor URL
  * @param {string} [opts.phpBase] directory holding drive.php / state.php
+ * @param {{getSecret():string,getName():string,getPlayerId():string}} [opts.identity]
+ *        whose car this transport speaks for. Defaults to the window's own player. Passed in
+ *        by tools/net-test.mjs, which runs two forked identities in one Node process — the
+ *        only way to prove two clients see each other without opening two browsers.
  * @returns {{
  *   send(payload: object): Promise<object>,
  *   ready(): Promise<string>,
@@ -43,13 +47,19 @@ const DEMOTE_AFTER = 5;
  *   close(): void
  * }}
  */
-export function createTransport({ backend = 'auto', base44AppId = null, phpBase = './api/' } = {}) {
+export function createTransport({
+  backend = 'auto',
+  base44AppId = null,
+  phpBase = './api/',
+  identity = null,
+} = {}) {
   const base = phpBase.endsWith('/') ? phpBase : `${phpBase}/`;
+  const who = identity ?? { getSecret, getName, getPlayerId };
 
   const drivers = {
     base44: base44AppId ? makeBase44Driver(base44AppId) : null,
     php: makePhpDriver(base),
-    local: makeLocalDriver(),
+    local: makeLocalDriver(who),
   };
 
   const chain =
@@ -87,8 +97,8 @@ export function createTransport({ backend = 'auto', base44AppId = null, phpBase 
   function encode(payload) {
     const body = JSON.stringify({
       v: 1,
-      secret: getSecret(),
-      name: getName(),
+      secret: who.getSecret(),
+      name: who.getName(),
       t: Date.now(),
       ...payload,
     });
@@ -264,13 +274,13 @@ function makeBase44Driver(appId) {
  * your save round-trips in memory, and the tick rate is the solo rate.
  */
 
-function makeLocalDriver() {
+function makeLocalDriver(who) {
   const saves = new Map();
   return {
     async send(body) {
       const req = JSON.parse(body);
       const now = Date.now();
-      const id = getPlayerId();
+      const id = who.getPlayerId();
       const res = { now, you: { playerId: id }, peers: [], rate: 0.25 };
 
       if (req.op === 'save' && Array.isArray(req.ops)) {

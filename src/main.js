@@ -38,7 +38,12 @@ import { Streak } from './game/streak.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
+import { Rescue } from './game/rescue.js';
+import { Props } from './render/props.js';
+import { Fuel } from './game/fuel.js';
+import { FuelGauge } from './ui/fuelGauge.js';
 import { Hud } from './ui/hud.js';
+import { Cinematic } from './game/cinematic.js';
 import { Menu } from './ui/menu.js';
 import { createTransport } from './net/transport.js';
 import { Remotes } from './net/remotes.js';
@@ -187,7 +192,36 @@ async function boot() {
   let trail = null;
   const hud = new Hud();
   trail = new StreakTrail({ scene });
-  const audio = new EngineAudio();
+  const audio = new EngineAudio({ seed: SEED }); // seed: the ambience layer asks worldgen where the water and the woods are
+
+  /* The opening cinematic. It owns the camera and NOTHING else — the loop below runs exactly
+   * as it always did underneath it, input included, so the game is drivable from the first
+   * frame whether or not any of this works. `local` is handed over so the road shot can follow
+   * the actual centreline instead of a straight line, and `chase` so the last shot can end on
+   * the gameplay camera's own rest pose. */
+  const cine = new Cinematic({
+    camera,
+    seed: SEED,
+    spawn,
+    terrain: local,
+    chase,
+    // Same sampler the chase camera gets, so the closing shot lands on the same terrain floor.
+    groundAt: (x, z) => car.terrain.height(x, z),
+    hud,
+    onEnd: () => chase.reset(),
+  });
+
+  /* Points of interest and the petrol stations. `solids` is handed over so the props that
+   * declare a collision radius stop the car exactly like a tree does; the ones that do not
+   * (benches, flower beds, fingerposts) stay drive-through on purpose. */
+  const props = new Props({ seed: SEED, scene, solids });
+  /* Fuel reads the stations the props renderer has already loaded rather than re-deriving
+   * the road network — the pure lookup in world/props.js costs tens of milliseconds. */
+  const fuel = new Fuel({
+    findStation: (x, z) => props.nearestStation(x, z),
+    say: (t, s) => hud.say(t, s),
+  });
+  const fuelGauge = new FuelGauge(hud.root);
 
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
    * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
@@ -255,6 +289,11 @@ async function boot() {
     trail.reset(car);
     hud.say('back on the road', 2);
   }
+
+  /* The lakes have 35° banks and a flat bed you can drive along for ever, eleven metres
+   * under. This notices and undoes it, using the same backToRoad() the R key does so the
+   * two can never drift apart. See src/game/rescue.js for why it is depth-gated. */
+  const rescue = new Rescue({ recover: backToRoad, say: (t, s) => hud.say(t, s) });
 
   setStat('looking for company…', 0.7);
   const transport = createTransport({
@@ -389,7 +428,12 @@ async function boot() {
     const wasAuto = auto.on;
     const drive = auto.update(car, cmd, dt) || cmd;
     if (wasAuto && !auto.on) hud.say(auto.lastReason || 'auto-drive off', 2.2);
-    if (!menu.open) car.update(dt, drive);
+    /* Fuel burns first and then GATES the command, so the throttle the solver reads is
+     * already limited. It goes after the autopilot on purpose — a self-driving car runs out
+     * of fuel too — and it gates rather than mutating, so the autopilot's own record of what
+     * it asked for stays intact. */
+    if (!menu.open) fuel.update(dt, car);
+    if (!menu.open) car.update(dt, fuel.gate(drive));
 
     /* collisions — after the solver, before the camera, so the camera never chases a car
        that is momentarily inside a tree */
@@ -402,20 +446,33 @@ async function boot() {
 
     /* scoring */
     const surf = car.terrain.surface(car.x, car.z);
+    /* Water. Reuses the surface record the streak has just been handed rather than sampling
+     * the terrain again — the water table is a function of the same biome weights. Frozen
+     * with the garage, like the physics, so nobody is rescued while they are shopping. */
+    if (!menu.open) rescue.update(dt, car, surf);
     streak.update(dt, car, surf);
     trail.update(dt, car, streak.state);
 
-    /* place the model */
-    const tilt = car.groundTilt();
+    /* place the model. car.roll and car.pitch are the whole body attitude now — the ground
+       under the four wheels, the springs, and a rollover — so nothing gets added on top of
+       them here. This line used to add 60% of a second, oppositely-signed ground sample,
+       which pitched the nose into every hill it climbed. */
     model.group.position.set(car.x, car.y - 0.36, car.z);
     model.group.rotation.set(0, car.yaw, 0);
-    model.setBodyRoll(car.roll * 1.3 + tilt.roll * 0.6, car.pitch + tilt.pitch * 0.6);
+    model.setBodyRoll(car.roll, car.pitch);
     model.setSteer(car.steerAngle || 0);
     model.setWheelSpin(car.wheelSpin);
     model.setBrakeGlow(car.brake);
 
-    /* camera */
-    const sNorm = chase.update(car, dt, (x, z) => car.terrain.height(x, z));
+    /* camera — the cinematic borrows it, and only it. Any key, button, tap or stick ends the
+       borrow; cine.skip() is idempotent, and the cinematic has its own DOM listeners so this
+       line is really only here for the gamepad, which nothing else can see. */
+    let sNorm = 0;
+    if (cine.active) {
+      if (input.pressed.size || cmd.throttle > 0.05 || cmd.brake > 0.05 || Math.abs(cmd.steer) > 0.05) cine.skip();
+      cine.update(dt, car);
+    }
+    if (!cine.active) sNorm = chase.update(car, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });
 
     /* shared uniforms */
     U.uTime.value = now / 1000;
@@ -431,6 +488,7 @@ async function boot() {
     clouds.update(dt, camera.position);
     water.update(dt, camera.position);
     flora.update(dt, camera.position);
+    props.update(dt, car.x, car.z);
     save.markVisited(car.x, car.z);
 
     /* net */
@@ -443,6 +501,7 @@ async function boot() {
     post.limit = car.limit;
 
     hud.update(dt, { car, streak, surface: surf, remotes, netState });
+    fuelGauge.update(dt, fuel, car);
     post.render(scene, camera);
     input.endFrame();
 
@@ -467,6 +526,12 @@ async function boot() {
       setTimeout(() => {
         $('#veil').classList.add('gone');
         $('#hud').hidden = false;
+        /* Start the opening here, on the same tick the veil begins its 1.4 s fade, so the
+         * first shot arrives THROUGH that fade rather than cutting in behind it. The `hidden`
+         * line above is untouched on purpose — the cinematic dims the HUD with opacity and
+         * never touches the attribute, so the one path that makes this game playable stays
+         * exactly as it was. */
+        cine.begin();
         if (CFG.feel !== 'road' || CFG.terrain !== 'rolling') {
           hud.say(`${FEEL.label} · ${LAND.label}`, 4.5);
         }
@@ -485,6 +550,7 @@ async function boot() {
     car,
     model,
     chase,
+    cine,
     streak,
     auto,
     trail,
@@ -492,6 +558,8 @@ async function boot() {
     solids,
     remotes,
     post,
+    props,
+    fuel,
     SEED,
     stats: () => streamer.stats,
     fps: () => fps,

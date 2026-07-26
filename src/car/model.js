@@ -234,13 +234,16 @@ function buildBodyGeometry(t, paint, ghost) {
   const nose = t.hull[0];
   const rear = t.hull[t.hull.length - 1];
 
-  loft(M, t.hull, body, MAT.METAL);
+  // MAT.BODY, not MAT.METAL: metal's ramp puts a hot sun rim on every panel and its tight
+  // bands bleach a whole shell to a pale wash. Coach paint keeps the hue through all three
+  // bands — see painted.js MAT.BODY, and tools/diag-carpaint.mjs for the numbers.
+  loft(M, t.hull, body, MAT.BODY);
   // Glasshouse first, then a painted roof panel laid on top of it — the pen's own trick
   // for the coach body: one loft cannot be two materials, so it is two lofts.
   loft(M, t.cabin, glass, MAT.GLASS);
   const roofA = t.cabin[1], roofB = t.cabin[2];
   pbox(M, 0, roofA.yt + 0.012, (roofA.z + roofB.z) * 0.5,
-    roofA.wt * 0.94, 0.02, Math.abs(roofA.z - roofB.z) * 0.5 + 0.05, 0, body, MAT.METAL);
+    roofA.wt * 0.94, 0.02, Math.abs(roofA.z - roofB.z) * 0.5 + 0.05, 0, body, MAT.BODY);
 
   // Sills: a dark band under the doors between the axles. Without it a flat-shaded car
   // reads as a bar of soap.
@@ -280,12 +283,12 @@ function buildBodyGeometry(t, paint, ghost) {
     }
   }
   if (t.wing === 'lip') {
-    pbox(M, 0, rear.yt + 0.04, tailZ + 0.16, rear.wt * 0.90, 0.035, 0.14, 0, body, MAT.METAL);
+    pbox(M, 0, rear.yt + 0.04, tailZ + 0.16, rear.wt * 0.90, 0.035, 0.14, 0, body, MAT.BODY);
   } else if (t.wing === 'high') {
     const wz = tailZ + 0.24, wy = rear.yt + 0.30;
-    pbox(M, 0, wy, wz, rear.wt * 0.92, 0.025, 0.16, 0, body, MAT.METAL);
+    pbox(M, 0, wy, wz, rear.wt * 0.92, 0.025, 0.16, 0, body, MAT.BODY);
     for (const s of [-1, 1]) {
-      pbox(M, s * rear.wt * 0.92, wy - 0.02, wz, 0.02, 0.10, 0.20, 0, accent, MAT.METAL);
+      pbox(M, s * rear.wt * 0.92, wy - 0.02, wz, 0.02, 0.10, 0.20, 0, accent, MAT.BODY);
       pbox(M, s * 0.30, wy - 0.16, wz - 0.02, 0.03, 0.16, 0.05, 0, dark, MAT.METAL);
     }
   }
@@ -296,7 +299,7 @@ function buildBodyGeometry(t, paint, ghost) {
     const h = hullAt(t.hull, iz);
     for (const s of [-1, 1]) {
       pbox(M, s * (lerp(h.wb, h.wt, 0.55) + 0.005), lerp(h.yb, h.yt, 0.58), iz, 0.03, 0.10, 0.26, 0, dark, MAT.GLASS);
-      pbox(M, s * (lerp(h.wb, h.wt, 0.55) + 0.02), lerp(h.yb, h.yt, 0.58), iz + 0.28, 0.02, 0.11, 0.05, 0, accent, MAT.METAL);
+      pbox(M, s * (lerp(h.wb, h.wt, 0.55) + 0.02), lerp(h.yb, h.yt, 0.58), iz + 0.28, 0.02, 0.11, 0.05, 0, accent, MAT.BODY);
     }
   }
 
@@ -307,7 +310,7 @@ function buildBodyGeometry(t, paint, ghost) {
   for (const s of [-1, 1]) {
     const x = s * (mh.wt + 0.02);
     pcyl(M, [x, mh.yt + 0.02, mz], [x + s * 0.09, mh.yt + 0.09, mz - 0.02], 0.018, 0.018, 4, dark, MAT.MATTE, false, false);
-    pbox(M, x + s * 0.11, mh.yt + 0.10, mz - 0.03, 0.035, 0.045, 0.075, 0, body, MAT.METAL);
+    pbox(M, x + s * 0.11, mh.yt + 0.10, mz - 0.03, 0.035, 0.045, 0.075, 0, body, MAT.BODY);
   }
 
   if (!ghost) {

@@ -59,6 +59,35 @@ function tyreCurve(u, floor) {
   return floor + (1 - floor) * Math.exp(-FALL_K * Math.pow(u - 1, FALL_POW));
 }
 
+/** A wheel counts as off the made surface below this much road coverage. */
+const OFF_ROAD_AT = 0.5;
+
+/* Rollover. These live here rather than in tuning.js because every one of them is part of
+ * the tip solver below and means nothing without it — the same reason the tyre-curve
+ * exponents are here.
+ *
+ * The angles are all expressed as fractions of the car's OWN static tipping angle,
+ * atan(halfTrack / cgHeight), which is 61° on the GT and 66° on the hyper. A fixed angle
+ * would mean the low wide car and the tall narrow one tip at the same place, which is the
+ * one thing about a rollover everybody already knows is false.
+ */
+const TIP = {
+  liftFrom: 0.65, // × static angle: the inside wheels are unambiguously off by here
+  liftTo: 1.15, // × static angle: the outside pair has gone too, no tyre is touching
+  commit: 1.02, // × static angle: past its own balance point it is going over
+  damp: 2.2, // roll-rate damping from the dampers, 1/s — fades out as the wheels lift
+  rightAfter: 1.2, // s on its roof before the car picks itself up
+  rightMax: 5.0, // ... and the longest it is ever allowed to lie there
+  rightRate: 3.0, // 1/s of the righting damp — about 1.3 s from upside down to level
+  digFrom: 3.0, // m/s of sideways speed before a tyre starts to plough
+  digK: 0.55, // m/s² of ploughing per (m/s)² of sideways speed
+  digMax: 40, // m/s² ceiling, about 4 g — a kerb strike, not a tyre
+  digFlat: 0.6, // fraction of that on flat ground; full value only into a rising face
+  bankRate: 0.6, // rad/s of imposed roll below which a bank is just texture
+  scrapeFrom: 0.85, // × static angle: past here it is panels on the ground, not rubber
+  scrapeK: 3.4, // 1/s of velocity bleed while scraping
+};
+
 /** Lateral force factor for a slip angle, |f| = 1 at the peak slip angle. */
 function lateralCurve(alpha, peak) {
   const u = Math.abs(alpha) / peak;
@@ -121,6 +150,23 @@ export class Vehicle {
     this._hbRelease = 1;
     this._acc = 0;
     this._prevSpeed = 0;
+    this._lean = 0; // body roll on its springs, the cosmetic load-transfer part
+    this._leanV = 0;
+    this._dive = 0; // body pitch on its springs, likewise
+    this._diveV = 0;
+    this._tip = 0; // roll of the body away from the surface it is standing on
+    this._tipV = 0;
+    this._righting = false;
+    this._rollTimer = 0;
+    this._prevGroundRoll = 0;
+    this._gRate = 0; // smoothed rate the ground is rolling the car at
+    this._gRatePrev = 0;
+    // Scratch for roads.carve(). Terrain hands out ONE shared object per Terrain, so a
+    // second caller that keeps a reference gets it rewritten under them — own the buffer.
+    this._carve = { mask: 0, y: 0, edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0, width: 0 };
+    this._probedX = Infinity; // never probed — any comparison below is "stale"
+    this._probedZ = Infinity;
+    this._probedYaw = 0;
 
     // outputs the rest of the game reads
     this.speed = 0; // m/s along the body
@@ -133,13 +179,34 @@ export class Vehicle {
     this.surfaceKind = 'ground';
     this.gripScale = 1;
     this.rough = 0;
-    this.forces = { drive: 0, brake: 0, contact: 1, traction: 0, drag: 0, rr: 0, engBrake: 0, net: 0, gear: 1, ratio: 0, latAvail: 1 };
+    /* Off-road, judged at the four contact patches rather than at the badge on the bonnet.
+     * `onRoad` is the average — it is what the drag, the bump and the speed ceiling read, so
+     * two wheels on the verge costs you half of each. `onRoadMin` is the worst wheel, and it
+     * is what the STATE reads: one wheel off means you are off, which is what a driver feels
+     * and what the tyre note should say. */
+    this.onRoad = 1;
+    this.onRoadMin = 1;
+    this.offRoad = 0; // 0..1, how far off the made surface the worst wheel is
+    this.wheelsOffRoad = 0;
+    /* Attitude of the ground under the wheels, in the renderer's sign convention (see
+     * _probeWheels). `roll` and `pitch` already include these — do not add them again. */
+    this.groundPitch = 0;
+    this.groundRoll = 0;
+    this.rolled = false; // on its side or its roof, and about to pick itself up
+    this.forces = { drive: 0, brake: 0, contact: 1, traction: 0, drag: 0, rr: 0, engBrake: 0, trip: 0, net: 0, gear: 1, ratio: 0, latAvail: 1 };
+    // [front-left, front-right, rear-left, rear-right] — the order model.js builds its wheel
+    // meshes in. x/z are the world contact point, y is the GROUND height there.
     this.wheels = [
-      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
-      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
-      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
-      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
+      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true, onRoad: 1 },
+      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true, onRoad: 1 },
+      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true, onRoad: 1 },
+      { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true, onRoad: 1 },
     ];
+  }
+
+  /** The angle this car balances at before gravity takes it over. ~61° GT, ~66° hyper. */
+  get tipAngle() {
+    return Math.atan2(this.track * 0.5, this.spec.cgHeight);
   }
 
   setTier(tier) {
@@ -172,6 +239,96 @@ export class Vehicle {
     this.yawRate = 0;
     this.gear = 1;
     this.rpm = GEARBOX.idleRpm;
+    // R must always be a way out of a rollover, so it clears the tip DOF outright.
+    this._tip = 0;
+    this._tipV = 0;
+    this._lean = this._leanV = this._dive = this._diveV = 0;
+    this.rolled = false;
+    this._righting = false;
+    this._rollTimer = 0;
+    this._probeWheels();
+    this._prevGroundRoll = this.groundRoll;
+    this.roll = this.groundRoll;
+    this.pitch = this.groundPitch;
+  }
+
+  /**
+   * Sample the ground under each of the four wheels: height and road coverage.
+   *
+   * Cost, because four terrain probes a step is not free and it was measured, not guessed:
+   * height() + roads.carve() is 28 µs a wheel against 43 µs for a full surface(). The
+   * expensive part of surface() is its central-difference normal, and we do not want that
+   * per wheel anyway — the four heights ARE the plane the car is standing on, over the
+   * car's own wheelbase rather than a 1.2 m sample at the badge. All in it is about +100 µs
+   * on a 90 µs step, or a quarter of a millisecond on a 16 ms frame. Test stubs with no
+   * road network fall back to surface(), which in a stub costs nothing.
+   *
+   * THE SIGNS, because both of them have been wrong in this file and one of them is the
+   * "car points into the hill when climbing" report. model.js does chassis.rotation.x =
+   * pitch and chassis.rotation.z = roll on a body whose +Z is forward and whose +X is the
+   * driver's LEFT (three.js puts +X on your left when you look down +Z — the same handedness
+   * that has bitten the autopilot's cross-track term and the touch steering).
+   *
+   *   rotation.x > 0 swings +Z downwards, so POSITIVE PITCH IS NOSE DOWN. That is already
+   *     the convention the dive/squat term uses (braking gives a positive pitch), so ground
+   *     rising towards the front has to arrive NEGATIVE. It used to arrive positive, at 60%
+   *     weight, which is exactly the complaint: on a 12° climb the body was pitched 7° nose
+   *     DOWN into the hill instead of 12° nose up.
+   *   rotation.z > 0 swings +X (the left side) upwards, so POSITIVE ROLL IS LEFT SIDE UP.
+   *     Ground higher under the left wheels is therefore positive.
+   */
+  _probeWheels() {
+    const t = this.terrain;
+    const cy = Math.cos(this.yaw);
+    const sy = Math.sin(this.yaw);
+    const half = this.track * 0.5;
+    // forward is (sin yaw, cos yaw); the car's left is (cos yaw, −sin yaw)
+    const lx = cy * half;
+    const lz = -sy * half;
+    const fx = this.x + sy * this.a;
+    const fz = this.z + cy * this.a;
+    const rx = this.x - sy * this.b;
+    const rz = this.z - cy * this.b;
+    let sum = 0;
+    let min = 1;
+    let off = 0;
+    for (let i = 0; i < 4; i++) {
+      const w = this.wheels[i];
+      const front = i < 2;
+      const left = (i & 1) === 0;
+      w.x = (front ? fx : rx) + (left ? lx : -lx);
+      w.z = (front ? fz : rz) + (left ? lz : -lz);
+      let gy = 0;
+      let road = 1;
+      if (t) {
+        if (t.roads && t.roads.carve) {
+          gy = t.height(w.x, w.z);
+          road = t.roads.carve(w.x, w.z, this._carve).edge;
+        } else {
+          const s = t.surface(w.x, w.z);
+          gy = s.y;
+          road = s.onRoad !== undefined ? s.onRoad : 1;
+        }
+      }
+      w.y = gy;
+      w.onRoad = road;
+      sum += road;
+      if (road < min) min = road;
+      if (road < OFF_ROAD_AT) off++;
+    }
+    this.onRoad = sum * 0.25;
+    this.onRoadMin = min;
+    this.offRoad = 1 - min;
+    this.wheelsOffRoad = off;
+    const hF = (this.wheels[0].y + this.wheels[1].y) * 0.5;
+    const hR = (this.wheels[2].y + this.wheels[3].y) * 0.5;
+    const hL = (this.wheels[0].y + this.wheels[2].y) * 0.5;
+    const hRt = (this.wheels[1].y + this.wheels[3].y) * 0.5;
+    this.groundPitch = -Math.atan2(hF - hR, this.wb);
+    this.groundRoll = Math.atan2(hL - hRt, this.track);
+    this._probedX = this.x;
+    this._probedZ = this.z;
+    this._probedYaw = this.yaw;
   }
 
   /** Maximum road-wheel angle at the current speed, plus the drift bonus. */
@@ -283,10 +440,23 @@ export class Vehicle {
     /* ── ground contact ────────────────────────────────────────────────── */
     const surf = this.terrain ? this.terrain.surface(this.x, this.z) : null;
     const groundY = surf ? surf.y : 0;
-    this.surfaceKind = surf ? surf.surfaceKind : 'ground';
     // Surface grip: tarmac 1.0, gravel 0.78, sand 0.62, off-road ~0.55. The car genuinely
-    // feels different in each biome, which is the point of having biomes.
+    // feels different in each biome, which is the point of having biomes. This one stays a
+    // centre sample deliberately: grip is a biome lookup, and a second biome sample per
+    // wheel costs more than the whole rest of the step. What a wheel on the verge costs you
+    // is applied further down, through the loose-surface block, which now reads the
+    // four-wheel average — putting it in both places would charge for it twice.
     this.gripScale = surf ? surf.grip : 1;
+    /* Where the WHEELS are. Everything downstream that used to ask the terrain about the
+     * point under the driver's seat now asks the four contact patches instead: the car is
+     * off-road when a wheel is off-road, not when the badge crosses the line. Clipping a
+     * verge with the near side reads as half a car's worth of drag, bump and lost steering,
+     * which is what it should cost. */
+    this._probeWheels();
+    const onRoad = this.onRoad;
+    // The tyre note is the cheapest off-road cue there is, so it goes on the WORST wheel:
+    // one wheel on the grass and you can hear it.
+    this.surfaceKind = this.onRoadMin > OFF_ROAD_AT ? (surf ? surf.surfaceKind : 'ground') : 'ground';
 
     /* ── the slope ──────────────────────────────────────────────────────
      * The first playable build had none of this, and the result was a car that drove up
@@ -366,7 +536,19 @@ export class Vehicle {
     loadRear = Math.max(loadRear, W * 0.08);
 
     /* ── tyre forces ───────────────────────────────────────────────────── */
-    const contact = airborne ? 0 : 1;
+    /* Contact is not a boolean once the car can go over. Past about two thirds of its own
+     * tipping angle the inside pair is unarguably in the air; past the tipping angle itself
+     * the outside pair has followed and the only thing on the ground is paint. `contact`
+     * scales every tyre force, the drive, the engine braking and the slope pull, so fading
+     * it here is what makes a car on its side coast instead of driving along on its roof —
+     * this one number is read in twelve places below, which is the whole reason the fade
+     * lives here and not in twelve separate special cases. It uses LAST step's tip angle
+     * because this step's is solved
+     * from these forces; at 120 Hz that is 8 ms of lag on a 1.5 s event. */
+    const tipStatic = this.tipAngle;
+    const tipMag = Math.abs(this._tip);
+    const tipContact = clamp01(1 - (tipMag - TIP.liftFrom * tipStatic) / ((TIP.liftTo - TIP.liftFrom) * tipStatic));
+    const contact = airborne ? 0 : tipContact;
 
     // slip angles
     const aFront = vMag > 0.5 ? Math.atan2(vLat + this.yawRate * this.a, Math.abs(vLong) + 0.001) - steerAngle : 0;
@@ -531,7 +713,10 @@ export class Vehicle {
      * makes staying on the road pointless. The figure is under half of the SLOWEST on-road top
      * speed the suite has measured (85 km/h on a climbing stretch, 101 on a flat one), because
      * a ratio measured against a noisy number has to clear the worst case, not the average. */
-    const onRoad = surf ? surf.onRoad : 1;
+    /* `onRoad` is the four-wheel average, taken at the top of the step. Straddling the edge
+     * with the near side on the grass reads 0.5 here, which lifts the ceiling to something
+     * that never bites — correct, because half a car on the tarmac is still half a car on
+     * the tarmac. It is the min, not the average, that says you are off-road. */
     const offCap = lerp(12.2, 200, clamp01(onRoad * 1.4)); // 44 km/h off the carriageway
     if (contact && vLong > offCap && driveForce > 0) driveForce = 0;
 
@@ -592,6 +777,38 @@ export class Vehicle {
       this.rough = loose;
     } else this.rough = 0;
 
+    /* ── tripping ───────────────────────────────────────────────────────
+     * A tyre sliding sideways across tarmac slides. A tyre sliding sideways THROUGH a field,
+     * or into the face of a verge, ploughs: soil piles against the sidewall and the force
+     * stops being friction, which is why almost every real rollover is a trip and almost
+     * none is grip alone. The arithmetic says the same thing about this car — lifting its
+     * inside wheels needs g·halfTrack/h = 1.93 g and its tyres make 1.34 — so without a
+     * ploughing term the honest answer to "can it flip?" is no, ever, at any speed.
+     *
+     * Resistance grows with the square of how fast you are pushing into the ground, capped
+     * at 2.75 g so it is a kerb strike and not a wall. It is gated on the wheels being off
+     * the made surface AND on a real sideways slide, so it is silent for anything a road
+     * drive does — including every case in bench-car.mjs, which is all on tarmac.
+     *
+     * It goes into fyBody below, not into a variable of its own that nothing reads: it has
+     * to actually stop the slide (that is what tripping DOES) as well as tip the car, and a
+     * force that only appears in the roll solver would be the third dead tunable this file
+     * has had. `forces.trip` reports it. */
+    let fyTrip = 0;
+    if (contact > 0 && onRoad < 0.75 && Math.abs(vLat) > TIP.digFrom) {
+      const loose = clamp01((0.75 - onRoad) / 0.75);
+      const over = Math.abs(vLat) - TIP.digFrom;
+      /* Sliding into ground that is RISING under the leading wheels is a different event
+       * from sliding across a flat field: the soil is not being pushed aside, it is in the
+       * way. groundRoll is positive when the car's left is the high side, so a slide that
+       * agrees in sign with it is a slide up the bank. Half the resistance on the flat,
+       * nearly three times that into a 20° face — which is why the answer to "can I flip
+       * it?" is "off-road, at speed, into a bank", and not "anywhere, at any time". */
+      const into = clamp01((Math.sign(vLat) * this.groundRoll) / 0.35);
+      const aDig = Math.min(TIP.digK * over * over, TIP.digMax) * loose * (TIP.digFlat + (1 - TIP.digFlat) * into);
+      fyTrip = -Math.sign(vLat) * aDig * this.mass * contact;
+    }
+
     /* ── integrate the planar body ─────────────────────────────────────── */
     const fxBody = fxTotal - drag - rr - engBrake;
 
@@ -605,11 +822,12 @@ export class Vehicle {
     this.forces.drag = drag;
     this.forces.rr = rr;
     this.forces.engBrake = engBrake;
+    this.forces.trip = fyTrip;
     this.forces.net = fxBody;
     this.forces.gear = this.gear;
     this.forces.ratio = ratio;
     this.forces.latAvail = latAvail;
-    const fyBody = (fyFront * Math.cos(steerAngle) + fyRear) * 1.0;
+    const fyBody = fyFront * Math.cos(steerAngle) + fyRear + fyTrip;
 
     // The body frame is rotating, so the two velocity components are coupled: a car holding
     // a steady circle needs the centripetal terms or it can never reach equilibrium — it
@@ -672,6 +890,19 @@ export class Vehicle {
       this.yawRate *= 0.85;
     }
 
+    /* Scraping. Once the car is over far enough to be on its shoulder there are no tyres in
+     * the picture at all, and `contact` has already taken away every force that could stop
+     * it — so without this it would slide across the county on its roof. Panels on grass is
+     * a lot of friction: this brings a 90 km/h flip to rest in about three seconds, which is
+     * also what makes the automatic righting below happen while you are still watching. */
+    const scrape = clamp01((tipMag - TIP.scrapeFrom * tipStatic) / (0.35 * tipStatic));
+    if (!airborne && scrape > 0) {
+      const k = Math.exp(-TIP.scrapeK * scrape * dt);
+      vLong *= k;
+      vLat *= k;
+      this.yawRate *= k;
+    }
+
     this.yaw += this.yawRate * dt;
     if (this.yaw > Math.PI) this.yaw -= TWO_PI;
     else if (this.yaw < -Math.PI) this.yaw += TWO_PI;
@@ -688,19 +919,158 @@ export class Vehicle {
     this.latAccel = aLat;
     this.speed = vLong;
 
-    /* ── attitude ──────────────────────────────────────────────────────── */
-    const rollTarget = clamp(-this._loadLat * this.spec.rollPerG, -BODY.rollClamp, BODY.rollClamp);
+    /* ── attitude ────────────────────────────────────────────────────────
+     * Three parts, and they are three because they behave completely differently:
+     *
+     *   the GROUND under the wheels — a constraint, not a force. The wheels are on it, so
+     *     the body is on it, and it arrives instantly. Running it through the spring below
+     *     is what made the car lag its way up a hill.
+     *   the SPRINGS — dive, squat and lean. Second-order, rate-limited, cosmetic.
+     *   the TIP — the body leaving the ground plane, which is a rollover.
+     */
+
+    /* THE LEAN SIGN. This was inverted and the car leaned into its corners like a
+     * motorbike. Positive steer turns LEFT (input.js says so, and the tyre code agrees:
+     * a positive steer angle makes a positive front slip force, and +X is the driver's
+     * left). A left turn therefore has a positive lateral acceleration; the body leans
+     * AWAY from it, onto its right; and the right side going down is the LEFT SIDE UP,
+     * which _probeWheels explains is positive on rotation.z. So it follows _loadLat, not
+     * minus it. The dive/squat sign underneath was always right — braking gives a negative
+     * _loadLong and a positive, nose-down pitch. */
+    const leanTarget = clamp(this._loadLat * this.spec.rollPerG, -BODY.rollClamp, BODY.rollClamp);
     const pitchTarget = clamp(
       this._loadLong > 0 ? -this._loadLong * BODY.squatPerG : -this._loadLong * BODY.divePerG,
       -BODY.pitchClamp,
       BODY.pitchClamp
     );
-    const rollAcc = (rollTarget - this.roll) * BODY.rollOmega * BODY.rollOmega - this._rollV * 2 * BODY.rollZeta * BODY.rollOmega;
-    this._rollV = clamp(this._rollV + rollAcc * dt, -BODY.rollRate, BODY.rollRate);
-    this.roll += this._rollV * dt;
-    const pitchAcc = (pitchTarget - this.pitch) * BODY.pitchOmega * BODY.pitchOmega - this._pitchV * 2 * BODY.pitchZeta * BODY.pitchOmega;
-    this._pitchV = clamp(this._pitchV + pitchAcc * dt, -BODY.pitchRate, BODY.pitchRate);
-    this.pitch += this._pitchV * dt;
+    const leanAcc = (leanTarget - this._lean) * BODY.rollOmega * BODY.rollOmega - this._leanV * 2 * BODY.rollZeta * BODY.rollOmega;
+    this._leanV = clamp(this._leanV + leanAcc * dt, -BODY.rollRate, BODY.rollRate);
+    this._lean += this._leanV * dt;
+    const diveAcc = (pitchTarget - this._dive) * BODY.pitchOmega * BODY.pitchOmega - this._diveV * 2 * BODY.pitchZeta * BODY.pitchOmega;
+    this._diveV = clamp(this._diveV + diveAcc * dt, -BODY.pitchRate, BODY.pitchRate);
+    this._dive += this._diveV * dt;
+
+    /* ── going over ──────────────────────────────────────────────────────
+     * The tip DOF is the body's roll away from the plane its wheels are standing on, solved
+     * as a rigid body pivoting about the outer contact line. Moment about that line, per
+     * unit mass, with θ measured from flat:
+     *
+     *   M/m = (Fy/m)·(halfTrack·sinθ + h·cosθ) − g⊥·(halfTrack·cosθ − h·sinθ)
+     *
+     * At θ = 0 that reduces to (Fy/m)·h − g·halfTrack, which is the load-transfer ratio of
+     * 1 that every rollover paper starts from: the tyre force tips it, the weight holds it
+     * down. At Fy = 0 it changes sign at tanθ = halfTrack/h, the car's own balance point.
+     *
+     * Worth saying what is NOT in it: the bank. A car parked across a 30° slope does not
+     * tip, and this equation agrees — the gravity term along the slope cancels against the
+     * pseudo-force from the acceleration it causes. What rolls a car on a bank is the
+     * sideways force of ARRIVING at it, which is `fyTrip`, and the rotation the bank itself
+     * imparts, which is the rate term further down. */
+    const halfT = this.track * 0.5;
+    const hCg = this.spec.cgHeight;
+    const iRoll = hCg * hCg + halfT * halfT; // moment of inertia about the contact line, per kg
+    const gPerp = AIR.gravity * ny;
+    /* The rate the ground is rolling the car at, tracked in every branch so that landing or
+     * getting up never sees a step change in it that it then treats as a kick. Deadbanded,
+     * because this is a difference of a terrain sample and it gets differenced again below:
+     * a real bank taken at speed is 3 rad/s and the wobble of rough ground is a tenth of
+     * that, and without the deadband that wobble is a random walk that eventually flips a
+     * parked car. */
+    this._gRate = damp(this._gRate, (this.groundRoll - this._prevGroundRoll) / dt, 22, dt);
+    const gEff = Math.sign(this._gRate) * Math.max(0, Math.abs(this._gRate) - TIP.bankRate);
+    if (this.rolled) {
+      /* Committed. Past its balance point the tyres are off the ground and gravity is the
+       * only thing with an opinion, so the same equation runs with Fy = 0 until the roof
+       * arrives. Cozy rule: it always ends up on its roof and it always gets up again —
+       * a car balanced on its side for ever is a stuck state, and this game does not have
+       * those. */
+      const s = Math.sign(this._tip) || 1;
+      this._rollTimer += dt;
+      if (!this._righting) {
+        const m = Math.abs(this._tip);
+        this._tipV += ((s * gPerp * (hCg * Math.sin(m) - halfT * Math.cos(m))) / iRoll) * dt;
+        this._tip += this._tipV * dt;
+        if (Math.abs(this._tip) >= Math.PI) {
+          this._tip = s * Math.PI;
+          this._tipV = 0;
+        }
+        const onItsRoof = Math.abs(Math.abs(this._tip) - Math.PI) < 0.2 && vMag < 2.5;
+        // Either it has settled and had its moment, or it has been down long enough that
+        // waiting any longer would just be the game holding you there.
+        if ((onItsRoof && this._rollTimer > TIP.rightAfter) || this._rollTimer > TIP.rightMax) this._righting = true;
+      } else {
+        // Picking itself up. Deliberately not physical: a gentle rotation back the way it
+        // came, over about a second and a bit, and you drive away.
+        this._tip = damp(this._tip, 0, TIP.rightRate, dt);
+        this._tipV = 0;
+        // World velocity, not the body-space vLong/vLat — those were written back to
+        // this.vx/this.vz sixty lines above and anything set here would never be read.
+        this.vx *= 0.9;
+        this.vz *= 0.9;
+        this.yawRate *= 0.9;
+        if (Math.abs(this._tip) < 0.04) {
+          this._tip = 0;
+          this.rolled = false;
+          this._righting = false;
+          this._rollTimer = 0;
+        }
+      }
+    } else if (airborne) {
+      /* In the air the body keeps the roll it left with. The ground can bank away underneath
+       * it and the car cannot know, so the tip absorbs whatever the ground angle does — which
+       * is also how a launch off a banked verge keeps rotating instead of landing flat. */
+      this._tip -= this.groundRoll - this._prevGroundRoll;
+      this._tip += this._tipV * dt;
+    } else {
+      /* THE BANK. A bank taken at speed does not merely tilt the car, it ROTATES it: the
+       * near-side wheels are being lifted at v·tan(bank) and the whole body is turning at
+       * that rate, which crossing a 22° verge at 50 km/h makes about 3 rad/s. While the
+       * ground keeps supplying that rotation the body simply follows it — that is the
+       * groundRoll term and nothing has happened. The moment the ground STOPS supplying it,
+       * at the crest or as the wheels leave, the body still has it, and that leftover rate
+       * is what actually puts cars on their roofs. So the tip picks up whatever rate the
+       * ground gives back. The other direction — the bank steepening — pushes the body into
+       * the hill, and the zero crossing below eats it, which is right: you cannot roll
+       * uphill into a slope you are driving onto.
+       *
+       * This comes FIRST, before the torque below, because it decides which way the body is
+       * going: a bank can start lifting a car whose tyres are pushing the other way, and if
+       * the direction were taken from the tyre force alone the ground's rotation would be
+       * deleted by the zero clamp on the very step it arrived. */
+      this._tipV -= gEff - this._gRatePrev;
+
+      // Which way it is going: the way it is already leaning; failing that, the way it is
+      // already turning; failing that, the way the tyres are pushing it.
+      const s = this._tip !== 0 ? Math.sign(this._tip) : Math.sign(this._tipV) || Math.sign(fyBody) || 1;
+      const m = Math.abs(this._tip);
+      const excess =
+        ((s * fyBody) / this.mass) * (halfT * Math.sin(m) + hCg * Math.cos(m)) - gPerp * (halfT * Math.cos(m) - hCg * Math.sin(m));
+      this._tipV += ((s * excess) / iRoll) * dt;
+
+      // The dampers resist body roll — until a wheel actually lifts, at which point that
+      // damper is topped out and has nothing left to push against.
+      this._tipV -= this._tipV * TIP.damp * clamp01(1 - m / (TIP.liftFrom * tipStatic)) * dt;
+      const next = this._tip + this._tipV * dt;
+      // Crossing back through flat means the lifted wheels have landed. They do not bounce
+      // the body past level — the far pair takes the load and the tip is simply over.
+      if (next === 0 || Math.sign(next) !== s) {
+        this._tip = 0;
+        this._tipV = 0;
+      } else this._tip = next;
+      if (Math.abs(this._tip) > TIP.commit * tipStatic) {
+        this.rolled = true;
+        this._rollTimer = 0;
+      }
+    }
+    this._gRatePrev = gEff;
+    this._prevGroundRoll = this.groundRoll;
+
+    /* What the renderer reads. The ground is in here at full weight — main.js used to add
+     * 60% of it on top of these, with the pitch sign the wrong way round, and that is the
+     * whole of the "car points into the hill" complaint. visualRollMul is applied to the
+     * spring lean only, because exaggerating a rollover would put the car through the floor. */
+    this.roll = this.groundRoll + this._lean * BODY.visualRollMul + this._tip;
+    this.pitch = this.groundPitch + this._dive;
 
     /* ── the limit cue ─────────────────────────────────────────────────── */
     // A browser game has no force feedback, so "how close am I?" has to live in the render
@@ -722,23 +1092,27 @@ export class Vehicle {
     return Math.abs(this.speed) * 3.6;
   }
 
-  /** Ground-terrain-aware wheel heights, for planting the visual model on a slope. */
+  /**
+   * The plane the wheels are standing on, in the renderer's sign convention.
+   *
+   * DO NOT ADD THIS TO roll/pitch — they already contain it, at full weight. This used to
+   * be a second set of terrain samples with the pitch sign the wrong way round, added at
+   * 60% on top of the body attitude, which pitched the nose into every hill. It stays as a
+   * read-only accessor because the answer is genuinely useful (the camera, a trailer, a
+   * ghost car), and it is free now: the four wheel probes have already been taken this step.
+   */
   groundTilt() {
     if (!this.terrain) return { pitch: 0, roll: 0 };
-    const c = Math.cos(this.yaw);
-    const s = Math.sin(this.yaw);
-    const half = this.track * 0.5;
-    const fx = this.x + s * this.a;
-    const fz = this.z + c * this.a;
-    const rx = this.x - s * this.b;
-    const rz = this.z - c * this.b;
-    const hF = this.terrain.height(fx, fz);
-    const hR = this.terrain.height(rx, rz);
-    const hL = this.terrain.height(this.x - c * half, this.z + s * half);
-    const hRt = this.terrain.height(this.x + c * half, this.z - s * half);
-    return {
-      pitch: Math.atan2(hF - hR, this.wb),
-      roll: Math.atan2(hRt - hL, this.track),
-    };
+    // Stale after a teleport or a spell of frozen physics — re-probe rather than hand back a
+    // tilt from wherever the car used to be. The threshold matters: the pose ALWAYS moves a
+    // little between the probe and the end of the step, and re-probing on that would double
+    // the cost of the whole solver for a difference of a centimetre.
+    if (
+      Math.abs(this.x - this._probedX) > 0.25 ||
+      Math.abs(this.z - this._probedZ) > 0.25 ||
+      Math.abs(angleDelta(this._probedYaw, this.yaw)) > 0.05
+    )
+      this._probeWheels();
+    return { pitch: this.groundPitch, roll: this.groundRoll };
   }
 }

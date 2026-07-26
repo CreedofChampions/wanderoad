@@ -76,6 +76,7 @@ import { U, sharedUniforms } from './uniforms.js';
 import { GL_WIND, windUniforms } from './wind.js';
 import { Terrain } from '../world/terrain.js';
 import { BIOME, BIOME_COUNT, BIOME_SCATTER } from '../world/biomes.js';
+import { canopyShade } from '../world/scatter.js';
 import { clamp, clamp01, hash3i, rng, smoothstep } from '../core/math.js';
 
 /* ── the density law ─────────────────────────────────────────────────────────
@@ -130,6 +131,13 @@ function quantCap(f) {
  * 0.74 = 42.3°, 0.85 = 31.8°. The brief's "~40 degrees" is the half-way point. */
 const SLOPE_N0 = 0.74;
 const SLOPE_N1 = 0.85;
+
+/* How much of the sward a closed canopy takes away. It thins the blades AND (via the
+ * lushness channel, which is this same number) shortens them, so a wood floor is short
+ * sparse grass rather than a hay meadow with trees standing in it. Not more than this: the
+ * ground under a Ghibli wood is still green, and a bald forest floor at this palette reads
+ * as scorched earth. */
+const CANOPY_THIN = 0.45;
 
 /* One `Terrain` serves every ring. Its box has to contain the far ring's outermost chunk
  * corner (4.5 chunks of 160 m = 800 m) plus however far the car may drive before the box is
@@ -1050,13 +1058,28 @@ export class Grass {
       const T = this._terrain;
       const step = cs / L;
 
+      /* Canopy shade at the chunk's four CORNERS, interpolated across the lattice below.
+       * `canopyShade` is fbm and costs ~0.8 µs — a per-node lookup would be 225 of them on
+       * every chunk build and this is the tightest budget in the renderer. Four is enough:
+       * the forest field's finest grain is a 265 m wavelength and a grass chunk is at most
+       * 160 m across, and because neighbouring chunks share their corner samples the
+       * interpolation is continuous — no density step at a chunk seam. */
+      const s00 = canopyShade(x0, z0, this.seed);
+      const s10 = canopyShade(x0 + cs, z0, this.seed);
+      const s01 = canopyShade(x0, z0 + cs, this.seed);
+      const s11 = canopyShade(x0 + cs, z0 + cs, this.seed);
+
       // pass 1 — ground, biome scalars, carriageway
       let minY = Infinity;
       let maxY = -Infinity;
       for (let j = 0; j < N; j++) {
         const z = z0 + j * step;
+        const tv = j / L;
+        const sA = s00 + (s01 - s00) * tv;
+        const sB = s10 + (s11 - s10) * tv;
         for (let i = 0; i < N; i++) {
           const x = x0 + i * step;
+          const shade = sA + (sB - sA) * (i / L);
           const y = T.height(x, z);
           const w = T.weights(x, z).w;
           let g = 0;
@@ -1077,7 +1100,7 @@ export class Grass {
           const edge = T.roads.carve(x, z).edge;
           const k = (j * N + i) * 5;
           lat[k] = y;
-          lat[k + 1] = g * (1 - clamp01(edge));
+          lat[k + 1] = g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
           lat[k + 2] = dry;
           lat[k + 3] = snow;
           lat[k + 4] = wet;

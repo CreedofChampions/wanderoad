@@ -483,9 +483,33 @@ async function main() {
     check('C2 the brakes stop the car promptly', vTop > 45 && afterBrake.kph < 3 && scaled < 55,
       `${vTop.toFixed(0)} km/h to ${afterBrake.kph} in ${brakeDist.toFixed(0)} m (${scaled.toFixed(0)} m scaled to 100 km/h, want < 55)`);
 
+    /* The run-up gets the same "keep going until the car is genuinely quick" guard C2 has,
+     * for a sharper reason than C2's. Roads turn about 270 deg/km now, so nine seconds of held
+     * throttle with nobody steering leaves the carriageway around the six-second mark, and
+     * about one verge in eight has water deeper than the rescue's 0.6 m gate within nine metres
+     * of the centreline. Drive into that and src/game/rescue.js does exactly its job: the car
+     * is put back on the road, stopped — and the six seconds after that measure a car that was
+     * already stationary. The arithmetic makes it unfixable rather than merely noisy, which is
+     * why the guard is not optional: (v0/3.6)/6 with v0 = 19 km/h is 0.88 m/s2 however good the
+     * brakes, the drag and the engine braking are, so the check cannot pass whatever the car
+     * does. 45 km/h is also the meaningful line rather than an arbitrary one — 43.9 km/h is
+     * this car's terminal speed off the tarmac, so under 45 means the run-up ended in a field.
+     *
+     * Measured on the shipped seed with tools/diag-runup.mjs --at 846,510, which is where the
+     * failing run was put back on the road: one go reads 20 km/h and 0.91 m/s2, three goes read
+     * 101 km/h and 2.30. Nothing about the MEASUREMENT changes — full throttle, let go, six
+     * seconds, same threshold — and if the car genuinely stops slowing down it still fails,
+     * because a car that will not accelerate fails the guard and a car with no drag coasts
+     * through the six seconds keeping its speed. */
     await reset();
-    await hold(evalJs, 'KeyW', 9000);
-    const vCoast0 = await evalJs(`window.WANDEROAD.car.kph`);
+    let vCoast0 = 0;
+    let runUps = 0;
+    for (let attempt = 0; attempt < 3 && vCoast0 < 45; attempt++) {
+      if (attempt > 0) await reset(); // put it back on the road first, then have another go
+      runUps++;
+      await hold(evalJs, 'KeyW', 9000);
+      vCoast0 = await evalJs(`window.WANDEROAD.car.kph`);
+    }
     await sleep(6000);
     const vCoast1 = await evalJs(`window.WANDEROAD.car.kph`);
     /* Measured as a DECELERATION, not a ratio. A ratio silently measures the hill the car
@@ -495,7 +519,8 @@ async function main() {
      * is measured — at least 1 m/s2 of it. */
     const decel = ((vCoast0 - vCoast1) / 3.6) / 6;
     check('C4 lifting off slows you visibly', decel > 1.0,
-      `${vCoast0.toFixed(0)} -> ${vCoast1.toFixed(0)} km/h in 6 s = ${decel.toFixed(2)} m/s2`);
+      `${vCoast0.toFixed(0)} -> ${vCoast1.toFixed(0)} km/h in 6 s = ${decel.toFixed(2)} m/s2` +
+        (runUps > 1 ? ` (${runUps} run-ups)` : ''));
 
     /* ── C3: stop, turn round, drive back ───────────────────────────────── */
     await reset();

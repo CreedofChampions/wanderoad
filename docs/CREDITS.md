@@ -30,13 +30,62 @@ node -e "const fs=require('fs');const bad=[];(function w(d){if(!fs.existsSync(d)
 |---|---|---|
 | "Hoshi-no-Tani — The Valley of Stars" CodePen | Provided by the operator as the visual reference for this project. | The palette, lighting model (`paint()`), sky, post chain, grass, water, cloud and painted-solid pipelines derive from it. It is the reason the game looks the way it does and it should be credited wherever the game is presented. |
 | [Quaternius](https://quaternius.com/packs/cars.html) car models — 7 GLBs in `public/models/cars/` | **CC0 1.0 Universal** (public domain). Attribution not required; given anyway. | Fetched anonymously over plain HTTP from [Poly Pizza](https://poly.pizza). Untextured, so the game re-materials them into its own painted shader. Full text in `public/models/cars/LICENCE.txt`. |
+| The 100 roadside props and the petrol stations — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | See the note below. |
+
+### The 100 points of interest — why nothing was downloaded
+
+The 100 roadside props (`src/world/props.js` for placement, `src/render/props.js` for
+geometry) and the petrol stations are **modelled in code**, in this project's own
+painted-solid pipeline. **Zero third-party assets were added.** Nothing in this feature needs
+a licence audit because there is nothing in it that anyone else wrote.
+
+That was a deliberate choice over importing a hundred CC0 GLBs from Quaternius / Poly Pizza,
+and it was made on three grounds:
+
+1. **Licence risk is the whole point of this file.** A hundred separate assets is a hundred
+   separate grants to verify, and grants rot: the `ferrari.glb` entry in the "rejected" table
+   below is already an example of a licence page that has gone dark and can no longer be
+   checked. Zero files is the only number of third-party files that stays clean by itself.
+2. **The painted look.** Colour and material index ride on per-vertex attributes here. An
+   imported GLB has to be re-materialled by guessing at its material names — `loadedCar.js`
+   does exactly that, and it only works because Quaternius happens to name parts plainly.
+   Built in code, a prop is in the painting from its first vertex, with the palette from
+   `src/core/palette.js` and no texture at all.
+3. **Cost.** Because colour is per-vertex, every prop in a 384 m tile — a shrine, a barn, a
+   fingerpost, a whole petrol station — bakes into ONE geometry and draws in ONE call. A
+   hundred imported meshes would be a hundred materials and a hundred draw calls, for objects
+   that are rare by design. Measured: the whole 1.2 km prop window is 20 draw calls and
+   ~11 000 triangles.
+
+The precedent is the reference pen itself, which modelled its village, mill, locomotive and
+fences the same way; the cars remain the one bought asset because a car silhouette is worth
+buying and a fingerpost is not.
+
+The operator's "too cartoony" note about Kenney therefore does not apply to anything shipped:
+the props take their proportions and their colours from this game's own palette. If a future
+prop *is* imported, it goes in the table above with its name, author, source URL and licence,
+and the CC0 / MIT / Apache-2.0 / BSD rule stands unchanged.
 
 ## Audio
 
-All audio is **synthesised at runtime by this project's own code** (`src/audio/engine.js` and
-`src/audio/radio.js`). No recording, sample or musical work is bundled, so no third-party
-audio licence applies to the game as shipped. The radio composes itself from a pentatonic
-scale and a chord loop; it is original and it does not repeat.
+All audio is **synthesised at runtime by this project's own code** (`src/audio/engine.js`,
+`src/audio/radio.js` and `src/audio/ambience.js`). No recording, sample or musical work is
+bundled, so no third-party audio licence applies to the game as shipped. The radio composes
+itself from a pentatonic scale and a chord loop; it is original and it does not repeat.
+
+The positional ambience — the surf that grows as you approach a shoreline, and the birds
+around woodland — is the same story and was a deliberate choice for the same reason as the
+props: **zero files means zero licences to audit, now or later.** Every asset in it:
+
+| Asset | Where it comes from | Licence |
+|---|---|---|
+| Surf body and the breaking-wave hiss | The engine's existing procedural noise buffer (`src/audio/engine.js`, generated in code) through a high-pass, a swept low-pass and a band-pass | **This project's own work.** No file, no third party. |
+| The swell that makes noise read as water | Two sub-audio `OscillatorNode`s at 0.083 and 0.052 Hz modulating a gain | **This project's own work.** |
+| Bird calls | Four permanently-running sine `OscillatorNode`s, frequency-swept over 45–120 ms per note from five hand-written call shapes | **This project's own work.** |
+
+No freesound entry, no sample pack and no recording was downloaded, auditioned or bundled for
+this feature. Nothing was added to `public/`. The CC0 sources listed below remain evaluated
+but unused.
 
 Sources evaluated for a future sample-based engine, kept here so the decision does not have
 to be made twice:
@@ -64,3 +113,7 @@ to be made twice:
 - "Slow Roads" developer writeup — road and terrain architecture, described in prose.
 - MicroGSD/RoadArchitect (MIT) and TheDuckCow/godot-road-generator (MIT) — swept-ribbon road
   extrusion, as a technique to port rather than code to copy.
+- *The Legend of Zelda: Ocarina of Time* (Nintendo) — cited in `src/game/cinematic.js` purely as
+  a reference for the PACE of an opening: four long shots, few cuts, no text. Nothing of it is
+  used — no code, no assets, no music, no imagery, no UI. The observation that a good opening is
+  unhurried is not anyone's property.

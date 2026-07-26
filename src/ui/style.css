@@ -200,38 +200,76 @@ canvas {
 }
 
 /* ── streak ───────────────────────────────────────────────────────────────
- * Top-left, small, and invisible until there is something to say. A cozy game does not
- * need a scoreboard in your eyeline. */
+ * The one mechanic in the game, so it is the one thing on the glass allowed to be big.
+ *
+ * It used to live top-left at 15 px and 0.42 opacity, underneath the debug overlay, and the
+ * answer to "how far have I gone without leaving the road" was effectively invisible. It now
+ * sits bottom centre, directly above the unlock bar, so the whole story — how far, what it is
+ * worth, which car it is buying — reads as one column in one glance. Bottom centre is road
+ * surface in every camera, so it is the only large area of the frame with nothing in it.
+ *
+ * Still cozy: no flash, no pulse, no colour that is not already in the palette. The only
+ * motion is the number counting up and a five-and-a-half-second breath on the bar's glow.
+ *
+ * Every rule below keeps opacity above 0.5 in every state. A screenshot taken at any moment
+ * of any transition or keyframe has to pass the same visibility check a still frame does. */
 #streak {
   position: absolute;
-  top: clamp(1rem, 4vw, 2rem);
-  left: clamp(1rem, 4vw, 3rem);
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: clamp(2.9rem, 6.2vh, 4rem);
   display: flex;
-  align-items: baseline;
-  gap: 0.55rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  text-align: center;
   font-variant-numeric: tabular-nums;
-  opacity: 0.42;
-  transition: opacity 0.6s ease, color 0.4s ease;
+  opacity: 0.7;
+  transition: opacity 0.7s ease, color 0.7s ease;
 }
 #streak.live {
-  opacity: 0.92;
+  opacity: 1;
 }
 #streak.grace {
   color: var(--warm);
 }
+/* The break blip: rust lands instantly, then the rule above fades it out over 0.7 s when the
+ * class comes off. Instant on, slow off — a blip. Fading both ways would be a pulse. */
+#streak.broke {
+  color: var(--rust);
+  transition: none;
+}
+#streak .figure {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+  line-height: 1;
+}
 #streakKm {
-  font-size: clamp(1rem, 2.6vw, 1.45rem);
-  letter-spacing: 0.03em;
+  font-size: clamp(2.1rem, 5vw, 3.2rem);
+  letter-spacing: 0.01em;
 }
 #streakMul {
-  font-size: clamp(0.8rem, 1.9vw, 1.05rem);
+  font-size: clamp(0.95rem, 2.1vw, 1.3rem);
   color: var(--warm);
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
+}
+#streak .cap {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.6rem;
+  font-size: clamp(0.7rem, 1.5vw, 0.82rem);
+  /* Declared, not inherited, so the height of this block is a number the geometry check in
+   * tools/diag-hud.mjs can compute rather than guess. */
+  line-height: 1.4;
+  letter-spacing: 0.16em;
+  opacity: 0.78;
 }
 #streakPts {
-  font-size: 0.76rem;
-  letter-spacing: 0.16em;
-  opacity: 0.62;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
 }
 
 #players .dist {
@@ -378,60 +416,128 @@ canvas {
 }
 
 /* ── unlock bar ───────────────────────────────────────────────────────────
- * Along the very bottom. It answers one question — how far to the next car — and it is the
- * only place the game asks the player to want something. Dim until a streak is running,
- * then it lights; red when one breaks. */
+ * Along the very bottom, edge to edge. It answers one question — how far to the next car —
+ * and it is the only place the game asks the player to want something. Dim while parked, then
+ * it lifts and lights while a streak is running; rust for a moment when one breaks.
+ *
+ * The strip is 2.4 rem tall so the label sits inside it and the whole thing is one box; the
+ * visible track is the few pixels at the bottom.
+ *
+ * `.fill` carries a min-width. A 0 %-wide element is a zero-size box, and a zero-size box is
+ * invisible by every measure that matters — which is exactly the class of bug that shipped
+ * this game unplayable once already. Three pixels of resting width costs nothing and means
+ * the bar is provably on screen from the first frame. */
 #unlockBar {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 3px;
-  background: rgba(246, 236, 216, 0.1);
-  transition: height 0.4s ease, background 0.5s ease;
+  height: 2.4rem;
+  pointer-events: none;
 }
-#unlockBar .fill {
-  height: 100%;
-  width: 0%;
-  background: linear-gradient(90deg, rgba(168, 202, 224, 0.5), rgba(78, 127, 121, 0.85));
-  transition: width 0.5s ease, box-shadow 0.5s ease;
-}
-#unlockBar.live {
-  height: 5px;
-  background: rgba(246, 236, 216, 0.16);
-}
-#unlockBar.live .fill {
-  background: linear-gradient(90deg, rgba(168, 202, 224, 0.9), rgba(120, 176, 216, 1));
-  box-shadow: 0 0 14px rgba(140, 190, 230, 0.75);
-}
-#unlockBar.broke .fill {
-  background: #c8503f;
-  box-shadow: 0 0 18px rgba(200, 80, 63, 0.9);
-  transition: none;
-}
-#unlockBar .lbl {
+#unlockBar .track {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 0.7rem;
-  display: flex;
-  justify-content: space-between;
-  padding: 0 clamp(1rem, 4vw, 3rem);
-  font-size: 0.74rem;
-  letter-spacing: 0.14em;
-  opacity: 0.4;
-  transition: opacity 0.5s ease;
-  pointer-events: none;
+  bottom: 0;
+  height: 5px;
+  background: rgba(246, 236, 216, 0.14);
+  transition: height 0.5s ease, background 0.6s ease;
 }
-#unlockBar.live .lbl {
-  opacity: 0.85;
+#unlockBar.live .track {
+  height: 8px;
+  background: rgba(246, 236, 216, 0.2);
 }
-#unlockBar .run {
-  font-variant-numeric: tabular-nums;
-  color: var(--cream);
+#unlockBar .fill {
+  height: 100%;
+  width: 0.6%;
+  min-width: 3px;
+  background: linear-gradient(90deg, rgba(168, 202, 224, 0.55), rgba(78, 127, 121, 0.9));
+  transition: width 0.6s ease, background 0.6s ease, box-shadow 0.6s ease;
 }
-#unlockBar .next {
+#unlockBar.live .fill {
+  background: linear-gradient(90deg, rgba(168, 202, 224, 0.95), rgba(120, 176, 216, 1));
+  /* Alive, not urgent: one slow breath every five and a half seconds, on the glow only.
+   * Never on opacity — a screenshot must never catch this element faded out. */
+  animation: streakBreathe 5.5s ease-in-out infinite;
+}
+@keyframes streakBreathe {
+  0%,
+  100% {
+    box-shadow: 0 0 10px rgba(140, 190, 230, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(140, 190, 230, 0.85);
+  }
+}
+/* The notch where the best run got to. The fill overtakes it and it fades away. */
+#unlockBar .mark {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+  background: var(--cream);
+  opacity: 0;
+  transition: opacity 0.6s ease, left 0.6s ease;
+}
+#unlockBar .mark.on {
+  opacity: 0.6;
+}
+#unlockBar.broke .fill {
+  background: var(--rust);
+  box-shadow: 0 0 18px rgba(200, 80, 63, 0.75);
+  animation: none;
+  transition: none; /* arrives instantly; the base rule fades it back out */
+}
+#unlockBar.broke .track {
+  background: rgba(200, 80, 63, 0.22);
+}
+#unlockBar #unlockNext {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.85rem;
+  text-align: center;
+  font-size: clamp(0.72rem, 1.5vw, 0.85rem);
+  letter-spacing: 0.16em;
   color: var(--warm);
+  opacity: 0.62;
+  transition: opacity 0.6s ease, color 0.6s ease;
+}
+#unlockBar.live #unlockNext {
+  opacity: 0.95;
+}
+#unlockBar.broke #unlockNext {
+  color: var(--rust);
+  opacity: 0.95;
+}
+
+/* Narrow screens. On a phone the speedo alone is ~140 px wide and its clamps bottom out at
+ * 16 px from the edge, so it occupies roughly 16–58 px up the right-hand side — straight
+ * through where a centred label 14 px off the bottom would sit. There is no clear band left
+ * down there, so the unlock line moves up and joins the streak column instead of hugging the
+ * track. It still reads as the bar's label because it is the only other thing in that column.
+ * (Above 640 px the speedo has retreated far enough right that the two never meet.) */
+@media (max-width: 640px) {
+  #streak {
+    bottom: 5.9rem;
+  }
+  #streak .cap {
+    letter-spacing: 0.1em;
+  }
+  #unlockBar #unlockNext {
+    bottom: 4.1rem;
+    letter-spacing: 0.08em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #unlockBar.live .fill {
+    animation: none;
+    box-shadow: 0 0 14px rgba(140, 190, 230, 0.7);
+  }
 }
 
 /* locked cars in the garage */

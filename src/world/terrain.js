@@ -23,25 +23,102 @@ import {
   waterLevelAt,
 } from './biomes.js';
 import { RoadField } from './roads.js';
+import { landmarkHeight } from './landmarks.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
 import { fbm2 } from '../core/noise.js';
 
 const _w = new Float32Array(BIOME_COUNT);
 
-/** Below this weight a biome contributes less than a centimetre — skip its whole relief. */
-const W_CULL = 0.02;
+/* Below this weight a biome's relief is not evaluated at all — it is the single biggest
+ * saving in the heightfield, because a culled biome is a whole fbm stack not computed.
+ *
+ * IT MUST NOT BE A HARD SWITCH. A threshold test drops `threshold × that biome's relief`
+ * from the sum the instant the weight crosses it, and the highlands' relief is measured in
+ * hundreds of metres: at 2% that is a step of several metres between two samples 5 m apart —
+ * a vertical wall, drawn along the entire 2% contour of every biome. The first run with the
+ * new amplitudes measured 0.89% of ground over 45° against 0.027% before, and every one of
+ * the twelve steepest points in the world was a spot where the highland weight was sitting on
+ * 0.02. Invisible at the old amplitudes, catastrophic at the new ones, and nothing whatever
+ * to do with the noise.
+ *
+ * So the contribution fades in across [W_CULL, W_FADE] and the sum is renormalised by the
+ * weight actually used. The renormalisation is what makes it exact rather than merely
+ * smoother: h is the weighted MEAN of the biomes in play, so a biome arriving with weight
+ * epsilon moves it by epsilon×(its deviation from the mean), which goes to zero with epsilon.
+ * The old code divided by an implicit 1.0 and therefore pulled the height towards zero
+ * wherever anything was culled. */
+const W_CULL = 0.015;
+const W_FADE = 0.055;
+
+/* Metres of shoulder per metre of fill or cutting — the batter. 1.6 is what RoadField.carve
+ * uses for its own mask and this had drifted to 1.5, which is a shoulder 6% narrower than
+ * the mask that is meant to contain it.
+ *
+ * DO NOT CLAMP THE DROP THIS IS MULTIPLIED BY. Capping it at the road's own maximum
+ * earthwork looks tidy and is exactly backwards: the deep fills are precisely the ones that
+ * need the widest shoulder, and capping the width while the height keeps growing is how you
+ * build a wall. Measured over the standard 2.4 km square: 1.6 uncapped gives 69 samples over
+ * 45°, 1.6 capped at 22 m gives 130, and 1.5 uncapped — what was here — gives 80. Going the
+ * other way is worse again (1.9 → 108, 2.4 → 1016) because past a point the shoulder is
+ * wider than the mask that contains it and the ground steps down where the mask ends. */
+const BATTER = 1.6;
+
+/**
+ * How the embankment face falls away, from 1 at the road edge to 0 at the toe.
+ *
+ * smoothstep, and it was worth proving rather than assuming. Its steepest point is 1.5x the
+ * average gradient over the band, so a batter that AVERAGES a comfortable 1:1.6 has a ~43°
+ * stripe through its middle — and since every sample in the world over 45° is an embankment
+ * face with the land's own slope added, that stripe is the entire population. The obvious fix
+ * is a real batter: straight, with the toe and crest eased, peak 1.25x instead of 1.5x.
+ *
+ * It is worse. Measured: the extreme tail collapses (past 50° went 61 samples to 25) but the
+ * total over 45° goes from 95 to 158, because the same drop over the same width has to go
+ * somewhere — smoothstep puts the excess in a thin stripe that mostly stays under the line,
+ * the straight batter spreads it across 60% of the face at a gradient the land's own slope
+ * then tips over. Concentrating the steepness is the thing that minimises the AREA of
+ * unclimbable ground, which is what the player actually meets.
+ *
+ * Keep smoothstep. The lever that does work is the WIDTH — see the batter comment in
+ * Terrain.height.
+ */
+function batterFall(half, shoulder, d) {
+  return 1 - smoothstep(half, shoulder, d);
+}
 
 function reliefFromWeights(x, z, seed, w) {
   let h = 0;
+  let tw = 0;
   for (let i = 0; i < BIOME_COUNT; i++) {
     const wi = w[i];
     if (wi < W_CULL) continue;
-    h += wi * biomeRelief(x, z, seed, i);
+    const k = wi * smoothstep(W_CULL, W_FADE, wi);
+    if (k <= 0) continue;
+    h += k * biomeRelief(x, z, seed, i);
+    tw += k;
   }
-  // A common fine layer over everything so no biome looks smooth-shaded up close. Kept
-  // small: at an 18 m wavelength every metre of amplitude is another degree of slope under
-  // the wheels, and this layer is meant to be seen, not felt.
-  return h + fbm2(x * 0.055, z * 0.055, 3, seed ^ 0x1f0d, 2.0, 0.4) * 0.55;
+  if (tw > 0) h /= tw;
+  /* The massifs. Added OUTSIDE the biome sum, and that is deliberate — see the header of
+   * world/landmarks.js. Two reasons in one line: a mountain weighted by biome mix dissolves
+   * exactly where the mix is transitional, and anything derived from biome weights reads
+   * wrong outside a sampler's climate box, which is precisely the query "can I see that
+   * mountain from spawn". */
+  h += landmarkHeight(x, z, seed);
+  /* A common fine layer over everything so no biome looks smooth-shaded up close. Kept
+   * small, and kept SLACK: this layer is meant to be seen, not felt. It used to run at an
+   * 18 m wavelength with gain 0.4 against lacunarity 2.0, which put about 0.19 of gradient
+   * on every square metre of the world — including the faces of road embankments, which are
+   * already the steepest ground there is and are where every single sample over 45° lives
+   * (95 of 100, all within 40 m of a road; the raw land has none). Same amplitude, 33 m
+   * wavelength, gain 0.3: still visible, half the gradient, and it stops nudging the
+   * embankments over the line.
+   *
+   * Lacunarity stays at 2.0 rather than going up with the biome stacks. At 2.5 the third
+   * octave lands on a 5.3 m wavelength, which is the spacing tools/diag-cliffs.mjs measures
+   * the normal over — the field then reads its own worst case at every sample and the
+   * over-45° count went UP while the actual gradient went down. 2.0 keeps the finest octave
+   * at 8 m, comfortably coarser than anything that samples it. */
+  return h + fbm2(x * 0.03, z * 0.03, 3, seed ^ 0x1f0d, 2.0, 0.3) * 0.55;
 }
 
 /**
@@ -170,13 +247,18 @@ export class Terrain {
     /* The embankment has to be as wide as it is tall. A fixed-width shoulder is fine where
      * the road sits within a metre of the land, but where it crosses a dip on 12 m of fill
      * the same shoulder becomes a 12 m wall in 13 m of ground — a 42° face the car cannot
-     * climb, and the single biggest source of the cliffs the first build was full of.
-     * Real earthworks use a batter of about 1:1.5, so the transition is widened by 1.5 m
-     * per metre of fill or cutting and the face never exceeds about 34°. */
+     * climb, and the single biggest source of the cliffs the first build was full of. Real
+     * earthworks use a batter of about 1:1.6, so the transition widens by 1.6 m per metre of
+     * fill or cutting and the face stays shallow however deep the fill gets.
+     *
+     * This is where essentially every sample over 45° in the world lives: 181 of 199 of them
+     * are fill, standing more than 4 m above the land, with the land 20–33 m below the road
+     * surface. The raw land has none at all, at any preset. So the batter, not the noise, is
+     * the thing to tune — and it is a WIDTH problem, not a shape problem (see batterFall). */
     const drop = Math.abs(land - target);
     const half = c.width * 0.5;
-    const shoulder = half + 3.0 + drop * 1.5;
-    const k = (1 - smoothstep(half, shoulder, c.d)) * clamp01(drive);
+    const shoulder = half + 3.0 + drop * BATTER;
+    const k = batterFall(half, shoulder, c.d) * clamp01(drive);
     let h = lerp(land, target, k);
 
     // Camber: the crown falls about 18 cm to the gutter so water would run off it, which is
@@ -290,9 +372,16 @@ export function findSpawn(seed, hintX = 0, hintZ = 0) {
     for (let k = 1; k < n - 1; k++) {
       const x = e.pts[k * 2],
         z = e.pts[k * 2 + 1];
-      const grade = Math.abs(e.y[k + 1] - e.y[k - 1]);
+      /* Only STEEPNESS is a problem, not gradient as such. This used to score the raw height
+       * difference linearly against forty times its weight, so the winner was always the
+       * single flattest arterial sample within 3 km — the one billiard table in a world of
+       * hills. Every relief measurement then read that pocket and reported a flatline, and so
+       * did the player. Below about 4.5% a start is simply pleasant and there is nothing to
+       * choose between candidates; above 13% it is a bad place to be handed a car. So the
+       * grade term saturates at both ends and distance decides everything in between. */
+      const grade = Math.abs(e.y[k + 1] - e.y[k - 1]) / (2 * e.span);
       const dist = Math.hypot(x - hintX, z - hintZ);
-      const score = grade * 40 + dist * 0.01;
+      const score = smoothstep(0.045, 0.13, grade) * 900 + dist * 0.012;
       if (!best || score < best.score) {
         const dx = e.pts[k * 2 + 2] - e.pts[k * 2 - 2];
         const dz = e.pts[k * 2 + 3] - e.pts[k * 2 - 1];

@@ -83,6 +83,12 @@ export class Radio {
     return STATIONS[this.station].label;
   }
 
+  /** True while a station is actually playing. The ambience layer reads this so the sea and
+   *  the birds duck under the music instead of arguing with it. */
+  get on() {
+    return STATIONS[this.station].scale !== null;
+  }
+
   next() {
     this.station = (this.station + 1) % STATIONS.length;
     const on = STATIONS[this.station].scale !== null;

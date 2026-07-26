@@ -63,6 +63,7 @@ export class Streak {
     this._announced = 0; // highest ladder index announced this streak
     this._events = []; // drained by the HUD
     this._lastBreakAt = 0;
+    this._savedBest = 0; // best as last written to storage — see the note in update()
     this.load();
   }
 
@@ -74,6 +75,7 @@ export class Streak {
       this.total = +d.total || 0;
       this.best = +d.best || 0;
       this.bestScore = +d.bestScore || 0;
+      this._savedBest = this.best;
     } catch {
       // A corrupt or unavailable store is not worth a crash on a cozy driving game.
     }
@@ -82,6 +84,7 @@ export class Streak {
   save() {
     try {
       localStorage.setItem(this.storageKey, JSON.stringify({ total: this.total, best: this.best, bestScore: this.bestScore }));
+      this._savedBest = this.best;
     } catch {
       /* private mode, quota, whatever — the streak still works this session */
     }
@@ -137,6 +140,22 @@ export class Streak {
 
     const metres = speed * dt;
     this.distance += metres;
+
+    /* The best updates AS YOU DRIVE, not when the streak ends.
+     *
+     * `best` is what the whole fleet unlocks against, and it used to only move in _commit(),
+     * which meant a run that passed 20 km did not unlock the Rally until you crashed. The
+     * unlock bar was measured against a number that could not move, so the one display that
+     * is supposed to be alive during a run was the one display that sat still. Now the car is
+     * earned the moment the wheels roll past the number, which is when it was earned.
+     *
+     * Storage is a separate question: writing localStorage every frame for a value that
+     * changes every frame is pointless, so it is flushed every 250 m of new best (about once
+     * every eight seconds at motorway speed) and on _commit()/flush() as before. */
+    if (this.distance > this.best) {
+      this.best = this.distance;
+      if (this.best - this._savedBest > 250) this.save();
+    }
 
     // multiplier from the ladder
     let tier = 0;

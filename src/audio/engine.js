@@ -16,11 +16,21 @@
 
 import { clamp, clamp01, lerp } from '../core/math.js';
 import { Radio } from './radio.js';
+import { Ambience } from './ambience.js';
 
 export class EngineAudio {
-  constructor({ volume = 0.38 } = {}) {
+  /**
+   * @param {number} [seed] the world seed, so the ambience layer can ask the worldgen where
+   *        the water and the woods are. Optional: if it is not passed the first update()
+   *        takes it off `car.terrain.seed` instead, which is the same number. That fallback
+   *        is not defensive programming for its own sake — this class is constructed in
+   *        main.js, which several people edit, and a positional mix that goes silent because
+   *        one argument got dropped in a merge would be a very quiet kind of bug to find.
+   */
+  constructor({ volume = 0.38, seed = null } = {}) {
     this.ctx = null;
     this.volume = volume;
+    this.seed = seed;
     this.enabled = true;
     this._started = false;
     this._limitSmooth = 0;
@@ -90,6 +100,9 @@ export class EngineAudio {
     noise.loop = true;
     noise.start();
     this.noise = noise;
+    // Kept so the ambience layer can run its surf off the same two seconds of noise rather
+    // than generating and holding a second copy.
+    this._noiseBuf = buf;
 
     this.windFilter = ctx.createBiquadFilter();
     this.windFilter.type = 'bandpass';
@@ -119,6 +132,22 @@ export class EngineAudio {
     /* The radio. Generative and original — no recording is bundled, so there is no licence
      * riding along with the game. Starts off; the player turns it on. */
     this.radio = new Radio(ctx, master);
+  }
+
+  /**
+   * Build the positional ambience graph. Called from update(), not from start(), for one
+   * reason: it needs the world seed and start() runs inside a raw DOM event that knows
+   * nothing about the game. It runs EXACTLY ONCE — the `this.ambience` guard is the whole
+   * mechanism, and `_ambienceBuilds` exists so a test can assert it rather than believe it.
+   */
+  _ensureAmbience(car) {
+    if (this.ambience || !this._noiseBuf) return;
+    const seed = this.seed ?? car?.terrain?.seed;
+    if (seed === undefined || seed === null) return;
+    // Hangs off `master`, so setVolume() and any future mute already own it and there is no
+    // second volume control to keep in step.
+    this.ambience = new Ambience(this.ctx, this.master, this._noiseBuf, seed);
+    this._ambienceBuilds = (this._ambienceBuilds || 0) + 1;
   }
 
   /** @param {Vehicle} car */
@@ -174,6 +203,12 @@ export class EngineAudio {
       const calm = clamp01(1 - Math.max(car.limit, Math.abs(car.slip) / 0.5) * 1.2);
       this.radio.update(dt, calm);
     }
+
+    /* The place, as opposed to the car: surf near water, birds near trees. It is told
+     * whether a station is playing so it can get out of the way of it — see duckFor() in
+     * audio/ambience.js. */
+    this._ensureAmbience(car);
+    if (this.ambience) this.ambience.update(dt, car, this.radio ? this.radio.on : false);
   }
 
   /** Cycle the station. Returns its label for the HUD. */

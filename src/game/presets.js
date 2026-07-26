@@ -10,6 +10,7 @@
 
 import { STEER, PRESETS as ASSIST_PRESETS, CAMERA, TYRE } from '../car/tuning.js';
 import { BIOME_TERRAIN } from '../world/biomes.js';
+import { setLandmarkScale } from '../world/landmarks.js';
 
 /* ── how the car feels ────────────────────────────────────────────────────
  *  comfortG   lateral acceleration at full stick. THE number for darty vs planted.
@@ -89,15 +90,27 @@ export const FEELS = {
 
 /* ── what the land looks like ─────────────────────────────────────────────
  * Each entry scales the five biomes' relief. The reference is the Hoshi-no-Tani pen: soft,
- * readable, nothing vertical. `amp` scales height, `wave` scales the wavelength — raising
- * wave at constant amp is the single knob that makes terrain gentler without making it flat.
+ * readable, nothing vertical.
+ *
+ *   amp   scales biome relief height
+ *   wave  scales biome relief wavelength — raising wave at constant amp is the single knob
+ *         that makes terrain gentler without making it flat
+ *   peak  scales the massif layer in world/landmarks.js: the mountains on the horizon, the
+ *         thing you drive TOWARDS. This is a separate knob from `amp` because the two do
+ *         different jobs — `amp` is what the road undulates over, `peak` is the skyline. A
+ *         preset that turns one down does not have to turn the other down.
+ *
+ * `amp` is no longer the whole story of how dramatic a preset is; the octave stack in
+ * biomes.js is. Turning `amp` up here scales every octave together, which is the expensive
+ * way to buy relief — keep these multipliers near 1 and change the biome table instead.
  */
 export const TERRAINS = {
   meadow: {
     label: 'Meadow',
     blurb: 'The pen’s own valley. Soft rolling hills, wide sightlines, nothing you cannot drive over.',
-    amp: 0.8,
-    wave: 1.25,
+    amp: 0.95,
+    wave: 1.12,
+    peak: 1.0,
     bias: [2.2, 1.0, 0.35, 0.3, 0.8],
   },
   rolling: {
@@ -105,20 +118,23 @@ export const TERRAINS = {
     blurb: 'The default mix. Meadow and steppe with hills and the occasional mountain on the horizon.',
     amp: 1.0,
     wave: 1.0,
+    peak: 1.0,
     bias: [1, 1, 1, 1, 1],
   },
   alpine: {
     label: 'Alpine',
     blurb: 'Mountains close in. Switchbacks, cuttings and long climbs — the most dramatic and the least forgiving.',
-    amp: 1.35,
-    wave: 0.9,
+    amp: 1.12,
+    wave: 0.97,
+    peak: 1.7,
     bias: [0.6, 0.5, 3.0, 0.2, 0.5],
   },
   plains: {
     label: 'Plains',
     blurb: 'Almost flat. Kilometres of straight road under a huge sky — the best place to feel top speed.',
-    amp: 0.45,
-    wave: 1.6,
+    amp: 0.9,
+    wave: 1.18,
+    peak: 0.78,
     bias: [0.8, 3.0, 0.15, 1.2, 0.7],
   },
   dunes: {
@@ -126,13 +142,15 @@ export const TERRAINS = {
     blurb: 'Rose and ochre sand sea. Loose grip, long crests, the road half-buried.',
     amp: 0.9,
     wave: 1.1,
+    peak: 0.8,
     bias: [0.3, 0.9, 0.2, 3.5, 0.2],
   },
   marsh: {
     label: 'Wetland',
     blurb: 'Flooded reed flats under standing mist. Dead flat, causeways and mirrors.',
-    amp: 0.7,
-    wave: 1.2,
+    amp: 0.75,
+    wave: 1.15,
+    peak: 0.75,
     bias: [0.7, 0.3, 0.2, 0.1, 3.5],
   },
 };
@@ -156,9 +174,17 @@ export function applyTerrain(name) {
   }
   const base = BIOME_TERRAIN.__base;
   for (let i = 0; i < BIOME_TERRAIN.length; i++) {
-    BIOME_TERRAIN[i].amp = base[i].amp * t.amp * (t.bias[i] > 1 ? 1 : 1);
+    // `* (t.bias[i] > 1 ? 1 : 1)` used to sit on this line. It multiplies by one either way;
+    // it was a per-biome amplitude bias that was never finished, and leaving it there made
+    // it look as though the bias affected height when it only ever affected biome share.
+    BIOME_TERRAIN[i].amp = base[i].amp * t.amp;
     BIOME_TERRAIN[i].wave = base[i].wave * t.wave;
   }
+  // The massifs are a separate layer with its own module-level state, and like the biome
+  // table it has to be re-applied inside the chunk worker — the worker has its own module
+  // graph and never sees a mutation the main thread made. chunkWorker.js calls applyTerrain
+  // per job, so putting it here is what makes it reach the screen.
+  setLandmarkScale(t.peak ?? 1);
   return t;
 }
 

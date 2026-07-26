@@ -39,6 +39,7 @@ import { U, sharedUniforms } from './uniforms.js';
 import { TAU, clamp, lerp, hash2i, rng } from '../core/math.js';
 import { noise2 } from '../core/noise.js';
 import { scatterChunk, scatterBudget, SCATTER_MAX_LEVEL } from '../world/scatter.js';
+import { Flowers } from './flowers.js';
 
 /* ── the shared block does not own the wind yet ──────────────────────────────
  * `GL_UNI` has uWindTex / uWindOrigin but no mean-wind vector and no render-target span,
@@ -690,6 +691,12 @@ const MAX_CHUNKS = 512;
  * One InstancedMesh per (species, LOD). Instances are packed into a dense array per batch
  * with one contiguous block per chunk, so adding a chunk is an append and removing one is a
  * single copyWithin — no free lists, no holes, no per-instance bookkeeping in the draw path.
+ *
+ * Flowers and ground cover ride along in here rather than hanging off the streamer
+ * themselves (render/flowers.js does the drawing). They come out of the SAME scatter pass on
+ * the same chunk lifecycle, so giving them their own streamer hook would mean a second
+ * `scatterChunk` call for every chunk in the world — the single most expensive thing this
+ * module does — to place plants that are already sitting in `props.flowers`.
  */
 export class Flora {
   /**
@@ -699,8 +706,9 @@ export class Flora {
    * @param {number} [opts.quality] 1 = full. Below 0.75 drops every batch one LOD.
    * @param {number} [opts.cullDistance] metres; whole chunks drop out beyond this
    * @param {boolean} [opts.bushes] render the scatter's `bushes` list as scrub instances
+   * @param {boolean} [opts.flowers] render the scatter's `flowers` list as beds and cover
    */
-  constructor({ seed, scene, quality = 1, cullDistance = DEFAULT_CULL, bushes = true }) {
+  constructor({ seed, scene, quality = 1, cullDistance = DEFAULT_CULL, bushes = true, flowers = true }) {
     this.seed = seed >>> 0;
     this.scene = scene;
     this.quality = clamp(quality, 0.4, 2);
@@ -710,6 +718,7 @@ export class Flora {
     this.group = new Object3D();
     this.group.name = 'flora';
     this.group.matrixAutoUpdate = false;
+    this.flowers = flowers ? new Flowers({ seed: this.seed, parent: this.group, quality: this.quality }) : null;
 
     /** batch key `kind:detail` -> batch */
     this.batches = new Map();
@@ -730,8 +739,15 @@ export class Flora {
     return clamp(2 - level - (this.quality < 0.75 ? 1 : 0), 0, 2);
   }
 
-  /** Hook this straight onto `Streamer.onChunk`. */
-  add(rec) {
+  /**
+   * Hook this straight onto `Streamer.onChunk`.
+   *
+   * `props` is optional and is the caller's already-computed `scatterChunk` result. main.js
+   * needs one anyway to build the collision solids, and scattering the same node twice is
+   * pure duplicated work — a whole Terrain build and several hundred height samples per
+   * chunk. If it is not supplied we scatter it ourselves, so the class still stands alone.
+   */
+  add(rec, props) {
     if (rec.level > SCATTER_MAX_LEVEL) return;
     const key = `${rec.level}:${rec.cx},${rec.cz}`;
     if (this.chunks.has(key)) return;
@@ -742,6 +758,7 @@ export class Flora {
       cz: rec.cz,
       mx: rec.ox + rec.size * 0.5,
       mz: rec.oz + rec.size * 0.5,
+      props: props || null,
       groups: null,
       blocks: null,
       dead: false,
@@ -760,6 +777,7 @@ export class Flora {
     if (entry.blocks) this._detach(entry);
     this.chunks.delete(key);
     this.stats.chunks = this.chunks.size;
+    if (this.flowers) this.flowers.remove(key);
   }
 
   /**
@@ -774,6 +792,7 @@ export class Flora {
     this._drain(dt);
     this._cullPass();
     this._flush();
+    if (this.flowers) this.flowers.update(camPos);
   }
 
   /* ── turning chunks into instances ─────────────────────────────────────── */
@@ -799,7 +818,9 @@ export class Flora {
   }
 
   _scatter(entry) {
-    const props = scatterChunk({ cx: entry.cx, cz: entry.cz, level: entry.level, seed: this.seed });
+    const props =
+      entry.props || scatterChunk({ cx: entry.cx, cz: entry.cz, level: entry.level, seed: this.seed });
+    entry.props = null; // the records are copied into typed arrays below; do not hold them
     const detail = this._detailFor(entry.level);
     const groups = new Map();
 
@@ -840,6 +861,9 @@ export class Flora {
     // Bushes are knee-high: past the second LOD ring they are a single dark pixel that the
     // terrain's own break-up noise already draws, so they simply stop existing out there.
     if (this.renderBushes && entry.level <= 1) emit(props.bushes, Math.min(detail, entry.level === 0 ? 1 : 0), 0.18);
+    // Flowers keep their own ring and their own culling — they are only ever a few dozen
+    // metres of ground and they are gone long before the tree cull ring.
+    if (this.flowers) this.flowers.add(entry.key, props.flowers, entry.mx, entry.mz);
 
     entry.groups = groups;
     if (!this._hasCam || this._distance(entry) <= this.cull) this._attach(entry);
@@ -1009,6 +1033,7 @@ export class Flora {
   }
 
   dispose() {
+    if (this.flowers) this.flowers.dispose();
     for (const b of this.batches.values()) {
       this.group.remove(b.mesh);
       b.geom.dispose();

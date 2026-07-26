@@ -13,6 +13,7 @@
 import { CARS, CAR_KEYS } from '../car/loadedCar.js';
 import { TERRAINS } from '../game/presets.js';
 import { FLEET, FLEET_BY_ID, isUnlocked, cheatOn, fmtUnlock } from '../game/garage.js';
+import { mountInvite } from '../net/invite.js';
 
 const ESC = ['Escape', 'KeyM'];
 
@@ -54,6 +55,13 @@ export class Menu {
         </div>
       </div>`;
     document.body.appendChild(el);
+
+    /* How a second person joins — its own module, so the Garage knows nothing about seats or
+     * identity. Above the button row rather than on the driving screen: this is the panel the
+     * player is already reading when they wonder how any of this works. */
+    const sheet = el.querySelector('.sheet');
+    const invite = mountInvite(sheet);
+    if (invite) sheet.insertBefore(invite, sheet.querySelector('.foot'));
 
     this._fillCars();
     this._fill('terrain', Object.keys(TERRAINS).map((k) => [k, TERRAINS[k].label]));

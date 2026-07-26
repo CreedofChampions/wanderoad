@@ -48,6 +48,15 @@ export const MAT = {
   LAMP_B: 5,
   /** 6 — lamp on channel C (`uLamp.z`). Brake discs; glows from dull metal to cherry. */
   LAMP_C: 6,
+  /**
+   * 7 — coach paint: a car body panel, and the only surface in the game whose COLOUR is
+   * the subject rather than the light on it. MATTE and METAL both trade chroma for air —
+   * MATTE mixes flat sky into its mid band, METAL puts a hot rim on everything — and on a
+   * whole body shell either one reads as the paint having been watered down. This slot
+   * keeps the hue through all three bands. Bodywork only: a plaster wall painted with it
+   * would look like plastic.
+   */
+  BODY: 7,
 };
 
 /* ── colour helpers ────────────────────────────────────────────────────────────
@@ -299,7 +308,9 @@ void main(){
   vec3 shd = mix(base*0.40, K_SHADOW*0.60, 0.44);
   float rim = 0.30, ao = 1.0;
 
-  if(vM > 3.5){                             // switchable lamp, channels A/B/C
+  // Upper bound as well as lower: slot 7 sits above the lamps and would otherwise be
+  // decoded as lamp channel C and come out as a brake disc.
+  if(vM > 3.5 && vM < 6.5){                 // switchable lamp, channels A/B/C
     float ch = vM < 4.5 ? uLamp.x : (vM < 5.5 ? uLamp.y : uLamp.z);
     vec3 dead = mix(base*0.50, K_SKY_MID*0.30, 0.35);
     vec3 hot  = base*2.6 + K_SUN*0.22;
@@ -321,8 +332,35 @@ void main(){
     shd = mix(base*0.30, K_SHADOW*0.7, 0.5);
     rim = 0.62;
   }
-  if(vM > 2.5){                             // glass / dark opening
+  if(vM > 2.5 && vM < 3.5){                 // glass / dark opening
     lit = mix(base, K_SKY_MID, 0.55); mid = base*0.7; shd = base*0.42; rim = 0.75;
+  }
+  if(vM > 6.5){                             // coach paint — the body of a car
+    /* Two measured losses are being paid back here, both of them downstream of this
+     * shader and neither of them fixable downstream without regrading the whole frame
+     * (numbers from tools/diag-carpaint.mjs, which walks a body fragment through this
+     * shader, the tonemap and the grade and prints what the browser suite would read):
+     *
+     *   1. The filmic tonemap in render/post.js has a slope of ~3.8 near black and ~0.8
+     *      up at 0.8, so it lifts a paint's two dark channels far harder than it
+     *      compresses its bright one. A body colour that is 0.88 saturated in linear
+     *      comes out of the composite at 0.42. Pushing the base away from its own
+     *      luminance BEFORE the ramp is the only place that is recoverable, because
+     *      everything after this point is shared with the sky and the grass.
+     *   2. MATTE mixes 16% flat sky ambient into its mid band and 44% flat shadow tint
+     *      into its shade band. On plaster and thatch that reads as air. Across a whole
+     *      body shell it reads as the paint going grey — and on the dark chips the
+     *      shadow tint simply wins, which is why an ink car and a verdigris car used to
+     *      arrive at the same blue.
+     *
+     * Deliberately NOT metal's ramp: rim 0.62 puts a hot sun edge on every panel, which
+     * is what bleached the shell when the body was drawn as METAL. 0.34 is a sheen. */
+    float bl = dot(base, vec3(0.2126,0.7152,0.0722));
+    vec3 deep = max(base + (base - vec3(bl))*0.30, vec3(0.0));
+    lit = deep*1.18;
+    mid = deep*0.74;
+    shd = mix(deep*0.34, K_SHADOW*0.44, 0.22);
+    rim = 0.34;
   }
 
   float ndl = dot(N,uSunDir);

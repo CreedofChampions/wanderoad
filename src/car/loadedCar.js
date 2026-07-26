@@ -13,7 +13,7 @@
  * wheels, which is survivable, whereas guessing by bounding box is not.
  */
 
-import { Group, Vector3, Box3, BufferAttribute } from 'three';
+import { Group, Vector3, Box3, BufferAttribute, Color } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { createPaintedMaterial, MAT } from '../render/painted.js';
 import { RGB, P } from '../core/palette.js';
@@ -28,38 +28,63 @@ export const CARS = Object.fromEntries(
 
 export const CAR_KEYS = FLEET.map((c) => c.id);
 
-/* Body colours, in the game's own palette rather than the model's. The model's baseColor is
- * ignored entirely for body panels — that is the point of re-materialling. */
-export const BODY_PAINTS = [
-  P.paintA, P.paintB, P.paintC, P.paintD, P.paintE, P.paintF,
-];
-
-/**
- * Material name -> how this game should paint it.
- * `mat` is the painted pipeline's material index: MATTE for panels and rubber, METAL for
- * chrome and glass, EMIT for anything that is a light.
+/* ── colour space: the one thing that made every car look washed out ───────────
+ *
+ * The painted shader reads `vcol` as a LINEAR colour and works in linear all the way to the
+ * tonemap in render/post.js. Every other painted object in the game — the props, the
+ * fences, the hand-built car in model.js — takes its colour from core/palette.js's RGB
+ * table, which is where the game's linear values are defined.
+ *
+ * This module used to skip that table and do `parseInt(hex, 16) / 255` instead: the raw
+ * sRGB byte, handed straight to a linear shader. For persimmon that is (0.784, 0.314,
+ * 0.247) where the palette says (0.293, 0.007, 0.004) — the two dark channels arrive 44x
+ * and 63x too strong. A red car whose green and blue are nearly as strong as its red is
+ * exactly the "almost transparent, as if the colour is not added properly" the operator
+ * saw, and it measured as 0.11-0.30 peak saturation on screen where the same paint through
+ * the palette measures 0.62-0.67 (tools/diag-carpaint.mjs).
+ *
+ * So: palette keys, not hex, everywhere below. The one colour that is not in the palette
+ * (a police light) goes through paletteLinear(), which is the same expression palette.js
+ * itself uses — matching the palette is what matters, not what the conversion is called.
  */
-function classify(name, paintHex) {
-  const n = (name || '').toLowerCase();
-  if (n.includes('window') || n.includes('glass')) return { col: P.glass, mat: MAT.METAL };
-  if (n.includes('headlight')) return { col: P.head, mat: MAT.EMIT };
-  if (n.includes('taillight') || n.includes('brakelight')) return { col: P.tail, mat: MAT.EMIT };
-  if (n.includes('whitelight')) return { col: P.head, mat: MAT.EMIT };
-  if (n.includes('bluelight')) return { col: '#5A8BD6', mat: MAT.EMIT };
-  if (n.includes('black')) return { col: P.tyre, mat: MAT.MATTE };
-  if (n.includes('grey') || n.includes('gray') || n.includes('chrome') || n.includes('metal'))
-    return { col: P.chrome, mat: MAT.METAL };
-  if (n.includes('rust')) return { col: P.trunkShade, mat: MAT.MATTE };
-  // Everything else is bodywork, and bodywork is whatever colour the player picked.
-  // MATTE, not METAL: the painted pipeline's metal ramp has tight bands and a hot rim, which
-  // on a whole car body blows the colour out to a pale wash. Metal is for the chrome.
-  return { col: paintHex, mat: MAT.MATTE };
+const paletteLinear = (hex) => { const c = new Color(hex).convertSRGBToLinear(); return [c.r, c.g, c.b]; };
+
+/* Body colours, in the game's own palette rather than the model's. The model's baseColor is
+ * ignored entirely for body panels — that is the point of re-materialling. Hex, because
+ * this list is also what a colour swatch would be drawn with; the mesh path uses
+ * bodyPaintLinear() so the two can never drift apart. */
+const PAINT_KEYS = ['paintA', 'paintB', 'paintC', 'paintD', 'paintE', 'paintF'];
+export const BODY_PAINTS = PAINT_KEYS.map((k) => P[k]);
+
+/** The linear triple the shader actually gets for paint chip `i`, wrapping. This hands back
+ *  palette.js's own array, like painted.js's LC(): read it, never write it. */
+export function bodyPaintLinear(i) {
+  const n = PAINT_KEYS.length;
+  return RGB[PAINT_KEYS[(((i | 0) % n) + n) % n]];
 }
 
-const hexToRgb = (hex) => {
-  const h = hex.replace('#', '');
-  return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255];
-};
+/**
+ * Material name -> how this game should paint it. `col` is a LINEAR rgb triple.
+ * `mat` is the painted pipeline's material index: BODY for the shell, MATTE for rubber,
+ * METAL for chrome and glass, EMIT for anything that is a light.
+ */
+function classify(name, paintCol) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('window') || n.includes('glass')) return { col: RGB.glass, mat: MAT.METAL };
+  if (n.includes('headlight')) return { col: RGB.head, mat: MAT.EMIT };
+  if (n.includes('taillight') || n.includes('brakelight')) return { col: RGB.tail, mat: MAT.EMIT };
+  if (n.includes('whitelight')) return { col: RGB.head, mat: MAT.EMIT };
+  if (n.includes('bluelight')) return { col: paletteLinear('#5A8BD6'), mat: MAT.EMIT };
+  if (n.includes('black')) return { col: RGB.tyre, mat: MAT.MATTE };
+  if (n.includes('grey') || n.includes('gray') || n.includes('chrome') || n.includes('metal'))
+    return { col: RGB.chrome, mat: MAT.METAL };
+  if (n.includes('rust')) return { col: RGB.trunkShade, mat: MAT.MATTE };
+  // Everything else is bodywork, and bodywork is whatever colour the player picked.
+  // MAT.BODY: neither MATTE nor METAL was right for a whole shell — MATTE mixes flat sky
+  // into its mid band and flat shadow tint into its shade band until the paint reads grey,
+  // METAL puts a hot sun rim on every panel and bleaches it. See painted.js MAT.BODY.
+  return { col: paintCol, mat: MAT.BODY };
+}
 
 let _loader = null;
 const _cache = new Map();
@@ -89,7 +114,7 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
   const gltf = await loadGLB(base + spec.file);
   const src = gltf.scene.clone(true);
 
-  const paintHex = BODY_PAINTS[paint % BODY_PAINTS.length];
+  const paintCol = bodyPaintLinear(paint);
   const material = createPaintedMaterial(ghost ? { ghost: true, opacity: 0.85 } : {});
 
   /* ── re-material ────────────────────────────────────────────────────────
@@ -100,8 +125,7 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
   src.traverse((o) => {
     if (!o.isMesh) return;
     const srcMat = Array.isArray(o.material) ? o.material[0] : o.material;
-    const { col, mat } = classify(srcMat && srcMat.name, paintHex);
-    const rgb = hexToRgb(col);
+    const { col: rgb, mat } = classify(srcMat && srcMat.name, paintCol);
     const g = o.geometry;
     const n = g.attributes.position.count;
     const colArr = new Float32Array(n * 3);

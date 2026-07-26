@@ -21,6 +21,7 @@ import { BufferGeometry, BufferAttribute, Mesh, RawShaderMaterial, DoubleSide, V
 import { vertHead, fragHead } from '../core/glsl.js';
 import { sharedUniforms } from './uniforms.js';
 import { clamp01, lerp } from '../core/math.js';
+import { FLEET } from '../game/garage.js';
 
 /** Metres of streak before the trail appears at all. */
 const START_AT = 100;
@@ -28,6 +29,11 @@ const START_AT = 100;
 const LINKS = 56;
 /** Metres between links when the rope is fully paid out. */
 const SPACING = 1.35;
+/* The rope reaches its deepest blue at the last car in the fleet — the Patrol, at 100 km.
+ * This was an arbitrary 60 km before, which meant the trail said "you have arrived" while the
+ * bar on the glass still had forty kilometres to go. Two readouts of the same streak that
+ * disagree is worse than one readout. Read from the fleet so it cannot drift again. */
+const DEEPEST_AT = Math.max(...FLEET.map((c) => c.unlockAt)) || 100000;
 
 const TRAIL_VS = /* glsl */ `
 in float aT;      // 0 at the car, 1 at the tail
@@ -144,7 +150,10 @@ export class StreakTrail {
     // Break detection: the streak was long, and now it is not.
     if (this._prevDistance > START_AT && distance < this._prevDistance * 0.5) this.breakFlash = 1;
     this._prevDistance = distance;
-    this.breakFlash = Math.max(0, this.breakFlash - dt * 1.6);
+    /* Decay over ~1.1 s rather than the old 0.6 s, so the red outlasts the reel-in (alive
+     * falls at 0.9/s) instead of going out while the rope is still on screen. A blip you can
+     * miss by blinking is a blip that did not happen. */
+    this.breakFlash = Math.max(0, this.breakFlash - dt * 0.9);
 
     const wants = distance > START_AT;
     this.alive = wants ? Math.min(1, this.alive + dt * 2.2) : Math.max(0, this.alive - dt * 0.9);
@@ -153,7 +162,7 @@ export class StreakTrail {
     const payout = clamp01((distance - START_AT) / 900);
     // Depth of blue on a log curve, so the first kilometre is a visible change and the tenth
     // is a subtle one. Exponentially harder to move, exactly as asked.
-    this.depth = clamp01(Math.log10(1 + distance / 220) / Math.log10(1 + 60000 / 220));
+    this.depth = clamp01(Math.log10(1 + distance / 220) / Math.log10(1 + DEEPEST_AT / 220));
 
     this.material.uniforms.uAlive.value = this.alive;
     this.material.uniforms.uDepth.value = this.depth;

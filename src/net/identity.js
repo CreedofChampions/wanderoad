@@ -182,107 +182,179 @@ export function cleanName(raw) {
   return out.replace(/\s+/g, ' ').trim().slice(0, 18) || 'Wanderer';
 }
 
-/* ── public API ────────────────────────────────────────────────────────────*/
-
-let _secret = null;
-let _id = null;
-
-/** The 64-hex secret. Created on first call and persisted. Only ever leaves in a POST body. */
-/* TWO WINDOWS ON ONE MACHINE WERE THE SAME PLAYER.
+/* ── seats: two players on one machine ─────────────────────────────────────
+ * TWO WINDOWS ON ONE MACHINE WERE THE SAME PLAYER.
  * Identity is a secret in localStorage, and localStorage is shared by every tab of a profile.
  * So opening the game twice produced one playerId, the server excluded it from its own peer
  * list as "self", and neither window ever saw the other — reported as "2 cars in same place
  * don't see each other". It is correct behaviour for one person in two tabs; it is useless
  * for testing multiplayer, and it is wrong for two people sharing a computer.
  *
- * `?seat=2` (any value) forks the identity: a separate secret, a separate player, everything
- * else unchanged. It is how you test multiplayer with two windows, and how a second person on
- * the same machine gets to be themselves. */
-function seatSuffix() {
+ * `?seat=2` forks the identity: a separate secret, so a separate player, a separate default
+ * name and paint, and nothing else changed. src/net/invite.js hands the link out from the
+ * Garage; docs/MULTIPLAYER.md is the long version.
+ *
+ * This used to be a `seatSuffix()` that nothing ever called — the storage keys below were
+ * read unsuffixed, so `?seat=2` was a documented parameter that did nothing at all. The
+ * suffix now has exactly one way in: it is baked into an identity when the identity is made.
+ */
+
+/** '' for the default player, '.seat2' for seat 2. Sanitised — it becomes a storage key. */
+function seatSuffix(seat) {
+  const s = String(seat ?? '').replace(/[^a-z0-9]/gi, '').slice(0, 8);
+  // Seat 1 IS the default driver, so `?seat=1` has to be the player you already are. The
+  // panel calls the unseated window "seat 1"; if that link then handed out a third identity
+  // with no name, no paint and no streak, the numbering would be a lie.
+  if (s === '' || s === '1') return '';
+  return `.seat${s}`;
+}
+
+/**
+ * The seat this window was opened at, '' for the normal one. A bare `?seat` with no value
+ * counts as seat 2: someone typing the parameter from memory wants a second player, and
+ * silently handing them the first one is the precise bug this exists to fix.
+ * Returns '' under Node, where there is no location.
+ */
+export function seatFromUrl() {
   try {
-    const seat = new URLSearchParams(location.search).get('seat');
-    return seat ? '.seat' + String(seat).replace(/[^a-z0-9]/gi, '').slice(0, 8) : '';
+    const params = new URLSearchParams(globalThis.location.search);
+    if (!params.has('seat')) return '';
+    return params.get('seat') || '2';
   } catch {
     return '';
   }
 }
 
-export function getSecret() {
-  if (_secret) return _secret;
-  let s = readStore(SECRET_KEY);
-  if (typeof s !== 'string' || !/^[0-9a-f]{64}$/.test(s)) {
-    s = freshSecret();
-    writeStore(SECRET_KEY, s);
-  }
-  _secret = s;
-  return s;
-}
+/* ── public API ────────────────────────────────────────────────────────────*/
 
-/** 12 hex characters — 48 bits, plenty for a game that tops out at a few thousand cars. */
-export function getPlayerId() {
-  if (_id) return _id;
-  _id = sha256Hex(getSecret()).slice(0, 12);
-  return _id;
-}
+/**
+ * One player, backed by three storage keys. A factory rather than three module-level
+ * variables because two independent players have to be able to coexist in one process:
+ * `?seat=2` needs it in the browser, and tools/net-test.mjs needs two of them in one Node
+ * run to prove that two clients actually see each other.
+ *
+ * @param {string} [seat] '' for the default player, e.g. '2' for a second one
+ */
+export function createIdentity(seat = '') {
+  const suffix = seatSuffix(seat);
+  const secretKey = SECRET_KEY + suffix;
+  const nameKey = NAME_KEY + suffix;
+  const lookKey = LOOK_KEY + suffix;
 
-export function getName() {
-  const stored = readStore(NAME_KEY);
-  return stored ? cleanName(stored) : nameFromId(getPlayerId());
-}
+  let secret = null;
+  let id = null;
 
-export function setName(raw) {
-  const n = cleanName(raw);
-  writeStore(NAME_KEY, n);
-  return n;
-}
-
-/** Car appearance. `tier` is the vehicle class index, `paint` the colourway index. */
-export function getLook() {
-  const raw = readStore(LOOK_KEY);
-  if (raw) {
-    try {
-      const o = JSON.parse(raw);
-      return { tier: o.tier | 0, paint: o.paint | 0 };
-    } catch {
-      /* corrupt entry — fall through and re-derive */
+  /** The 64-hex secret. Created on first call and persisted. Only ever leaves in a POST body. */
+  function getSecret() {
+    if (secret) return secret;
+    let s = readStore(secretKey);
+    if (typeof s !== 'string' || !/^[0-9a-f]{64}$/.test(s)) {
+      s = freshSecret();
+      writeStore(secretKey, s);
     }
+    secret = s;
+    return s;
   }
-  // Seeded from the id so a fresh player is not always car 0 in colour 0.
-  return { tier: 0, paint: parseInt(getPlayerId().slice(9, 12), 16) % 8 };
-}
 
-export function setLook(patch = {}) {
-  const cur = getLook();
-  const next = {
-    tier: patch.tier === undefined ? cur.tier : patch.tier | 0,
-    paint: patch.paint === undefined ? cur.paint : patch.paint | 0,
-  };
-  writeStore(LOOK_KEY, JSON.stringify(next));
-  return next;
-}
+  /** 12 hex characters — 48 bits, plenty for a game that tops out at a few thousand cars. */
+  function getPlayerId() {
+    if (id) return id;
+    id = sha256Hex(getSecret()).slice(0, 12);
+    return id;
+  }
 
-/** Everything the transport needs, in one object. Cheap enough to call per tick. */
-export function identity() {
-  const look = getLook();
+  function getName() {
+    const stored = readStore(nameKey);
+    return stored ? cleanName(stored) : nameFromId(getPlayerId());
+  }
+
+  function setName(raw) {
+    const n = cleanName(raw);
+    writeStore(nameKey, n);
+    return n;
+  }
+
+  /** Car appearance. `tier` is the vehicle class index, `paint` the colourway index. */
+  function getLook() {
+    const raw = readStore(lookKey);
+    if (raw) {
+      try {
+        const o = JSON.parse(raw);
+        return { tier: o.tier | 0, paint: o.paint | 0 };
+      } catch {
+        /* corrupt entry — fall through and re-derive */
+      }
+    }
+    // Seeded from the id so a fresh player is not always car 0 in colour 0.
+    return { tier: 0, paint: parseInt(getPlayerId().slice(9, 12), 16) % 8 };
+  }
+
+  function setLook(patch = {}) {
+    const cur = getLook();
+    const next = {
+      tier: patch.tier === undefined ? cur.tier : patch.tier | 0,
+      paint: patch.paint === undefined ? cur.paint : patch.paint | 0,
+    };
+    writeStore(lookKey, JSON.stringify(next));
+    return next;
+  }
+
+  /** Everything the transport needs, in one object. Cheap enough to call per tick. */
+  function snapshot() {
+    const look = getLook();
+    return {
+      secret: getSecret(),
+      playerId: getPlayerId(),
+      name: getName(),
+      seat: String(seat ?? ''),
+      // `look` as well as the flat pair because main.js reads `identity().look?.paint` — and
+      // read it against the old flat-only shape, so it was undefined and every car in the
+      // game, local and on the wire, was paint 0. Two cars meeting in the same place being
+      // the same colour is a multiplayer bug, not a cosmetic one. Both indices wrap in
+      // model.js and loadedCar.js, so no value here can be out of range.
+      look,
+      tier: look.tier,
+      paint: look.paint,
+    };
+  }
+
+  /** Burn this identity and come back as someone else. Behind the "new driver" button. */
+  function reset() {
+    secret = null;
+    id = null;
+    writeStore(secretKey, freshSecret());
+    memory.delete(nameKey);
+    try {
+      globalThis.localStorage?.removeItem(nameKey);
+    } catch {
+      /* nothing to remove */
+    }
+    return snapshot();
+  }
+
   return {
-    secret: getSecret(),
-    playerId: getPlayerId(),
-    name: getName(),
-    tier: look.tier,
-    paint: look.paint,
+    seat: String(seat ?? ''),
+    getSecret,
+    getPlayerId,
+    getName,
+    setName,
+    getLook,
+    setLook,
+    identity: snapshot,
+    reset,
   };
 }
 
-/** Burn the identity and come back as someone else. Behind the "new driver" button. */
-export function resetIdentity() {
-  _secret = null;
-  _id = null;
-  writeStore(SECRET_KEY, freshSecret());
-  memory.delete(NAME_KEY);
-  try {
-    globalThis.localStorage?.removeItem(NAME_KEY);
-  } catch {
-    /* nothing to remove */
-  }
-  return identity();
-}
+/** The player driving THIS window. `?seat=2` makes it a different one. */
+const self = createIdentity(seatFromUrl());
+
+export const getSecret = () => self.getSecret();
+export const getPlayerId = () => self.getPlayerId();
+export const getName = () => self.getName();
+export const setName = (raw) => self.setName(raw);
+export const getLook = () => self.getLook();
+export const setLook = (patch) => self.setLook(patch);
+export const identity = () => self.identity();
+export const resetIdentity = () => self.reset();
+/** '' in a normal tab, '2' in a `?seat=2` one. The Garage prints it so the seat is visible. */
+export const currentSeat = () => self.seat;

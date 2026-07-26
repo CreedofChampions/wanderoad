@@ -158,36 +158,91 @@ export function biomeWeightsFromClimate(u, out = _w) {
  * Each biome contributes a height offset and an amplitude. The final height is the
  * weighted sum, which is why a meadow/highland border is a foothill and not a cliff.
  *
- *  amp      metres of relief the biome adds
+ *  amp      metres of relief the biome adds, carried almost entirely by the FIRST octave
  *  base     metres the biome shifts the ground up or down. Keep the spread between biomes
  *           SMALL: a base difference is a step that appears wherever the biome mix changes
  *           quickly, and it is the one source of steep ground that is not a road embankment.
  *           Height differences belong in `amp`, which is spread over a wavelength.
- *  rough    how much ridged (sharp) vs fbm (soft) noise it uses, 0..1
+ *  rough    DEAD. Documented as "how much ridged vs fbm noise it uses", read by nothing —
+ *           grep `.rough` and the only hits are BIOME_ROAD's, which is a different field.
+ *           Each biome hard-codes its own ridged/fbm mix in biomeRelief below. Left in place
+ *           rather than deleted because that is a behaviour change dressed as a tidy-up, but
+ *           do not tune it expecting anything to happen.
  *  wave     the dominant wavelength of its relief, in metres
+ *  gain     per-octave persistence. THE number that decides how much slope a metre of
+ *           relief costs — see the block below.
+ *  lac      per-octave frequency step
  *  drive    how much the biome flattens under a road. This is 1.0 everywhere and should
  *           stay there: the road MESH is laid at the smoothed spline elevation, so any
  *           biome that only part-grades leaves the carved ground and the ribbon at
  *           different heights — the ground pokes through the tarmac in cuttings and the
  *           tarmac floats over it on embankments.
  */
-/* The amplitude-to-wavelength ratio IS the slope. The first playable build used ratios up
- * to 0.30 (340 m of relief over a 1150 m wavelength, compounded over six octaves) and the
- * result was a world of cliffs a car could not drive on and a player who said, correctly,
- * that it was "not smooth enough". These are the tuned-down numbers: gentle rolling hills
- * near the ground the player actually drives on, with drama kept for the mountains you look
- * at rather than the ones you climb. The reference is the Hoshi-no-Tani valley — soft,
- * readable landforms, nothing vertical.
+/* WHY THESE AMPLITUDES ARE LARGE AND THE WORLD IS STILL NOT STEEP.
  *
- * Water is shallow everywhere for the same reason: a river you cannot cross is a wall, and
- * the player reported exactly that. Nothing here floods deeper than 2.5 m. */
+ * Two failed rounds are baked into these numbers, in opposite directions.
+ *
+ * Round one shipped ratios up to 0.30 (340 m of relief over a 1150 m wavelength at gain 0.5,
+ * six octaves) and produced cliffs a car could not drive on. Round two over-corrected into a
+ * flatline, and the fix for THAT — scale every amplitude 1.7x and take the wavelength up in
+ * step, so amplitude-over-wavelength stays put — took ground over 45° from 0.027% to 2.77%
+ * and was reverted. The reasoning was wrong, and it is worth writing down exactly why,
+ * because it is not obvious:
+ *
+ *   Relief inside a window is set by the BASE octave.       relief ≈ 0.72 · L · amp/wave
+ *   Slope is set by the SUM over every octave.              slope  ≈ K · amp/wave · Σ(gain·lac)ⁱ
+ *
+ * At the old gain 0.5 / lacunarity 2.0, gain·lac = 1.0: every octave adds exactly as much
+ * gradient as the one below it. Six octaves therefore cost SIX times the base slope while
+ * adding about 15% to the height. Scaling the whole stack scales the useless part hardest.
+ *
+ * So the stack is reshaped instead. gain 0.26–0.30 against lacunarity 2.2–2.3 puts gain·lac
+ * near 0.65, the octave sum falls from ~5.2 to ~2.4, and the base octave is left carrying
+ * the height on its own. That buys a 4x amplitude at roughly the SAME total gradient — the
+ * land finally has shape, and it has it in the long wavelengths a car reads as landscape
+ * rather than the short ones it reads as a kerb.
+ *
+ * The other half of the drama lives in world/landmarks.js, which owns everything above
+ * 2 km. Do not try to make a mountain out of a fractal amplitude; make it out of a shape
+ * whose gradient you can write down.
+ *
+ * Water is still shallow everywhere: a river you cannot cross is a wall, and the player
+ * reported exactly that. Nothing here floods deeper than 2.5 m. */
 export const BIOME_TERRAIN = [
-  { amp: 30, base: 6, rough: 0.18, wave: 460, drive: 1.0, water: 1.2 }, // MEADOW
-  { amp: 18, base: 3, rough: 0.1, wave: 900, drive: 1.0, water: 0.0 }, // STEPPE
-  { amp: 178, base: 14, rough: 0.86, wave: 1600, drive: 1.0, water: 0.6 }, // HIGHLAND
-  { amp: 26, base: 2, rough: 0.02, wave: 430, drive: 1.0, water: 0.0 }, // DUNES
-  { amp: 7, base: -2, rough: 0.05, wave: 700, drive: 1.0, water: 2.5 }, // WETLAND
+  { amp: 108, base: 6, rough: 0.18, wave: 1000, gain: 0.3, lac: 2.3, drive: 1.0, water: 1.2 }, // MEADOW
+  { amp: 62, base: 3, rough: 0.1, wave: 1550, gain: 0.28, lac: 2.3, drive: 1.0, water: 0.0 }, // STEPPE
+  { amp: 205, base: 14, rough: 0.86, wave: 2150, gain: 0.26, lac: 2.3, drive: 1.0, water: 0.6 }, // HIGHLAND
+  { amp: 62, base: 2, rough: 0.02, wave: 900, gain: 0.3, lac: 2.2, drive: 1.0, water: 0.0 }, // DUNES
+  { amp: 26, base: -2, rough: 0.05, wave: 1100, gain: 0.28, lac: 2.2, drive: 1.0, water: 2.5 }, // WETLAND
 ];
+
+/* Domain-warped fbm with the octave stack under our control. core/noise.js's warpedFbm2
+ * hard-codes gain 0.5 / lacunarity 2.03, which is exactly the setting the block above says
+ * is expensive; the warp itself is worth keeping, so it is rebuilt here rather than the
+ * shared helper being changed under everyone else. The warp field stays at 2 cheap octaves —
+ * it displaces the lookup, it does not contribute height, so its own roughness is free. */
+function warped(x, y, oct, seed, warp, lac, gain) {
+  const qx = fbm2(x + 5.2, y + 1.3, 2, seed + 101, 2.03, 0.5);
+  const qy = fbm2(x + 9.7, y + 4.1, 2, seed + 227, 2.03, 0.5);
+  return fbm2(x + warp * qx, y + warp * qy, oct, seed, lac, gain);
+}
+
+/**
+ * Hills rise more than hollows sink.
+ *
+ * The relief amplitudes above are four times what they were, and a symmetric field would put
+ * four times as much ground UNDER the water line — water sits at a fixed world Y, so making
+ * the land taller also makes it wetter, and the world would have drowned. Compressing the
+ * downswing keeps the fraction of flooded ground roughly where it was without touching
+ * `base`, which cannot be raised: a base difference is a step wherever the biome mix
+ * changes, and steps are the one thing this file must not produce.
+ *
+ * The blend band is wide on purpose. `n < 0 ? n*k : n` is continuous in height but NOT in
+ * slope, and the eye finds that crease along the entire zero contour of the noise.
+ */
+function rises(n, sink) {
+  return n * lerp(sink, 1, smoothstep(-0.4, 0.4, n));
+}
 
 /**
  * Biome-specific relief. Called by world/terrain.js with the already-computed weights so
@@ -198,16 +253,20 @@ export function biomeRelief(x, z, seed, i) {
   const s = 1 / b.wave;
   switch (i) {
     case BIOME.MEADOW: {
-      // Soft rolling hills with a hint of ridge for the enclosing valley walls.
-      const soft = warpedFbm2(x * s, z * s, 5, seed ^ 0xa11, 0.55);
-      const ridge = ridged(x * s * 0.6, z * s * 0.6, 3, seed ^ 0xa12, 2.0, 0.4);
-      return b.base + (soft * 0.82 + ridge * 0.18) * b.amp;
+      // Soft rolling hills with a hint of ridge for the enclosing valley walls. Five octaves
+      // still, but at gain 0.3 the top three together are under 5% of the height — they are
+      // there so a hillside is not glassy, not to shape it.
+      const soft = warped(x * s, z * s, 5, seed ^ 0xa11, 0.55, b.lac, b.gain);
+      const ridge = ridged(x * s * 0.55, z * s * 0.55, 3, seed ^ 0xa12, 2.1, 0.3);
+      return b.base + rises(soft * 0.86 + ridge * 0.14, 0.44) * b.amp;
     }
     case BIOME.STEPPE: {
-      // Long low swells. Wide-open, so the relief has to be gentle or it reads as clutter.
-      const soft = fbm2(x * s, z * s, 4, seed ^ 0xb21, 2.0, 0.42);
-      const sweep = noise2(x * s * 0.35, z * s * 0.35, seed ^ 0xb22);
-      return b.base + (soft * 0.55 + sweep * 0.45) * b.amp;
+      // Long low swells. Wide-open, so the relief has to be gentle or it reads as clutter —
+      // the whole amplitude sits on a 1.5 km wavelength, which at this gradient is a swell
+      // you notice only when the road crests it.
+      const soft = fbm2(x * s, z * s, 4, seed ^ 0xb21, b.lac, b.gain);
+      const sweep = noise2(x * s * 0.34, z * s * 0.34, seed ^ 0xb22);
+      return b.base + rises(soft * 0.62 + sweep * 0.38, 0.5) * b.amp;
     }
     case BIOME.HIGHLAND: {
       // Ridged multifractal is the whole point: sharp crests, deep glacial valleys. The
@@ -215,24 +274,34 @@ export function biomeRelief(x, z, seed, i) {
       // its valleys sink, so the exponent lifts the crests while the floor is clamped
       // shallow. Without that, the same amplitude that gives a 300 m peak also digs a
       // 300 m pit and the road network ends up threading a canyon system.
-      const r = ridged(x * s, z * s, 6, seed ^ 0xc31, 2.0, 0.4);
-      const f = fbm2(x * s * 2.1, z * s * 2.1, 4, seed ^ 0xc32, 2.0, 0.4);
+      //
+      // The curve is gentler at the top than it used to be (1.34/1.30 where it was
+      // 1.55/1.62). At three times the amplitude the old exponent's steepening near the
+      // crest was worth 1.7x the gradient of the mid-slope, and that is where the
+      // unclimbable ground would have come from.
+      const r = ridged(x * s, z * s, 5, seed ^ 0xc31, b.lac, b.gain);
+      const f = fbm2(x * s * 2.4, z * s * 2.4, 4, seed ^ 0xc32, 2.2, 0.3);
       const u = clamp01(r * 0.5 + 0.5);
-      const shaped = Math.pow(u, 1.55) * 1.62 - 0.36;
-      return b.base + (shaped * 0.88 + f * 0.12) * b.amp;
+      const shaped = Math.pow(u, 1.34) * 1.3 - 0.17;
+      return b.base + (shaped * 0.91 + f * 0.09) * b.amp;
     }
     case BIOME.DUNES: {
       // Billow gives the rounded backs; the transverse wave gives the wind-combed crests
       // that all face the same way, which is what makes a dune field read as a dune field.
-      const bl = billow(x * s, z * s, 4, seed ^ 0xd41, 2.0, 0.42);
-      const comb = Math.sin((x * 0.0121 + z * 0.0047) * 6.283 + fbm2(x * s * 0.5, z * s * 0.5, 3, seed ^ 0xd42) * 4.2);
-      return b.base + (bl * 0.55 + comb * 0.45) * b.amp;
+      //
+      // The comb is the steepest single term in the file and the only one whose wavelength
+      // is fixed in metres rather than scaled by `wave`, so it does not get gentler when a
+      // preset says it should. It used to run at an 83 m period holding 45% of the
+      // amplitude — a 42° face on every crest. Now: 250 m, and 20%.
+      const bl = billow(x * s, z * s, 4, seed ^ 0xd41, b.lac, b.gain);
+      const comb = Math.sin((x * 0.0037 + z * 0.0014) * 6.283 + fbm2(x * s * 0.5, z * s * 0.5, 3, seed ^ 0xd42) * 4.2);
+      return b.base + rises(bl * 0.8 + comb * 0.2, 0.55) * b.amp;
     }
     case BIOME.WETLAND: {
       // Almost flat, with shallow pans. The interest here is water, not height.
-      const f = fbm2(x * s, z * s, 4, seed ^ 0xe51, 2.0, 0.42);
+      const f = fbm2(x * s, z * s, 4, seed ^ 0xe51, b.lac, b.gain);
       const pan = smoothstep(0.15, -0.35, f);
-      return b.base + f * b.amp - pan * 4.5;
+      return b.base + rises(f, 0.6) * b.amp - pan * 4.5;
     }
     default:
       return 0;
