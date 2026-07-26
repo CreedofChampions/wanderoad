@@ -12,6 +12,13 @@ technically better.
 
 ## Now
 
+- [ ] **Learn from Slow Roads' own critics.** The operator's note: "You can look at the
+      feedback people gave for this, and decide on what they would have liked to do better,
+      as an opportunity to learn from it." Slow Roads is the closest thing to this game that
+      exists and it is well liked; the useful signal is in what its players ASK FOR. Read the
+      Reddit and forum threads, list what recurs, and turn it into backlog items. Do not read
+      or copy its code — it is closed source and only the technique is fair game.
+
 - [ ] **Roads that follow the land.** The operator's brief: "winding *round turns* roads which
       follow the curves of hills", modelled on real Swiss alpine drives (Furka, Grimsel, Susten,
       Klausen, San Bernardino). Today the network is a hash lattice with Hermite splines — the
@@ -51,6 +58,14 @@ technically better.
       answer; sources are listed in docs/CREDITS.md.
 
 ## Done
+
+- [x] **The garage covered the game.** `#menu { display: grid }` overrode the `hidden`
+      attribute, so the garage was permanently on screen and Drive appeared to do nothing.
+      The game shipped unplayable. Fixed, and tools/shoot.mjs now asserts the garage is
+      genuinely INVISIBLE on load and after Drive — a flag being set is not a thing being
+      hidden.
+- [x] Auto-drive (G, or the garage). Stanley controller, brakes for the corner ahead, hands
+      back the moment you touch anything.
 
 - [x] Handedness — steering was inverted (three's +X is screen-LEFT looking down +Z)
 - [x] Gravity resolved on slopes — cliffs unclimbable, hills pull you back, no more hovercraft

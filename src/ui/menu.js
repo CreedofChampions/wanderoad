@@ -47,6 +47,7 @@ export class Menu {
         <div class="row" data-group="terrain"></div>
 
         <div class="foot">
+          <button data-act="auto">Auto-drive</button>
           <button data-act="camera">Camera: —</button>
           <button data-act="reset">Put me back on the road (R)</button>
           <a class="btn" href="./previews/">All previews</a>
@@ -80,6 +81,12 @@ export class Menu {
     }
     const cam = this.root.querySelector('[data-act="camera"]');
     if (cam && this.hooks.camera) cam.textContent = `Camera: ${this.hooks.camera()}`;
+    const ad = this.root.querySelector('[data-act="auto"]');
+    if (ad && this.hooks.isAuto) {
+      const on = this.hooks.isAuto();
+      ad.textContent = on ? 'Auto-drive: on (G)' : 'Auto-drive (G)';
+      ad.classList.toggle('on', on);
+    }
   }
 
   async _onClick(e) {
@@ -95,6 +102,11 @@ export class Menu {
     if (act === 'camera') {
       this.hooks.cycleCam?.();
       return this._mark();
+    }
+    if (act === 'auto') {
+      this.hooks.onAuto?.();
+      this._mark();
+      return this.hide();
     }
 
     if (group === 'car') {

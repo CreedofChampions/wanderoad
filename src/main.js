@@ -31,6 +31,7 @@ import { loadCar, loadGhostCar, CARS, CAR_KEYS } from './car/loadedCar.js';
 import { Vehicle } from './car/vehicle.js';
 import { Input } from './car/input.js';
 import { ChaseCamera } from './car/camera.js';
+import { Autopilot } from './car/autopilot.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak } from './game/streak.js';
 import { configFromUrl, applyFeel, applyTerrain, terrainBias, FEELS } from './game/presets.js';
@@ -166,6 +167,7 @@ async function boot() {
   const chase = new ChaseCamera(camera, { mode: FEEL.camera });
   const input = new Input(window);
   input.attachTouch(canvas);
+  const auto = new Autopilot();
   const streak = new Streak();
   const hud = new Hud();
   const audio = new EngineAudio();
@@ -191,6 +193,8 @@ async function boot() {
   }
 
   const menu = new Menu({
+    onAuto: () => auto.toggle(car),
+    isAuto: () => auto.on,
     onCar: swapCar,
     onFeel: (k) => {
       applyFeel(k);
@@ -330,6 +334,7 @@ async function boot() {
     }
     if (input.tapped('horn')) audio.horn();
     if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
+    if (input.tapped('autodrive')) hud.say(auto.toggle(car) ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
     if (input.tapped('reset')) backToRoad();
     for (const [key, name] of [
       ['Digit1', 'cruise'],
@@ -345,7 +350,10 @@ async function boot() {
 
     /* physics — frozen while the garage is open, so nobody comes back to a crashed car */
     car.terrain = localFor(car.x, car.z);
-    if (!menu.open) car.update(dt, cmd);
+    const wasAuto = auto.on;
+    const drive = auto.update(car, cmd, dt) || cmd;
+    if (wasAuto && !auto.on) hud.say(auto.lastReason || 'auto-drive off', 2.2);
+    if (!menu.open) car.update(dt, drive);
 
     /* collisions — after the solver, before the camera, so the camera never chases a car
        that is momentarily inside a tree */
@@ -441,6 +449,7 @@ async function boot() {
     model,
     chase,
     streak,
+    auto,
     solids,
     remotes,
     post,

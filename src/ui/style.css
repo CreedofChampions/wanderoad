@@ -263,6 +263,15 @@ canvas {
 /* ── garage ───────────────────────────────────────────────────────────────
  * A single sheet over the game. It is the only piece of the interface the player is meant
  * to look AT rather than glance at, so it is the only piece allowed to be opaque. */
+/* THE hidden ATTRIBUTE ONLY WORKS IF NOTHING OVERRIDES display.
+ * The UA stylesheet gives [hidden] `display: none`, but any author rule beats it — so
+ * `display: grid` below made the garage permanently visible over the game and the Drive
+ * button appear to do nothing. The game shipped unplayable because of this one line.
+ * Whenever an element is toggled with `hidden`, it needs this rule next to it. */
+#menu[hidden] {
+  display: none !important;
+}
+
 #menu {
   position: fixed;
   inset: 0;

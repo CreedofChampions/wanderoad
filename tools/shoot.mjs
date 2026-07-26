@@ -259,26 +259,58 @@ async function main() {
   let menuCheck = null;
   if (MENU) {
     menuCheck = await evalJs(`(async () => { try {
-      const before = window.WANDEROAD.model.source;
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
-      await new Promise(r => setTimeout(r, 400));
+      const vis = el => { if (!el) return false; const r = el.getBoundingClientRect();
+        return getComputedStyle(el).display !== 'none' && r.width > 0 && r.height > 0; };
       const m = document.getElementById('menu');
-      const openOk = m && !m.hidden;
-      const cars = [...m.querySelectorAll('button[data-group=\"car\"]')].map(b => b.dataset.key);
-      const pick = m.querySelector('button[data-group=\"car\"][data-key=\"rally\"]');
-      pick.click();
+      const out = {};
+
+      // THE CHECK THAT WOULD HAVE CAUGHT THE SHIPPED BUG: on load the garage must be
+      // INVISIBLE, not merely flagged hidden. An author 'display' rule beats [hidden], and
+      // the game shipped unplayable with the garage covering it and Drive doing nothing.
+      out.visibleOnLoad = vis(m);
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 300));
+      out.opensOnEscape = vis(m);
+
+      // Drive must actually put you back in the game.
+      m.querySelector('[data-act="close"]').click();
+      await new Promise(r => setTimeout(r, 300));
+      out.driveCloses = !vis(m);
+
+      // and Escape must close it too
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 250));
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 250));
+      out.escapeCloses = !vis(m);
+
+      // car swap still works
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 250));
+      const before = window.WANDEROAD.model.source;
+      m.querySelector('button[data-group="car"][data-key="rally"]').click();
       await new Promise(r => setTimeout(r, 3500));
-      const after = window.WANDEROAD.model.source;
-      const closed = m.hidden;
-      // and R must put us back on a road
-      const c = window.WANDEROAD.car;
-      c.x += 400; c.z += 400;
+      out.carSwap = before + ' -> ' + window.WANDEROAD.model.source;
+      out.closedAfterPick = !vis(m);
+
+      // auto-drive
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', bubbles: true }));
+      await new Promise(r => setTimeout(r, 2500));
+      out.autoOn = window.WANDEROAD.auto.on;
+      out.autoMoving = Math.abs(window.WANDEROAD.car.speed) > 1;
+
+      // R back to the road
+      const c = window.WANDEROAD.car; c.x += 500; c.z += 500;
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 500));
       const q = c.terrain.roads.query(c.x, c.z);
-      return { openOk, cars, before, after, swapped: before !== after, closedAfterPick: closed,
-               resetRoadDist: isFinite(q.d) ? +q.d.toFixed(1) : null,
-               wheels: window.WANDEROAD.model.wheels.length };
+      out.resetRoadDist = isFinite(q.d) ? +q.d.toFixed(1) : null;
+
+      out.PASS = out.visibleOnLoad === false && out.opensOnEscape === true &&
+                 out.driveCloses === true && out.escapeCloses === true &&
+                 out.closedAfterPick === true;
+      return out;
     } catch (e) { return { error: String(e && e.message || e) }; } })()`);
   }
 
