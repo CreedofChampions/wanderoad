@@ -99,9 +99,14 @@ export class Autopilot {
      * There is also a feed-forward now. Reacting to a bend only once you are already in it
      * means entering every corner from the outside, which on a four-metre lane is most of the
      * way off it. Steering into the bend ahead is what a person does without thinking. */
+    /* THE SIGN. `lateral` is positive when the car is to the screen-LEFT of the centreline,
+     * and the solver's positive steer also turns left — so adding the cross-track term drove
+     * the car further out, and raising its gain from 0.55 to 3.2 turned a slow drift into a
+     * confident exit. It has to be SUBTRACTED. This is the third time this project has been
+     * bitten by the same handedness: three.js puts +X on your left when you look down +Z. */
     const v = Math.max(Math.abs(car.speed), 6);
     const cross = Math.atan2(3.2 * lateral, v);
-    const steer = clamp((err * 1.5 + cross) * 2.1 + this._feed, -1, 1);
+    const steer = clamp((err * 1.5 - cross) * 2.1 + this._feed, -1, 1);
 
     /* How tight is it about to get? Compare the road's tangent here with its tangent a
      * lookahead away, and slow down for the difference. Braking for the corner you are

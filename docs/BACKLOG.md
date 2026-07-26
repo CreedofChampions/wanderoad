@@ -12,18 +12,9 @@ technically better.
 
 ## Now — the failing requirements, worst first
 
-**BLOCKING, from the last batch — fix before anything else ships:**
-
-- [ ] **G1 regression — the streak banks 0 m.** `npm run test:browser` was banking 185 m and
-      now reports 0. Introduced somewhere in the fleet / trail / engine-braking batch. The
-      streak is the entire game mechanic, so nothing deploys until this is green. The live
-      site was deliberately left on the previous build.
-- [ ] **Auto-drive cannot hold a kilometre.** `node tools/streak-runs.mjs` reports 0/10 with a
-      median peak of ~40 m, ending "stopped moving". Three causes have already been found and
-      fixed by measurement (a reverse deadlock, a look-ahead that read the wrong road, and an
-      engine-braking curve that fought the throttle at cruise) and it is still 0/10, so there
-      is at least one more. Instrument `car.forces` during an auto-drive run — it is on
-      permanently now — rather than guessing again.
+**Budget note (26 July 2026):** the project wraps on the 28th and at least half the week's
+usage stays unspent. One small item per pass, no research, no subagents, no refactors. A
+recorded finding is a complete pass.
 
 **Then, from the measured requirements suite:**
 
@@ -95,6 +86,21 @@ Newly asked for, not yet started:
       answer; sources are listed in docs/CREDITS.md.
 
 ## Done
+
+- [x] **Auto-drive drove itself off the road** — the cross-track term was ADDED when it had to
+      be subtracted. `lateral` is positive when the car is screen-left and the solver's
+      positive steer also turns left, so the correction pushed the car further out; raising
+      its gain from 0.55 to 3.2 turned a slow drift into a confident exit. Third time this
+      project has been bitten by three.js putting +X on your left down +Z. Ten runs at a
+      kilometre went 0/10 to 3/4 on the first check after the fix.
+- [x] Engine braking scaled as (1 - throttle), so quarter throttle applied three quarters of
+      the retarding torque and a steady cruise was impossible. Now vanishes by quarter
+      throttle.
+- [x] A reverse deadlock: the auto-pilot's lost-road brake engaged reverse, which then only
+      cleared while moving forwards — but the car was creeping backwards.
+- [x] Two windows on one machine were one player; `?seat=2` forks the identity.
+- [x] The streak check was measuring the DRIVER, not the streak: it held W in a straight line
+      and passed only when the road happened to be straight. It now drives on the road.
 
 - [x] **The garage covered the game.** `#menu { display: grid }` overrode the `hidden`
       attribute, so the garage was permanently on screen and Drive appeared to do nothing.

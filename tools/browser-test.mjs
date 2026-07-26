@@ -295,12 +295,30 @@ async function main() {
     check('Escape closes the garage', (await evalJs(VISIBLE('#menu'))) === false);
 
     /* ── 6. the game rules ──────────────────────────────────────────────── */
+    /* Use auto-drive to stay on the road while measuring the streak. Holding W in a straight
+     * line does not test the streak, it tests whether the road happened to be straight — the
+     * earlier version passed on luck and started failing the moment the car got faster and
+     * left the bend sooner. What we want to know is whether distance banks while you are on
+     * the road, so let something that stays on the road do the driving. */
     await tap(evalJs, 'KeyR');
-    await sleep(500);
-    await hold(evalJs, 'KeyW', 9000);
-    const streak = await evalJs(`(() => { const s = window.WANDEROAD.streak.state;
-      return { km: +s.km.toFixed(3), onRoad: s.onRoad, mult: +s.multiplier.toFixed(2) }; })()`);
-    check('the road streak accumulates', streak.km > 0.05, `${(streak.km * 1000).toFixed(0)} m banked`);
+    await sleep(700);
+    await evalJs(`(() => { const W = window.WANDEROAD; if (!W.auto.on)
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', bubbles: true })); })()`);
+    await sleep(12000);
+    /* When this fails it must say WHY. The streak needs three things at once — on the
+     * carriageway, on the ground, and above 8 m/s — and "0 m banked" does not say which one
+     * was missing, which cost a whole diagnostic round. */
+    const streak = await evalJs(`(() => { const W = window.WANDEROAD; const c = W.car;
+      const s = W.streak.state; const surf = c.terrain.surface(c.x, c.z);
+      return { km: +s.km.toFixed(3), onRoad: +surf.onRoad.toFixed(2), mult: +s.multiplier.toFixed(2),
+               kph: +c.kph.toFixed(1), onGround: c.onGround, auto: W.auto.on,
+               roadDist: +c.terrain.roads.query(c.x, c.z).d.toFixed(1) }; })()`);
+    check(
+      'the road streak accumulates',
+      streak.km > 0.05,
+      `${(streak.km * 1000).toFixed(0)} m banked — onRoad ${streak.onRoad}, ${streak.kph} km/h, ` +
+        `onGround ${streak.onGround}, ${streak.roadDist} m from the centreline, auto ${streak.auto}`
+    );
 
     const solids = await evalJs(`window.WANDEROAD.solids.count`);
     check('collision solids are loaded', solids > 0, `${solids} trees, rocks and posts`);
