@@ -18,8 +18,6 @@ recorded finding is a complete pass.
 
 **Then, from the measured requirements suite:**
 
-- [ ] **O2 — off-road is not slow enough.** 61.6 km/h off-road against 91 on, i.e. 68% when the
-      requirement is under 55%. "Off-road still feels pretty much like on road right now."
 - [ ] **W4 — land presets are nearly flat.** 9 m of relief in a 720 m square.
 
       **ATTEMPTED AND REVERTED, 26 July.** Raising every amplitude ~1.7x with the wavelength
@@ -83,6 +81,16 @@ Newly asked for, not yet started:
       answer; sources are listed in docs/CREDITS.md.
 
 ## Done
+
+- [x] **Off-road was not slow enough, and the ceiling meant to stop it was dead code.** The
+      hard off-road speed cap clamped `driveForce` sixty lines AFTER `fxTotal` had already been
+      summed from it, so it had never once limited anything — off-road top speed was set purely
+      by rolling resistance, and the "100 km/h off-road" ceiling was decoration. Moved above the
+      force sum and set to 44 km/h. Off-road went from 61-65 km/h to 44, and the check passes at
+      the worst on-road figure the suite produces, not just the average. 36/40 to **37/40**.
+      Same failure class as the brakes: a number declared in one place and never reaching the
+      solver. Worth grepping for others — the Rally's `offRoad: 1.35` in the fleet is the next
+      suspect, it appears nowhere outside garage.js.
 
 - [x] **Brakes.** Three things were wrong at once: each car's `brakeMul` was declared in the
       fleet and never applied, so the Patrol's "strongest brakes in the fleet" were the

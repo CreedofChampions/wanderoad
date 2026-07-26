@@ -517,6 +517,24 @@ export class Vehicle {
     /* ── combined slip ─────────────────────────────────────────────────── */
     // A friction ellipse with exponent 1.85 rather than 2.0: about 6% more simultaneous
     // capacity, which is what lets trail-braking rotate the car instead of ploughing on.
+    /* Hard off-road ceiling. Above it the tyres simply stop putting power down — you can
+     * arrive off-road at speed and coast, but you cannot BUILD speed in a field.
+     *
+     * THIS LINE HAS TO STAY ABOVE `fxTotal`. It used to sit sixty lines further down, where it
+     * clamped `driveForce` after `fxTotal` had already been summed from it — so the ceiling was
+     * dead code and off-road top speed was set entirely by rolling resistance. That is why the
+     * car did 61.7 km/h in a field against 101 on tarmac when the ceiling claimed to be 100:
+     * the ceiling was not doing anything at all, in either direction.
+     *
+     * 44 km/h, not the 100 of the original phrasing. 100 was a ceiling; the requirement is
+     * "dramatically slow when off-road, at least 50%", and a field you can nearly keep pace in
+     * makes staying on the road pointless. The figure is under half of the SLOWEST on-road top
+     * speed the suite has measured (85 km/h on a climbing stretch, 101 on a flat one), because
+     * a ratio measured against a noisy number has to clear the worst case, not the average. */
+    const onRoad = surf ? surf.onRoad : 1;
+    const offCap = lerp(12.2, 200, clamp01(onRoad * 1.4)); // 44 km/h off the carriageway
+    if (contact && vLong > offCap && driveForce > 0) driveForce = 0;
+
     const fxTotal = (driveForce + brakeForce) * contact;
     const fxMax = TYRE.muLongPeak * this.gripScale * W;
     const usedX = Math.pow(Math.min(Math.abs(fxTotal) / Math.max(fxMax, 1), 1), TYRE.ellipseExp);
@@ -537,7 +555,6 @@ export class Vehicle {
      * ever". Rolling resistance on grass and sand is genuinely several times tarmac's, so
      * this is honest physics pushed to the top of its honest range — plus a hard ceiling,
      * because the point of the game is to stay on the road. */
-    const onRoad = surf ? surf.onRoad : 1;
     const crr = lerp(0.145, 0.014, clamp01(onRoad));
     const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + lerp(9.5, 1.4, clamp01(onRoad)) * vLong;
     // Closed throttle drives the engine through the transmission; the retarding force
@@ -574,11 +591,6 @@ export class Vehicle {
       fyRear *= 1 - 0.28 * loose;
       this.rough = loose;
     } else this.rough = 0;
-
-    /* Hard off-road ceiling. Above it the tyres simply stop putting power down — you can
-     * arrive off-road at speed and coast, but you cannot BUILD speed in a field. */
-    const offCap = lerp(27.8, 200, clamp01(onRoad * 1.4)); // 100 km/h off the carriageway
-    if (contact && vLong > offCap) driveForce = Math.min(driveForce, 0);
 
     /* ── integrate the planar body ─────────────────────────────────────── */
     const fxBody = fxTotal - drag - rr - engBrake;
