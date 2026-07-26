@@ -26,6 +26,7 @@ import { findSpawn, Terrain } from './world/terrain.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
+import { loadCar, loadGhostCar, CARS, CAR_KEYS } from './car/loadedCar.js';
 import { Vehicle } from './car/vehicle.js';
 import { Input } from './car/input.js';
 import { ChaseCamera } from './car/camera.js';
@@ -148,7 +149,16 @@ async function boot() {
   const me = identity();
   const car = new Vehicle({ tier: FEEL.tier, terrain: local, preset: FEEL.assist });
   car.placeAt(spawn.x, spawn.z, spawn.heading);
-  const model = buildCar({ tier: FEEL.tier, paint: me.look?.paint ?? 0 });
+  /* Real CC0 bodywork if it loads, the hand-built box if it does not. The fallback matters:
+   * a network hiccup on a 180 KB GLB must not cost the player their car. */
+  const carKey = params.get('car') && CARS[params.get('car')] ? params.get('car') : FEEL.car || 'coupe';
+  let model;
+  try {
+    model = await loadCar({ car: carKey, paint: me.look?.paint ?? 0, base: new URL('./models/cars/', location.href).href });
+  } catch (err) {
+    console.error('[car] model failed to load, using the built-in body', err?.message ?? err);
+    model = buildCar({ tier: FEEL.tier, paint: me.look?.paint ?? 0 });
+  }
   scene.add(model.group);
 
   const chase = new ChaseCamera(camera, { mode: FEEL.camera });

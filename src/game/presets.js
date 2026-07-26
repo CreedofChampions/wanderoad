@@ -28,6 +28,7 @@ export const FEELS = {
     rearGrip: 1.04,
     buildRate: 1.6,
     tier: 'gt',
+    car: 'estate',
   },
   road: {
     label: 'Road',
@@ -38,6 +39,7 @@ export const FEELS = {
     rearGrip: 1.0,
     buildRate: 2.0,
     tier: 'sports',
+    car: 'coupe',
   },
   sharp: {
     label: 'Sharp',
@@ -48,6 +50,7 @@ export const FEELS = {
     rearGrip: 0.98,
     buildRate: 3.2,
     tier: 'sports',
+    car: 'rally',
   },
   drift: {
     label: 'Drift',
@@ -58,6 +61,7 @@ export const FEELS = {
     rearGrip: 0.86,
     buildRate: 3.6,
     tier: 'sports',
+    car: 'sedan',
   },
   sim: {
     label: 'Raw',
@@ -68,6 +72,7 @@ export const FEELS = {
     rearGrip: 1.0,
     buildRate: 4.0,
     tier: 'sports',
+    car: 'coupe',
   },
   hyper: {
     label: 'Hyper',
@@ -78,6 +83,7 @@ export const FEELS = {
     rearGrip: 1.02,
     buildRate: 2.2,
     tier: 'hyper',
+    car: 'patrol',
   },
 };
 
