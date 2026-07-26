@@ -1,0 +1,64 @@
+// One row per live car. Written every tick, read by everyone in the 3x3 cell
+// neighbourhood around them, and deleted 8 seconds after the last tick.
+//
+// Nothing in here is authoritative. Remote cars are ghosts on the client and never
+// collide, so a stale or wrong row costs a smudge of visual weirdness and nothing else.
+// That is the whole reason this table can be a dumb cache.
+//
+// Entity names must match ^[a-zA-Z0-9]+$ — the CLI rejects underscores.
+{
+  "name": "Presence",
+  "type": "object",
+  "title": "Presence",
+  "description": "A live car's last reported state, expiring 8 s after its last tick.",
+  "properties": {
+    // First 12 hex of SHA-256(secret). Derived server-side; never accepted from the client.
+    "playerId": { "type": "string", "minLength": 12, "maxLength": 12, "pattern": "^[0-9a-f]{12}$" },
+    "name": { "type": "string", "maxLength": 18, "default": "" },
+
+    // Interest-management key: c<round(x/2048)>_<round(z/2048)>. The only indexed spatial
+    // field — a 3x3 neighbourhood of these is 6144 m across, comfortably wider than the
+    // 3 km at which the tick rate rises, so nobody pops in out of nowhere.
+    "cell": { "type": "string", "maxLength": 32, "pattern": "^c-?[0-9]+_-?[0-9]+$" },
+
+    "x": { "type": "number" },
+    "y": { "type": "number" },
+    "z": { "type": "number" },
+    "yaw": { "type": "number" },
+
+    // Velocity is what makes the client's Hermite interpolation curve correctly between
+    // two samples a whole second apart, so it is worth the bytes.
+    "vx": { "type": "number", "default": 0 },
+    "vy": { "type": "number", "default": 0 },
+    "vz": { "type": "number", "default": 0 },
+    "yawRate": { "type": "number", "default": 0 },
+
+    // Driver inputs, so a ghost's wheels turn and its brake lights come on.
+    "steer": { "type": "number", "minimum": -1, "maximum": 1, "default": 0 },
+    "throttle": { "type": "number", "minimum": 0, "maximum": 1, "default": 0 },
+    "brake": { "type": "number", "minimum": 0, "maximum": 1, "default": 0 },
+    "gear": { "type": "integer", "minimum": -1, "maximum": 12, "default": 1 },
+
+    "tier": { "type": "integer", "minimum": 0, "maximum": 63, "default": 0 },
+    "paint": { "type": "integer", "minimum": 0, "maximum": 63, "default": 0 },
+    // Bitfield: headlights, horn, hazard, airborne. Cheap to extend without a migration.
+    "flags": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0 },
+
+    // Client's clock for this sample, in ms. The interpolator orders snapshots by it.
+    "t": { "type": "number" },
+    // Server's clock at write, in seconds. Expiry and the liveness filter use this one,
+    // because a client clock can be anything at all.
+    "seen": { "type": "number" }
+  },
+  "required": ["playerId", "cell", "x", "y", "z", "yaw", "seen"],
+
+  // No direct client access at all: the drive function owns every read and write through
+  // asServiceRole. A player who could write this table directly could put their car
+  // anywhere, and the sanity checks in the function would never see it.
+  "rls": {
+    "create": false,
+    "read": false,
+    "update": false,
+    "delete": false
+  }
+}

@@ -1,0 +1,63 @@
+// One row per player: their map save.
+//
+// The world is infinite and generated, so none of it is stored. The seed regenerates every
+// hill, road and tree byte for byte. What cannot be regenerated is where the player has
+// been and what they changed, and that is all this holds:
+//
+//   visited — a bitset over 4096 m regions, 256 regions per 32-byte block, base64'd. A
+//             continent-crossing road trip costs a few hundred bytes instead of a list of
+//             coordinates.
+//   ops     — an append-only delta log, replayed on top of a freshly generated world.
+//
+// Rows are merged server-side, never overwritten: bitsets OR together and ops dedupe by
+// sequence number, so two devices saving the same world converge instead of clobbering.
+{
+  "name": "WorldSave",
+  "type": "object",
+  "title": "World Save",
+  "description": "A player's seed, visited-region bitset and delta op log for one world.",
+  "properties": {
+    "playerId": { "type": "string", "minLength": 12, "maxLength": 12, "pattern": "^[0-9a-f]{12}$" },
+
+    // Which world this save belongs to. A save from another seed is refused on load: its
+    // ops would land on terrain that does not exist.
+    "seed": { "type": "integer", "minimum": 0 },
+
+    "visited": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "properties": {
+          // Block coordinate "bx,bz". One block covers 16x16 regions = 65.5 km square.
+          "b": { "type": "string", "maxLength": 24, "pattern": "^-?[0-9]+,-?[0-9]+$" },
+          // 32 bytes of bitset, base64. Merged with OR — having been somewhere never
+          // becomes false.
+          "d": { "type": "string", "maxLength": 64 }
+        },
+        "required": ["b", "d"]
+      }
+    },
+
+    // Free-form delta ops. `k` names the kind, `n` is the client's monotonic sequence
+    // number (the dedupe key), `t` the client timestamp. Everything else is the op's own.
+    "ops": {
+      "type": "array",
+      "default": [],
+      "items": { "type": "object" }
+    },
+
+    "updated": { "type": "number" }
+  },
+  "required": ["playerId"],
+
+  // The drive function owns this table through asServiceRole. A player proves ownership by
+  // knowing their secret, which is not something entity-level RLS can check — Base44 rows
+  // are keyed to accounts and Wanderoad has none.
+  "rls": {
+    "create": false,
+    "read": false,
+    "update": false,
+    "delete": false
+  }
+}

@@ -1,0 +1,171 @@
+/* Wanderoad — preview presets.
+ *
+ * Driving feel is not something you can settle from a spec; you settle it by driving. So the
+ * whole feel is a handful of numbers that can be swapped from the URL, and a gallery page
+ * links to every combination. `?feel=cruiser&terrain=alpine` is a complete configuration.
+ *
+ * Nothing here is a code path — every preset drives the same solver. If a preset needs new
+ * code to exist, it is not a preset, it is a feature.
+ */
+
+import { STEER, PRESETS as ASSIST_PRESETS, CAMERA, TYRE } from '../car/tuning.js';
+import { BIOME_TERRAIN } from '../world/biomes.js';
+
+/* ── how the car feels ────────────────────────────────────────────────────
+ *  comfortG   lateral acceleration at full stick. THE number for darty vs planted.
+ *  assist     which aid ladder rung to start on
+ *  camera     which chase rig
+ *  rearGrip   multiplier on rear lateral μ — below 1 the car rotates on throttle
+ *  buildRate  how fast a keyboard press reaches full stick, in units/second
+ */
+export const FEELS = {
+  cruiser: {
+    label: 'Cruiser',
+    blurb: 'Calm and planted. Full stick is 0.7 g, the camera never moves in a hurry. This is the cozy default.',
+    comfortG: 7.0,
+    assist: 'cruise',
+    camera: 'cruise',
+    rearGrip: 1.04,
+    buildRate: 1.6,
+    tier: 'gt',
+  },
+  road: {
+    label: 'Road',
+    blurb: 'The default. A fast road car: 0.96 g at full stick, sport aids, the chase camera looks into the corner.',
+    comfortG: 9.4,
+    assist: 'sport',
+    camera: 'sport',
+    rearGrip: 1.0,
+    buildRate: 2.0,
+    tier: 'sports',
+  },
+  sharp: {
+    label: 'Sharp',
+    blurb: 'More lock, faster hands. 1.25 g at full stick and a quicker steering ramp — quick, still not twitchy.',
+    comfortG: 12.2,
+    assist: 'sport',
+    camera: 'sport',
+    rearGrip: 0.98,
+    buildRate: 3.2,
+    tier: 'sports',
+  },
+  drift: {
+    label: 'Drift',
+    blurb: 'Loose rear end and a lot of lock. Made for holding a slide, not for lap times.',
+    comfortG: 13.5,
+    assist: 'off',
+    camera: 'sport',
+    rearGrip: 0.86,
+    buildRate: 3.6,
+    tier: 'sports',
+  },
+  sim: {
+    label: 'Raw',
+    blurb: 'No assists at all, no comfort limit — the full 40° rack, tapered only by speed. Hard.',
+    comfortG: 40.0,
+    assist: 'hardcore',
+    camera: 'sport',
+    rearGrip: 1.0,
+    buildRate: 4.0,
+    tier: 'sports',
+  },
+  hyper: {
+    label: 'Hyper',
+    blurb: 'All-wheel drive, 800 hp, 340 km/h. Planted at speed, and quick enough to need the calm camera.',
+    comfortG: 10.5,
+    assist: 'sport',
+    camera: 'sport',
+    rearGrip: 1.02,
+    buildRate: 2.2,
+    tier: 'hyper',
+  },
+};
+
+/* ── what the land looks like ─────────────────────────────────────────────
+ * Each entry scales the five biomes' relief. The reference is the Hoshi-no-Tani pen: soft,
+ * readable, nothing vertical. `amp` scales height, `wave` scales the wavelength — raising
+ * wave at constant amp is the single knob that makes terrain gentler without making it flat.
+ */
+export const TERRAINS = {
+  meadow: {
+    label: 'Meadow',
+    blurb: 'The pen’s own valley. Soft rolling hills, wide sightlines, nothing you cannot drive over.',
+    amp: 0.8,
+    wave: 1.25,
+    bias: [2.2, 1.0, 0.35, 0.3, 0.8],
+  },
+  rolling: {
+    label: 'Rolling',
+    blurb: 'The default mix. Meadow and steppe with hills and the occasional mountain on the horizon.',
+    amp: 1.0,
+    wave: 1.0,
+    bias: [1, 1, 1, 1, 1],
+  },
+  alpine: {
+    label: 'Alpine',
+    blurb: 'Mountains close in. Switchbacks, cuttings and long climbs — the most dramatic and the least forgiving.',
+    amp: 1.35,
+    wave: 0.9,
+    bias: [0.6, 0.5, 3.0, 0.2, 0.5],
+  },
+  plains: {
+    label: 'Plains',
+    blurb: 'Almost flat. Kilometres of straight road under a huge sky — the best place to feel top speed.',
+    amp: 0.45,
+    wave: 1.6,
+    bias: [0.8, 3.0, 0.15, 1.2, 0.7],
+  },
+  dunes: {
+    label: 'Dunes',
+    blurb: 'Rose and ochre sand sea. Loose grip, long crests, the road half-buried.',
+    amp: 0.9,
+    wave: 1.1,
+    bias: [0.3, 0.9, 0.2, 3.5, 0.2],
+  },
+  marsh: {
+    label: 'Wetland',
+    blurb: 'Flooded reed flats under standing mist. Dead flat, causeways and mirrors.',
+    amp: 0.7,
+    wave: 1.2,
+    bias: [0.7, 0.3, 0.2, 0.1, 3.5],
+  },
+};
+
+/** Apply a feel preset. Mutates the tuning tables, which is the point — one solver, many cars. */
+export function applyFeel(name) {
+  const f = FEELS[name] || FEELS.road;
+  STEER.comfortG = f.comfortG;
+  STEER.attackG = f.comfortG * 1.6;
+  STEER.buildBase = f.buildRate;
+  STEER.buildBonus = f.buildRate;
+  TYRE.muLatRear = 1.34 * f.rearGrip;
+  return f;
+}
+
+/** Apply a terrain preset. Also mutates, for the same reason. */
+export function applyTerrain(name) {
+  const t = TERRAINS[name] || TERRAINS.rolling;
+  if (!BIOME_TERRAIN.__base) {
+    BIOME_TERRAIN.__base = BIOME_TERRAIN.map((b) => ({ ...b }));
+  }
+  const base = BIOME_TERRAIN.__base;
+  for (let i = 0; i < BIOME_TERRAIN.length; i++) {
+    BIOME_TERRAIN[i].amp = base[i].amp * t.amp * (t.bias[i] > 1 ? 1 : 1);
+    BIOME_TERRAIN[i].wave = base[i].wave * t.wave;
+  }
+  return t;
+}
+
+/** Biome weight bias, read by world/biomes.js so a preview can be mostly one biome. */
+export function terrainBias(name) {
+  const t = TERRAINS[name] || TERRAINS.rolling;
+  return t.bias;
+}
+
+/** Parse the whole configuration out of a URL. */
+export function configFromUrl(search = location.search) {
+  const p = new URLSearchParams(search);
+  const feel = FEELS[p.get('feel')] ? p.get('feel') : 'road';
+  const terrain = TERRAINS[p.get('terrain')] ? p.get('terrain') : 'rolling';
+  return { feel, terrain, debug: p.has('debug'), offline: p.has('offline') };
+}

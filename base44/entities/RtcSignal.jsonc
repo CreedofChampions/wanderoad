@@ -1,0 +1,40 @@
+// A one-shot mailbox for WebRTC handshakes.
+//
+// Strictly an optimisation. Two players who manage a direct peer connection get their
+// positions at frame rate instead of at the 2 Hz tick; everyone else keeps playing over
+// plain HTTP and never notices the difference. Nothing in the game may depend on this
+// working — Base44's realtime socket is receive-only and may be unavailable to anonymous
+// users, which is exactly why the HTTP path is the real one.
+//
+// The relay is deliberately dumb: it holds an opaque body addressed to one player, hands
+// it over once, and forgets it. It never parses SDP or ICE.
+{
+  "name": "RtcSignal",
+  "type": "object",
+  "title": "RTC Signal",
+  "description": "A pending WebRTC offer, answer or ICE candidate for one recipient. Delivered once, then deleted.",
+  "properties": {
+    "toId": { "type": "string", "minLength": 12, "maxLength": 12, "pattern": "^[0-9a-f]{12}$" },
+    "fromId": { "type": "string", "minLength": 12, "maxLength": 12, "pattern": "^[0-9a-f]{12}$" },
+    "kind": { "type": "string", "enum": ["offer", "answer", "ice"] },
+
+    // Opaque to the server. Capped so one player cannot use the relay as free storage;
+    // a full SDP offer fits well inside this.
+    "body": { "type": "string", "maxLength": 1400 },
+
+    // Server seconds. Rows older than 30 s are swept — a handshake that has not completed
+    // by then has already been retried.
+    "t": { "type": "number" }
+  },
+  "required": ["toId", "fromId", "kind", "body", "t"],
+
+  // Written and read only by the drive function, which enforces that `fromId` is the
+  // caller's derived id. Direct client access would let anyone forge an offer from
+  // anyone else.
+  "rls": {
+    "create": false,
+    "read": false,
+    "update": false,
+    "delete": false
+  }
+}

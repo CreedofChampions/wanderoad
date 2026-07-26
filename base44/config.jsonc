@@ -1,0 +1,29 @@
+// Wanderoad — Base44 project definition.
+//
+// This is the second of two interchangeable backends. The PHP mirror in server/ implements
+// the identical /drive contract; src/net/transport.js picks whichever answers first. Base44
+// exists here because it hosts the site and the database together and needs no VPS; the PHP
+// path exists because Base44's realtime socket is receive-only and may not work at all for
+// anonymous users, and Wanderoad has no login.
+//
+// Deploy: base44 deploy   (entities + functions + site). See docs/BACKEND.md.
+{
+  "name": "wanderoad",
+  "description": "An endless Ghibli-painted road trip. Infinite procedural world, ghost-car multiplayer.",
+
+  // Anyone can drive without an account. Identity is 32 random bytes in localStorage, so
+  // there is no login wall to put in front of the world.
+  "visibility": "public",
+
+  // Paths are relative to this file.
+  "entitiesDir": "./entities",
+  "functionsDir": "./functions",
+
+  "site": {
+    "installCommand": "npm ci",
+    "buildCommand": "npm run build",
+    "outputDirectory": "./dist",
+    // Used by `base44 dev` to run Vite alongside the local backend.
+    "serveCommand": "npm run dev"
+  }
+}

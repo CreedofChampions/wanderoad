@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
+    <title>Wanderoad — an endless road trip</title>
+    <meta name="description" content="An endless procedurally generated road trip. Drive anywhere, forever, with anyone." />
+    <meta name="theme-color" content="#4E80B4" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%234E80B4'/><path d='M6 25 L16 6 L26 25 Z' fill='%23F6ECD8'/><circle cx='16' cy='19' r='3' fill='%23FFD79C'/></svg>" />
+    <link rel="stylesheet" href="./src/ui/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <!-- loading veil -->
+    <div id="veil">
+      <div class="card">
+        <h1>Wanderoad</h1>
+        <p class="tag">an endless road trip</p>
+        <div class="bar"><div id="barIn"></div></div>
+        <p id="stat">waking the valley…</p>
+      </div>
+    </div>
+
+    <!-- heads-up display -->
+    <div id="hud" hidden>
+      <div id="speedo">
+        <span id="kph">0</span><span class="unit">km/h</span>
+        <span id="gear">N</span>
+      </div>
+      <div id="place">
+        <span id="biome">—</span>
+        <span id="coords">0, 0</span>
+      </div>
+      <div id="players"></div>
+      <div id="toast"></div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
