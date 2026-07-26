@@ -10,62 +10,49 @@ technically better.
 
 ---
 
-## Now
+## Now — the failing requirements, worst first
 
-- [ ] **Learn from Slow Roads' own critics.** The operator's note: "You can look at the
-      feedback people gave for this, and decide on what they would have liked to do better,
-      as an opportunity to learn from it." Slow Roads is the closest thing to this game that
-      exists and it is well liked; the useful signal is in what its players ASK FOR. Read the
-      Reddit and forum threads, list what recurs, and turn it into backlog items. Do not read
-      or copy its code — it is closed source and only the technique is fair game.
+Every item below is a **currently failing check** in `npm run test:browser`, with the number
+it reported. See docs/REQUIREMENTS.md for the full list and how each is measured. Fix one,
+watch its check go green, ship.
 
-- [ ] **Roads that follow the land.** The operator's brief: "winding *round turns* roads which
-      follow the curves of hills", modelled on real Swiss alpine drives (Furka, Grimsel, Susten,
-      Klausen, San Bernardino). Today the network is a hash lattice with Hermite splines — the
-      curves are smooth but they ignore the terrain entirely.
-
-      **ATTEMPTED AND REVERTED, 2026-07-26. Read this before trying the same thing.**
-      Two ideas were implemented and measured over a 2.4 km square against a 0.029% baseline
-      of ground steeper than 45 degrees:
-
-      | approach | cliffs | level-0 chunk build |
-      |---|---|---|
-      | baseline (hash lattice, terrain-blind) | 0.029% | 36 ms |
-      | node siting scored on slope + height | 0.039% | 50 ms |
-      | + per-point contour relaxation | 0.071% | 86 ms |
-      | + slope penalty and a shorter slide | 0.049% | 119 ms |
-
-      Every variant made the world WORSE and slower, and the reason is worth keeping: routing
-      a road into flat ground puts it along valley FLOORS, and the carve then has to cut its
-      shelf into the steeper valley SIDES. The cliffs are a property of the carve meeting
-      steep ground, not of where the centreline runs — so improving the route in isolation
-      moves the road towards exactly the places where the carve does the most damage.
-      Contour-relaxing individual points is worse still: matching a neighbour's height sends
-      the point sideways across a ravine to find it, which is how the 80–90 degree band
-      appeared for the first time.
-
-      **What would actually work:** solve the route and the carve TOGETHER. The cost of a
-      candidate point has to include what the carve will have to do there — the earthwork
-      volume and the steepest face it will leave — not just the ground it sits on. That is a
-      proper cost-based search with a gradient limit and switchback insertion, and it is more
-      than one pass of work. Do not attempt it as a tweak to nodePos again.
-- [ ] **Road junctions must meet at one level.** "There are cliffs directly coming through the
-      roads as one road intersects to another. Roads should intersect on the same level with
-      each other at all times." The accumulated carve fixed the terrain step, but the two
-      RIBBONS still cross at whatever heights their own smoothing gave them. Junctions need a
-      shared node height that every edge meeting there is pinned to.
-- [ ] **Biomes must differ by more than height.** "The biomes are not substantially different
-      from one another, other than just in terrain height. I was hoping for actual desert
-      dunes, not just flat ground." Dunes need real transverse dune forms and no grass;
-      wetland needs standing water and reeds; highlands need rock and snow that read at
-      distance. The palette shifts exist; the FORMS do not.
-- [ ] **Petrol stations and fuel.** "We should be able to stop at petrol stations that fill up
-      after a long time — maybe 6 min of driving you run out." A reason to stop, and the most
-      cozy possible failure state. Stations belong at road junctions; the gauge should be
-      quiet until it matters.
-- [ ] **Chrome extension: drive beside YouTube.** Game docked left or right of the video,
-      resizable, car button next to Subscribe. LEGAL POSITION FIRST — see docs/EXTENSION.md
-      before writing any of it.
+- [ ] **R2 — roads cross each other at different heights.** 3 of 10 crossings mismatched, worst
+      1.52 m. This is the operator's "some go under the others, some go above the others… they
+      just run over each other" and it is also why he falls through onto a lower plane. Every
+      edge that crosses another must share a height there. Junctions need a pinned node height
+      that all edges meeting at them adopt.
+- [ ] **R1 — terrain stands proud of the road.** 2 of 100 centreline points buried, worst
+      0.75 m: "there seem to be these dirt hills that come up from the ground in the middle of
+      the road. There should be nothing above a road ever." The carve blends by distance, so
+      where two roads' shoulders overlap the blend can leave the ground above the ribbon.
+- [ ] **C2 — the brakes are molasses.** 47 m to stop from 100 km/h, want under 40. Brake torque
+      was already doubled once; the limit now is the tyre, so this needs a shorter stop through
+      weight transfer and a stronger front bias, and it should differ per car by design.
+- [ ] **O2 — off-road is not slow enough.** 61.6 km/h off-road against 91 on, i.e. 68% when the
+      requirement is under 55%. "Off-road still feels pretty much like on road right now."
+- [ ] **W4 — land presets are nearly flat.** 8.5 m of relief in a 720 m square. "I'll push
+      escape and click on alpine and I'm on like a flatline." The preset reaches the workers
+      now, so the fault is in the amplitudes themselves, not the plumbing.
+- [ ] **W5 — nothing to head towards.** Best rise within 4 km is 33 m. The operator wants a
+      landmark visible from spawn: "there's somewhere to go, you know."
+- [ ] **R5 — roads still do not curve.** 105 degrees of turn per km; a road with real bends is
+      well over 200. "They're still straight lines attached to each other." NOTE the reverted
+      attempt recorded below — do not retry it as a tweak to nodePos.
+- [ ] **T2 — the car looks washed out.** Peak saturation 0.299 on the body. "It looks almost
+      transparent, as if the colour is not added properly."
+- [ ] **O1 — off-road is judged at the car's centre.** "If either wheel leaves the road, it
+      should tell you that you're off-road." Not yet measured; needs a per-wheel road query.
+- [ ] **W1 — trees do not stop you.** "The trees should have hitboxes and when you hit them you
+      should come to a dead stop." Currently a glancing impulse.
+- [ ] **W7 — water is a trap.** Auto-recover to the road after a second in water, and find a
+      better-looking water treatment.
+- [ ] **G1 — the streak is not clear enough.** The operator wants how far he has gone without
+      leaving the road to be obvious, not a small number in a corner.
+- [ ] **G6 — multiplayer has never been played.** "How do I test the multiplayer aspect?" Two
+      headless clients, each must appear in the other's peer list, and there should be a plain
+      way for a human to join a second window.
+- [ ] **C6 — the car points into the hill when climbing.**
+- [ ] **O4 — no rollover off-road.** "There should be the potential to flip over like a real car."
 
 ## Next
 
