@@ -18,15 +18,6 @@ recorded finding is a complete pass.
 
 **Then, from the measured requirements suite:**
 
-- [ ] **R2 — roads cross each other at different heights.** 3 of 10 crossings mismatched, worst
-      1.52 m. This is the operator's "some go under the others, some go above the others… they
-      just run over each other" and it is also why he falls through onto a lower plane. Every
-      edge that crosses another must share a height there. Junctions need a pinned node height
-      that all edges meeting at them adopt.
-- [ ] **R1 — terrain stands proud of the road.** 2 of 100 centreline points buried, worst
-      0.75 m: "there seem to be these dirt hills that come up from the ground in the middle of
-      the road. There should be nothing above a road ever." The carve blends by distance, so
-      where two roads' shoulders overlap the blend can leave the ground above the ribbon.
 - [ ] **C2 — the brakes are molasses.** 47 m to stop from 100 km/h, want under 40. Brake torque
       was already doubled once; the limit now is the tyre, so this needs a shorter stop through
       weight transfer and a stronger front bias, and it should differ per car by design.
@@ -86,6 +77,13 @@ Newly asked for, not yet started:
       answer; sources are listed in docs/CREDITS.md.
 
 ## Done
+
+- [x] **Roads crossed each other at different heights** — 3 of 10 crossings out by up to
+      1.52 m, which is a lane visibly passing over or under a road and the gap the player fell
+      through. Crossings are now levelled: the arterial keeps its height and the lane is
+      pulled to match, feathered along the lane so it arrives level rather than stepping, and
+      lanes yield to each other in a stable key order so no pair can oscillate. R1 and R2 both
+      went to 0. Cliffs improved to 0.027% as a side effect.
 
 - [x] **Auto-drive drove itself off the road** — the cross-track term was ADDED when it had to
       be subtracted. `lateral` is positive when the car is screen-left and the solver's
