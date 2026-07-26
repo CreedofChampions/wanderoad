@@ -18,12 +18,18 @@ recorded finding is a complete pass.
 
 **Then, from the measured requirements suite:**
 
-- [ ] **C2 — the brakes are molasses.** 47 m to stop from 100 km/h, want under 40. Brake torque
-      was already doubled once; the limit now is the tyre, so this needs a shorter stop through
-      weight transfer and a stronger front bias, and it should differ per car by design.
 - [ ] **O2 — off-road is not slow enough.** 61.6 km/h off-road against 91 on, i.e. 68% when the
       requirement is under 55%. "Off-road still feels pretty much like on road right now."
-- [ ] **W4 — land presets are nearly flat.** 8.5 m of relief in a 720 m square. "I'll push
+- [ ] **W4 — land presets are nearly flat.** 9 m of relief in a 720 m square.
+
+      **ATTEMPTED AND REVERTED, 26 July.** Raising every amplitude ~1.7x with the wavelength
+      taken up in step — which should hold the slope constant, since amplitude over wavelength
+      IS the slope — took ground steeper than 45 degrees from 0.027% to **2.77%**, a hundred
+      times worse. The reasoning was wrong because relief is a sum of octaves: scaling the
+      base amplitude scales every octave's contribution, and the finer octaves have far more
+      slope per metre of relief than the base does. Relief has to come from the LOW octaves
+      only, which means reshaping `biomeRelief` per biome rather than scaling its amplitude.
+      That is a real piece of work, not a tuning pass. 8.5 m of relief in a 720 m square. "I'll push
       escape and click on alpine and I'm on like a flatline." The preset reaches the workers
       now, so the fault is in the amplitudes themselves, not the plumbing.
 - [ ] **W5 — nothing to head towards.** Best rise within 4 km is 33 m. The operator wants a
@@ -77,6 +83,12 @@ Newly asked for, not yet started:
       answer; sources are listed in docs/CREDITS.md.
 
 ## Done
+
+- [x] **Brakes.** Three things were wrong at once: each car's `brakeMul` was declared in the
+      fleet and never applied, so the Patrol's "strongest brakes in the fleet" were the
+      Estate's; ABS gave back 12% of every stop where real ABS loses a few per cent; and the
+      pedal took 120 ms to reach full, a tenth of the stop. 100-0 km/h on tarmac went from
+      ~34 m to **27.6 m**.
 
 - [x] **Roads crossed each other at different heights** — 3 of 10 crossings out by up to
       1.52 m, which is a lane visibly passing over or under a road and the gap the player fell

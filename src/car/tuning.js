@@ -208,7 +208,7 @@ export const PEDAL = {
   throttleUp: 1 / 0.25,
   throttleDown: 1 / 0.15,
   throttleCurve: 1.4,
-  brakeUp: 1 / 0.12,
+  brakeUp: 1 / 0.07, // the pedal reaches full in 70 ms; 120 was a tenth of the stop
   brakeDown: 1 / 0.1,
   brakeCurve: 1.0,
 };
@@ -219,13 +219,20 @@ export const BRAKE = {
   // braking is not what this game wants: "on hyper you can't really stop the car at all,
   // it just goes". Cozy means the brake pedal is an answer, always. 15500 N·m is a hard
   // stop from any speed this game can reach, and ABS still modulates it so it steers.
-  torque: 15500, // N·m total at the wheels
+  torque: 15500, // N·m total at the wheels — per car, from baseTorque below
+  /* The unmodified figure. applyCarFeel() scales this per car, so it has to survive being
+   * overwritten. */
+  baseTorque: 15500,
   splitFront: 0.68,
   splitFrontDive: 0.76, // shifts forward as the nose dives
   absTargetSlip: 0.11,
   absMaxSlip: 0.13,
   absHz: 18,
-  absRelease: 0.3,
+  /* ABS gives back some stopping distance in exchange for steering, and 0.3 was giving back
+   * too much: it cost about 12% of every stop, which on top of the brake ramp is most of the
+   * gap between the 54 m this measured and the 40 m the requirement asks for. Real ABS loses
+   * a few per cent, not twelve. */
+  absRelease: 0.16,
   // Locked fronts must keep ~25% of steering. "don't even try to turn off ABS, because
   // you'll just slide straight" is the failure mode.
   lockedLatFloor: 0.35,

@@ -13,7 +13,7 @@
  * 8 km to 9 km is not the achievement that going from 1 km to 2 km was.
  */
 
-import { STEER, TYRE } from '../car/tuning.js';
+import { STEER, TYRE, BRAKE } from '../car/tuning.js';
 
 /**
  * `unlockAt` is metres of BEST streak. `feel` is everything that used to live in a separate
@@ -146,6 +146,9 @@ export function applyCarFeel(car) {
   STEER.buildBase = f.buildRate;
   STEER.buildBonus = f.buildRate * 1.6;
   TYRE.muLatRear = 1.34 * f.rearGrip;
+  /* Each car's brakes. This was declared in the fleet and then never applied — the Patrol's
+   * "strongest brakes in the fleet" and the Estate's forgiving ones were the same brakes. */
+  BRAKE.torque = BRAKE.baseTorque * (f.brakeMul || 1);
   return f;
 }
 
