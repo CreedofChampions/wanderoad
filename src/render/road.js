@@ -30,8 +30,8 @@ import {
 } from 'three';
 import { vertHead, fragHead, GL_HASH, GL_NOISE, GL_SKY, GL_SHADOW, GL_LIGHT, glCloudField } from '../core/glsl.js';
 import { sharedUniforms } from './uniforms.js';
-import { edgesInBox, TIERS } from '../world/roads.js';
-import { landFn } from '../world/terrain.js';
+import { edgesInBox, TIERS, profileEdge } from '../world/roads.js';
+import { landFn, waterFn } from '../world/terrain.js';
 import { hash2i, clamp01, lerp } from '../core/math.js';
 import { RGB } from '../core/palette.js';
 import { PB, pbox, pcyl, finishPainted, createPaintedMaterial, MAT } from './painted.js';
@@ -332,6 +332,7 @@ export class Roads {
     this._lastX = Infinity;
     this._lastZ = Infinity;
     this._height = landFn(this.seed);
+    this._water = waterFn(this.seed);
     this.stats = { edges: 0, tris: 0 };
   }
 
@@ -348,22 +349,9 @@ export class Roads {
     for (const e of edges) {
       wanted.add(e.key);
       if (this.live.has(e.key)) continue;
-      // The network stores no elevation until a RoadField fills it in, so do that here from
-      // the raw land — the same function the terrain carve used, which is why the ribbon and
-      // the shelf agree.
-      const nY = e.y.length;
-      for (let k = 0; k < nY; k++) e.y[k] = this._height(e.pts[k * 2], e.pts[k * 2 + 1]);
-      const passes = e.tier === 0 ? 6 : 3;
-      const tmp = new Float32Array(nY);
-      for (let p = 0; p < passes; p++) {
-        for (let k = 0; k < nY; k++) {
-          const a = e.y[Math.max(0, k - 1)];
-          const b = e.y[k];
-          const c = e.y[Math.min(nY - 1, k + 1)];
-          tmp[k] = a * 0.25 + b * 0.5 + c * 0.25;
-        }
-        e.y.set(tmp);
-      }
+      // Exactly the same profile the terrain carve used — one function, so the ribbon and
+      // the shelf under it can never disagree about where the road is.
+      profileEdge(e, this._height, this._water);
 
       const { geometry, ring, half } = buildRibbon(e);
       const mesh = new Mesh(geometry, this.material);

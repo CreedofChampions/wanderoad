@@ -152,34 +152,94 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
   group.name = `car:${car}`;
   group.add(src);
 
-  /* ── find the wheels ────────────────────────────────────────────────── */
-  const wheels = { fl: null, fr: null, rear: null, all: [] };
+  /* ── build a wheel rig ──────────────────────────────────────────────────
+   * Two things about these packs make the naive approach fail, and both were visible in the
+   * game as "the wheels rotate around the car":
+   *
+   *   1. A corner is TWO meshes, not one (`...FrontLeftWheel...-Mesh` and `-Mesh_1`: the
+   *      tyre and the rim). Steering only the one you happened to keep leaves the other
+   *      behind, and half a wheel swinging on its own is exactly what it looks like.
+   *   2. Steering and rolling cannot share one Euler. With the default XYZ order the roll is
+   *      applied in the PARENT frame, so a steered wheel rolls about the car's axis instead
+   *      of its own and describes a cone.
+   *
+   * So: group the meshes by corner, and give each corner two nested nodes — an outer one
+   * that only ever yaws (steering) and an inner one that only ever pitches (rolling).
+   */
+  const corners = new Map();
+  const wheelMeshes = [];
   src.traverse((o) => {
-    const n = (o.name || '').toLowerCase();
-    if (!n.includes('wheel')) return;
-    wheels.all.push(o);
-    if (n.includes('frontleft')) wheels.fl = o;
-    else if (n.includes('frontright')) wheels.fr = o;
-    else if (n.includes('back') || n.includes('rear')) wheels.rear = o;
+    if (o.isMesh && /wheel/i.test(o.name || '')) wheelMeshes.push(o);
   });
-  for (const w of wheels.all) w.userData.baseY = w.rotation.y;
+  for (const o of wheelMeshes) {
+    const n = (o.name || '').toLowerCase();
+    const key = n.includes('frontleft')
+      ? 'fl'
+      : n.includes('frontright')
+        ? 'fr'
+        : n.includes('rearleft')
+          ? 'rl'
+          : n.includes('rearright')
+            ? 'rr'
+            : n.includes('front')
+              ? 'f'
+              : 'r';
+    if (!corners.has(key)) corners.set(key, []);
+    corners.get(key).push(o);
+  }
+
+  const wheels = { steer: [], spin: [], all: [] };
+  for (const [key, list] of corners) {
+    // The hub is the centre of everything at this corner, measured in the car's own space.
+    const box = new Box3();
+    for (const o of list) {
+      o.updateMatrixWorld(true);
+      box.expandByObject(o);
+    }
+    const hubWorld = new Vector3();
+    box.getCenter(hubWorld);
+    const parent = list[0].parent;
+    const hub = parent.worldToLocal(hubWorld.clone());
+
+    const steer = new Group();
+    steer.name = `wheel:${key}:steer`;
+    steer.position.copy(hub);
+    parent.add(steer);
+
+    const spin = new Group();
+    spin.name = `wheel:${key}:spin`;
+    steer.add(spin);
+
+    for (const o of list) {
+      // Re-express each mesh relative to the hub, then hang it off the spin node. The
+      // geometry keeps its own shape; only where its origin sits changes.
+      const local = o.position.clone().sub(hub);
+      spin.add(o);
+      o.position.copy(local);
+    }
+
+    wheels.all.push(spin);
+    wheels.spin.push(spin);
+    if (key === 'fl' || key === 'fr' || key === 'f') wheels.steer.push(steer);
+  }
 
   const api = {
     group,
     wheels: wheels.all,
+    steerNodes: wheels.steer,
     source: car,
     label: spec.label,
     tier: spec.tier,
 
     setSteer(rad) {
-      // Only the front wheels steer, and only if the pack named them. The sign is negated
-      // for the same handedness reason as the input layer: +yaw is screen-left.
-      if (wheels.fl) wheels.fl.rotation.y = wheels.fl.userData.baseY - rad;
-      if (wheels.fr) wheels.fr.rotation.y = wheels.fr.userData.baseY - rad;
+      // Every mesh at a front corner turns, on the outer node, which only ever yaws.
+      for (const s of wheels.steer) s.rotation.y = -rad;
     },
 
     setWheelSpin(rad) {
-      for (const w of wheels.all) w.rotation.x = rad;
+      // Wrap, so the float does not grow without bound over a long drive.
+      const r = rad % (Math.PI * 2);
+      for (const w of wheels.spin) w.rotation.x = r;
     },
 
     setBrakeGlow() {

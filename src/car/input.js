@@ -22,9 +22,12 @@ const KEYMAP = {
   shiftUp: ['KeyE', 'ShiftRight'],
   shiftDown: ['KeyQ'],
   camera: ['KeyC'],
-  reverse: ['KeyR'],
+  // R is RESET — it is the key people reach for when they are stuck, and it was on T.
+  reset: ['KeyR', 'KeyT'],
+  reverse: ['KeyB'],
+  nextCar: ['KeyV'],
+  radio: ['KeyN'],
   horn: ['KeyH'],
-  reset: ['KeyT'],
   fine: ['ShiftLeft'],
   attack: ['ControlLeft'],
 };
@@ -204,8 +207,11 @@ export const KEY_HELP = [
   ['Space', 'handbrake'],
   ['Shift', 'fine control'],
   ['C', 'camera'],
-  ['R', 'reverse'],
-  ['T', 'recover'],
+  ['R', 'back to the road'],
+  ['V', 'next car'],
+  ['B', 'reverse (or just hold brake when stopped)'],
+  ['N', 'radio'],
+  ['Esc / M', 'garage'],
   ['H', 'horn'],
   ['1 2 3 4', 'assists: cruise / sport / off / hardcore'],
 ];

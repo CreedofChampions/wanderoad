@@ -25,6 +25,21 @@ export const PHYSICS_HZ = 120; // fixed step. TDU's own bugs get worse at variab
 export const PHYSICS_DT = 1 / PHYSICS_HZ;
 export const MAX_SUBSTEPS = 5; // clamp at 41 ms; below that we accept slow motion over a spiral
 
+/* NOTE on cdA: these are roughly twice a real car's drag area. They are the cheapest honest
+ * lever for a lower top speed that still leaves acceleration and gearing feeling normal —
+ * cutting torque instead would make the car feel gutless off the line, and a speed limiter
+ * would feel like a wall. Shorter final drives do the rest.
+ */
+
+/* ── the pace ─────────────────────────────────────────────────────────────
+ * This is a COZY driving game, and the first playable build was not: "the sense of speed is
+ * high, but this is a cozy driving game", "we need to make the speed less across the board",
+ * "on hyper you can't really stop the car at all". Everything below is roughly 45% slower
+ * than a real car of the same description, and it stops far harder than one. That is a
+ * deliberate genre choice, not a physics error — 130 km/h down a country lane you are
+ * looking at is worth more here than 300 km/h you are surviving.
+ */
+
 /* ── chassis ────────────────────────────────────────────────────────────── */
 export const TIERS = {
   gt: {
@@ -35,15 +50,15 @@ export const TIERS = {
     track: 1.6,
     cgHeight: 0.45,
     weightRear: 0.5,
-    power: 300, // hp, for the HUD only — torque curve below is the truth
-    peakTorque: 400, // N·m at the crank
+    power: 165, // hp, for the HUD only — torque curve below is the truth
+    peakTorque: 235, // N·m at the crank
     redline: 6800,
-    cdA: 0.72,
+    cdA: 1.9,
     rollPerG: 3.4,
-    topSpeed: 250, // km/h, the acceptance target
-    zeroTo100: 5.3,
-    ratios: [3.55, 2.28, 1.65, 1.28, 1.0, 0.82],
-    finalDrive: 3.42,
+    topSpeed: 135, // km/h, the acceptance target
+    zeroTo100: 9.5,
+    ratios: [4.1, 2.62, 1.9, 1.47, 1.15, 0.98],
+    finalDrive: 4.1,
     wheelRadius: 0.34,
     drive: 'rwd',
   },
@@ -55,15 +70,15 @@ export const TIERS = {
     track: 1.62,
     cgHeight: 0.42,
     weightRear: 0.53,
-    power: 550,
-    peakTorque: 650,
+    power: 300,
+    peakTorque: 370,
     redline: 7200,
-    cdA: 0.62,
+    cdA: 1.62,
     rollPerG: 2.5,
-    topSpeed: 305,
-    zeroTo100: 3.8,
-    ratios: [3.55, 2.28, 1.65, 1.28, 1.0, 0.82],
-    finalDrive: 3.42,
+    topSpeed: 165,
+    zeroTo100: 7.0,
+    ratios: [3.9, 2.5, 1.81, 1.4, 1.1, 0.93],
+    finalDrive: 3.95,
     wheelRadius: 0.34,
     drive: 'rwd',
   },
@@ -75,15 +90,15 @@ export const TIERS = {
     track: 1.68,
     cgHeight: 0.38,
     weightRear: 0.56,
-    power: 800,
-    peakTorque: 850,
+    power: 380,
+    peakTorque: 405,
     redline: 8200,
-    cdA: 0.58,
+    cdA: 1.48,
     rollPerG: 1.7,
-    topSpeed: 340,
-    zeroTo100: 2.9,
-    ratios: [3.4, 2.19, 1.63, 1.29, 1.03, 0.84],
-    finalDrive: 3.55,
+    topSpeed: 190,
+    zeroTo100: 5.6,
+    ratios: [3.7, 2.38, 1.77, 1.4, 1.12, 0.94],
+    finalDrive: 3.9,
     wheelRadius: 0.35,
     drive: 'awd',
   },
@@ -150,14 +165,23 @@ export const STEER = {
    * uses. The driver keeps the whole range — they just have to be going slowly to reach the
    * end of it, exactly like a real car. Ctrl (attack) raises the ceiling for a deliberate
    * throw, and the drift bonus in maxSteerAngle() still applies once you are sideways. */
-  comfortG: 9.4, // m/s², about 0.96 g
-  attackG: 15.0,
+  comfortG: 8.4, // m/s², about 0.86 g
+  attackG: 14.0,
+  /* A floor under the comfort limiter, in metres of turning radius. The limiter is a
+   * lateral-acceleration cap, and a cap on acceleration says nothing useful below walking
+   * pace — but it does keep shrinking the available lock all the way down, which is why
+   * low-speed turning felt heavy. Below this radius the mechanical rack takes over. */
+  minRadius: 7.0,
   // Asymmetric keyboard ramp: build slowly, return fast. Telemetry on keyboard driving shows
   // the winning trace has a much higher return rate than build rate.
-  buildBase: 2.0,
-  buildBonus: 2.0,
-  buildFalloff: 25, // m/s
-  returnRate: 7.5,
+  // "Turning left and right at low speed seems too difficult" / "the left and right feel
+  // muddy". Both are this ramp: on a keyboard the only way to a big steering angle is to
+  // hold the key, and at 2.0/s that is half a second of nothing happening. Doubled at low
+  // speed, and it still tapers off as you go faster so a twitch at 150 km/h is impossible.
+  buildBase: 2.4,
+  buildBonus: 4.2,
+  buildFalloff: 18, // m/s
+  returnRate: 8.5,
   // gamepad: no ramp, but rate-limit the virtual wheel to TDU's 900 °/s
   padRateLimit: (900 * Math.PI) / 180,
   padDeadzone: 0.04,
@@ -191,11 +215,11 @@ export const PEDAL = {
 
 /* ── brakes ─────────────────────────────────────────────────────────────── */
 export const BRAKE = {
-  // Total brake torque at the wheels. The research figure of 4200 N·m was quoted at the
-  // discs; through a 0.34 m rolling radius that is only 0.87 g, and the design target is
-  // 1.15 g with ABS (100-0 km/h in ~34 m). 8400 N·m is what actually produces it, and the
-  // acceptance test in tools/bench-car.mjs is what caught the difference.
-  torque: 8400, // N·m total at the wheels
+  // Total brake torque at the wheels. 8400 N·m gave a realistic 1.15 g, and a real car's
+  // braking is not what this game wants: "on hyper you can't really stop the car at all,
+  // it just goes". Cozy means the brake pedal is an answer, always. 15500 N·m is a hard
+  // stop from any speed this game can reach, and ABS still modulates it so it steers.
+  torque: 15500, // N·m total at the wheels
   splitFront: 0.68,
   splitFrontDive: 0.76, // shifts forward as the nose dives
   absTargetSlip: 0.11,
@@ -299,10 +323,13 @@ export const SUSPENSION = {
  * own guide warns against turning everything off without a wheel. SPORT is the default
  * because it is the setting a keyboard player can actually enjoy.
  */
+/* NOTE on autoGears: only HARDCORE turns the automatic off, and even that is a debt — the
+ * game has no manual shift keys bound, so `autoGears: false` means the car is stuck in first
+ * for ever. That is exactly what happened to the Drift preset on the first live build. */
 export const PRESETS = {
   cruise: { counterSteer: 0.95, stability: 0.35, tcs: 0.4, abs: 0.8, autoGears: true, lockFloor: (10 * Math.PI) / 180, brakeMul: 1.0, airborne: 1.0 },
   sport: { counterSteer: 0.7, stability: 0.2, tcs: 0.2, abs: 0.6, autoGears: true, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
-  off: { counterSteer: 0.3, stability: 0.05, tcs: 0.0, abs: 0.3, autoGears: false, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
+  off: { counterSteer: 0.3, stability: 0.05, tcs: 0.0, abs: 0.3, autoGears: true, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
   hardcore: { counterSteer: 0.0, stability: 0.0, tcs: 0.0, abs: 0.0, autoGears: false, lockFloor: STEER.minAngle, brakeMul: 0.82, airborne: 0.0 },
 };
 
@@ -360,7 +387,7 @@ export const CAMERA = {
     pitchClamp: (6 * Math.PI) / 180,
     shake: (0.35 * Math.PI) / 180,
     shakeHz: 11,
-    shakeFrom: 170 / 3.6,
+    shakeFrom: 145 / 3.6,
   },
   hood: { behind: -0.35, above: 1.15, lookAhead: 6, lookHeight: 1.1, yawTau: 0.05, velocityBlend: 0, fov: 58, fovGain: 0 },
 };
@@ -370,5 +397,5 @@ export const SPEED_CUES = {
   blurFrom: 90 / 3.6,
   vignetteBase: 0.1,
   vignetteGain: 0.14,
-  refSpeed: 250 / 3.6,
+  refSpeed: 150 / 3.6,
 };

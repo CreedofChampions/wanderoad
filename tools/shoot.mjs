@@ -234,6 +234,54 @@ async function main() {
   await send('Page.navigate', { url });
   await sleep(WAIT);
 
+  const WHEELS = args.includes('--wheels');
+  let wheelCheck = null;
+  if (WHEELS) {
+    wheelCheck = await evalJs(`(() => { try {
+      const m = window.WANDEROAD.model;
+      const rows = m.wheels.map(w => {
+        const wp = new window.THREE.Vector3(); w.getWorldPosition(wp);
+        const c = new window.THREE.Vector3(); m.group.getWorldPosition(c);
+        return { name: w.name, local: [+w.position.x.toFixed(2), +w.position.y.toFixed(2), +w.position.z.toFixed(2)],
+                 offsetFromCar: [+(wp.x-c.x).toFixed(2), +(wp.y-c.y).toFixed(2), +(wp.z-c.z).toFixed(2)],
+                 kids: w.children.length };
+      });
+      // spin them and see whether the BODY moved
+      const body = m.group.children[0];
+      const before = new window.THREE.Vector3(); body.getWorldPosition(before);
+      m.setWheelSpin(1.2); m.group.updateMatrixWorld(true);
+      const after = new window.THREE.Vector3(); body.getWorldPosition(after);
+      return { rows, bodyMoved: +Math.hypot(after.x-before.x, after.y-before.y, after.z-before.z).toFixed(4) };
+    } catch(e){ return { error: String(e && e.message || e) }; } })()`);
+  }
+
+  const MENU = args.includes('--menu');
+  let menuCheck = null;
+  if (MENU) {
+    menuCheck = await evalJs(`(async () => { try {
+      const before = window.WANDEROAD.model.source;
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 400));
+      const m = document.getElementById('menu');
+      const openOk = m && !m.hidden;
+      const cars = [...m.querySelectorAll('button[data-group=\"car\"]')].map(b => b.dataset.key);
+      const pick = m.querySelector('button[data-group=\"car\"][data-key=\"rally\"]');
+      pick.click();
+      await new Promise(r => setTimeout(r, 3500));
+      const after = window.WANDEROAD.model.source;
+      const closed = m.hidden;
+      // and R must put us back on a road
+      const c = window.WANDEROAD.car;
+      c.x += 400; c.z += 400;
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', bubbles: true }));
+      await new Promise(r => setTimeout(r, 600));
+      const q = c.terrain.roads.query(c.x, c.z);
+      return { openOk, cars, before, after, swapped: before !== after, closedAfterPick: closed,
+               resetRoadDist: isFinite(q.d) ? +q.d.toFixed(1) : null,
+               wheels: window.WANDEROAD.model.wheels.length };
+    } catch (e) { return { error: String(e && e.message || e) }; } })()`);
+  }
+
   let drive = null;
   if (PLAY > 0) {
     const started = await evalJs(AUTOPILOT.replace('SECONDS', String(PLAY)));
@@ -280,7 +328,7 @@ async function main() {
   chrome.kill();
 
   const errs = logs.filter((l) => l.level === 'error' || l.level === 'exception');
-  console.log(JSON.stringify({ url, out, telemetry, drive, errors: errs.slice(0, 8), logCount: logs.length }, null, 2));
+  console.log(JSON.stringify({ url, out, telemetry, wheels: wheelCheck, menu: menuCheck, drive, errors: errs.slice(0, 8), logCount: logs.length }, null, 2));
   if (errs.length) process.exitCode = 2;
   else if (!telemetry || telemetry.error || !telemetry.tris) process.exitCode = 3;
   else if (drive && drive.faults && drive.faults.length) process.exitCode = 4;

@@ -11,6 +11,7 @@
  */
 
 import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, SRGBColorSpace } from 'three';
+import * as THREE_NS from 'three';
 import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
@@ -32,9 +33,10 @@ import { Input } from './car/input.js';
 import { ChaseCamera } from './car/camera.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak } from './game/streak.js';
-import { configFromUrl, applyFeel, applyTerrain, terrainBias } from './game/presets.js';
+import { configFromUrl, applyFeel, applyTerrain, terrainBias, FEELS } from './game/presets.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Hud } from './ui/hud.js';
+import { Menu } from './ui/menu.js';
 import { createTransport } from './net/transport.js';
 import { Remotes } from './net/remotes.js';
 import { identity } from './net/identity.js';
@@ -168,6 +170,60 @@ async function boot() {
   const hud = new Hud();
   const audio = new EngineAudio();
 
+  /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
+   * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
+  let carKeyLive = carKey;
+  async function swapCar(key) {
+    if (!CARS[key] || key === carKeyLive) return;
+    try {
+      const next = await loadCar({ car: key, paint: me.look?.paint ?? 0, base: new URL('./models/cars/', location.href).href });
+      scene.remove(model.group);
+      model.dispose?.();
+      model = next;
+      scene.add(model.group);
+      carKeyLive = key;
+      window.WANDEROAD.model = model;
+      hud.say(CARS[key].label, 2);
+    } catch (err) {
+      console.error('[car] swap failed', err?.message ?? err);
+      hud.say('that one would not load', 2.5);
+    }
+  }
+
+  const menu = new Menu({
+    onCar: swapCar,
+    onFeel: (k) => {
+      applyFeel(k);
+      car.setPreset(FEELS[k].assist);
+      chase.mode = FEELS[k].camera;
+      chase.reset();
+      hud.say(`${FEELS[k].label}`, 2);
+    },
+    onReset: () => backToRoad(),
+    camera: () => chase.mode,
+    cycleCam: () => chase.cycle(),
+  });
+  menu.setCurrent({ car: carKeyLive, feel: CFG.feel, terrain: CFG.terrain });
+
+  const openHint = document.createElement('div');
+  openHint.id = 'openMenu';
+  openHint.textContent = 'ESC — garage';
+  hud.root.appendChild(openHint);
+
+  /** Put the player back on the nearest road, facing along it. */
+  function backToRoad() {
+    const t = car.terrain || local;
+    const q = t.roads.query(car.x, car.z);
+    if (isFinite(q.d)) {
+      car.placeAt(q.qx, q.qz, Math.atan2(q.tx, q.tz));
+    } else {
+      const s = findSpawn(SEED, car.x, car.z);
+      car.placeAt(s.x, s.z, s.heading);
+    }
+    chase.reset();
+    hud.say('back on the road', 2);
+  }
+
   setStat('looking for company…', 0.7);
   const transport = createTransport({
     backend: OFFLINE ? 'none' : 'auto',
@@ -266,13 +322,15 @@ async function boot() {
     const cmd = input.poll();
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
     if (input.tapped('reverse')) car.reverse = !car.reverse;
-    if (input.tapped('horn')) audio.horn();
-    if (input.tapped('reset')) {
-      const s = findSpawn(SEED, car.x, car.z);
-      car.placeAt(s.x, s.z, s.heading);
-      chase.reset();
-      hud.say('back on the road', 2);
+    if (input.tapped('nextCar')) {
+      const i = CAR_KEYS.indexOf(carKeyLive);
+      const k = CAR_KEYS[(i + 1) % CAR_KEYS.length];
+      menu.setCurrent({ car: k });
+      swapCar(k);
     }
+    if (input.tapped('horn')) audio.horn();
+    if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
+    if (input.tapped('reset')) backToRoad();
     for (const [key, name] of [
       ['Digit1', 'cruise'],
       ['Digit2', 'sport'],
@@ -285,9 +343,9 @@ async function boot() {
       }
     }
 
-    /* physics */
+    /* physics — frozen while the garage is open, so nobody comes back to a crashed car */
     car.terrain = localFor(car.x, car.z);
-    car.update(dt, cmd);
+    if (!menu.open) car.update(dt, cmd);
 
     /* collisions — after the solver, before the camera, so the camera never chases a car
        that is momentarily inside a tree */
@@ -373,6 +431,7 @@ async function boot() {
   requestAnimationFrame(frame);
 
   // for the console, and for tools/shoot.mjs
+  window.THREE = THREE_NS; // debug/telemetry only — the game never reads it
   window.WANDEROAD = {
     renderer,
     scene,

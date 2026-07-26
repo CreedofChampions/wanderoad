@@ -159,7 +159,10 @@ export function biomeWeightsFromClimate(u, out = _w) {
  * weighted sum, which is why a meadow/highland border is a foothill and not a cliff.
  *
  *  amp      metres of relief the biome adds
- *  base     metres the biome shifts the ground up or down
+ *  base     metres the biome shifts the ground up or down. Keep the spread between biomes
+ *           SMALL: a base difference is a step that appears wherever the biome mix changes
+ *           quickly, and it is the one source of steep ground that is not a road embankment.
+ *           Height differences belong in `amp`, which is spread over a wavelength.
  *  rough    how much ridged (sharp) vs fbm (soft) noise it uses, 0..1
  *  wave     the dominant wavelength of its relief, in metres
  *  drive    how much the biome flattens under a road. This is 1.0 everywhere and should
@@ -181,7 +184,7 @@ export function biomeWeightsFromClimate(u, out = _w) {
 export const BIOME_TERRAIN = [
   { amp: 30, base: 6, rough: 0.18, wave: 460, drive: 1.0, water: 1.2 }, // MEADOW
   { amp: 18, base: 3, rough: 0.1, wave: 900, drive: 1.0, water: 0.0 }, // STEPPE
-  { amp: 165, base: 40, rough: 0.86, wave: 1600, drive: 1.0, water: 0.6 }, // HIGHLAND
+  { amp: 178, base: 14, rough: 0.86, wave: 1600, drive: 1.0, water: 0.6 }, // HIGHLAND
   { amp: 26, base: 2, rough: 0.02, wave: 430, drive: 1.0, water: 0.0 }, // DUNES
   { amp: 7, base: -2, rough: 0.05, wave: 700, drive: 1.0, water: 2.5 }, // WETLAND
 ];

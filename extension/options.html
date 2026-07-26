@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Wanderoad — options</title>
+    <style>
+      body {
+        font: 15px/1.6 'Iowan Old Style', Palatino, Georgia, serif;
+        color: #3a4356;
+        background: #f6ecd8;
+        margin: 0;
+        padding: 2.2rem 1.4rem 3rem;
+      }
+      .wrap { max-width: 40rem; margin: 0 auto; }
+      h1 { font-weight: 400; letter-spacing: 0.04em; font-size: 2rem; margin: 0 0 0.2rem; }
+      p.sub { opacity: 0.72; margin: 0 0 1.6rem; }
+      .card {
+        background: rgba(255, 255, 255, 0.62);
+        border-radius: 14px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 1rem;
+      }
+      label { display: flex; gap: 0.7rem; align-items: flex-start; cursor: pointer; }
+      input[type='checkbox'] { margin-top: 0.35rem; width: 1.05rem; height: 1.05rem; flex: none; }
+      .note { font-size: 0.86rem; opacity: 0.74; margin-top: 0.5rem; }
+      .side { display: flex; gap: 0.5rem; margin-top: 0.9rem; align-items: center; }
+      .side button {
+        font: inherit;
+        font-size: 0.9rem;
+        padding: 0.35rem 0.9rem;
+        border-radius: 9px;
+        border: 1px solid rgba(58, 67, 86, 0.2);
+        background: rgba(58, 67, 86, 0.07);
+        cursor: pointer;
+      }
+      .side button.on { background: #4e7f79; border-color: #4e7f79; color: #f6ecd8; }
+      code { background: rgba(58, 67, 86, 0.09); padding: 0.05rem 0.32rem; border-radius: 5px; }
+      a { color: #4e7f79; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Wanderoad</h1>
+      <p class="sub">
+        Click the toolbar icon, or press <code>Alt+D</code>, to open the game beside whatever you are
+        reading or watching.
+      </p>
+
+      <div class="card">
+        <label>
+          <input type="checkbox" id="dock" />
+          <span>
+            <strong>Dock the game inside YouTube pages</strong>
+            <div class="note">
+              The side panel always works and never touches the page — this option is only needed if you
+              want the game on the <em>left</em>, or a car button next to Subscribe.
+              <br /><br />
+              It is off by default on purpose. YouTube's terms ask you not to alter their pages. This only
+              adds a panel beside the content and never moves, hides or covers the player or any advert,
+              but it is your call to make rather than ours. Switching it on will ask Chrome for permission
+              to run on youtube.com.
+            </div>
+          </span>
+        </label>
+        <div class="side" id="sideRow" hidden>
+          <span style="opacity: 0.7; font-size: 0.86rem">Game on the</span>
+          <button data-side="left">Left</button>
+          <button data-side="right">Right</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>What this extension can see</strong>
+        <div class="note">
+          Nothing. A default install has no host permissions and no content script, so it cannot read a
+          single page you visit. It stores two settings and makes no network requests of its own. The game
+          is bundled rather than downloaded, which is why it also works with no connection.
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>Controls</strong>
+        <div class="note">
+          <code>W</code>/<code>S</code> throttle and brake · <code>A</code>/<code>D</code> steer ·
+          <code>Space</code> handbrake · <code>Shift</code> fine control · <code>R</code> back to the road ·
+          <code>C</code> camera · <code>V</code> next car · <code>N</code> radio ·
+          <code>Esc</code> garage. A gamepad works too.
+        </div>
+      </div>
+    </div>
+    <script src="options.js"></script>
+  </body>
+</html>

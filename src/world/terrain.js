@@ -20,6 +20,7 @@ import {
   BIOME_COUNT,
   BIOME_TERRAIN,
   BIOME_ROAD,
+  waterLevelAt,
 } from './biomes.js';
 import { RoadField } from './roads.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
@@ -54,6 +55,16 @@ export function landHeight(x, z, seed) {
 
 /** Bound a factory so RoadField can call it without knowing the seed. */
 export const landFn = (seed) => (x, z) => landHeight(x, z, seed);
+
+/**
+ * Water surface height at a point, or null if the land there is dry. The road network reads
+ * this so it can build a causeway instead of driving into a lake.
+ */
+export const waterFn = (seed) => (x, z) => {
+  const { w } = biomeWeights(x, z, seed, _wWater);
+  return waterLevelAt(w, reliefFromWeights(x, z, seed, w));
+};
+const _wWater = new Float32Array(BIOME_COUNT);
 
 /* ── climate cache ──────────────────────────────────────────────────────────
  * The climate fields have wavelengths of 7–15 km, but computing one costs three warped
@@ -126,7 +137,7 @@ export class Terrain {
   constructor(seed, x0, z0, x1, z1, pad = 80) {
     this.seed = seed;
     this.climate = new ClimateGrid(seed, x0, z0, x1, z1, pad + 64);
-    this.roads = new RoadField(x0, z0, x1, z1, seed, landFn(seed), pad);
+    this.roads = new RoadField(x0, z0, x1, z1, seed, landFn(seed), pad, waterFn(seed));
     this._carve = { mask: 0, y: 0, edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0, width: 0 };
     this._wl = new Float32Array(BIOME_COUNT);
   }

@@ -1,0 +1,118 @@
+/* Wanderoad — in-page dock styling.
+ *
+ * Every rule here is scoped to our own two elements. There is not a single selector in this
+ * file that touches a YouTube class, id or element, which is deliberate: a stylesheet that
+ * reaches into someone else's page is exactly the kind of "altering the Service" the terms
+ * ask you not to do, and it is also how extensions break when the page is redesigned.
+ */
+
+#wanderoad-dock {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  background: #0e1219;
+  box-shadow: 0 0 30px rgba(10, 14, 20, 0.5);
+  font-family: 'Iowan Old Style', Palatino, Georgia, serif;
+  color: #f6ecd8;
+}
+#wanderoad-dock[data-side='left'] {
+  left: 0;
+}
+#wanderoad-dock[data-side='right'] {
+  right: 0;
+}
+
+#wanderoad-dock .wr-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 30px;
+  padding: 0 0.35rem 0 0.7rem;
+  background: rgba(58, 67, 86, 0.5);
+  flex: none;
+}
+#wanderoad-dock .wr-title {
+  flex: 1;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  opacity: 0.8;
+}
+#wanderoad-dock .wr-bar button {
+  all: unset;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.72;
+}
+#wanderoad-dock .wr-bar button:hover {
+  background: rgba(246, 236, 216, 0.16);
+  opacity: 1;
+}
+
+#wanderoad-dock .wr-frame {
+  flex: 1;
+  border: 0;
+  width: 100%;
+  display: block;
+}
+
+/* The resize grip: a thin strip on whichever edge faces the page. */
+#wanderoad-dock .wr-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+}
+#wanderoad-dock[data-side='left'] .wr-grip {
+  right: -4px;
+}
+#wanderoad-dock[data-side='right'] .wr-grip {
+  left: -4px;
+}
+#wanderoad-dock .wr-grip:hover {
+  background: rgba(232, 201, 138, 0.35);
+}
+
+/* While a drag is in flight, stop the page selecting text under the cursor. */
+body.wr-dragging {
+  user-select: none;
+  cursor: col-resize;
+}
+
+/* The button next to Subscribe. Sized and shaped to sit politely in that row without
+ * imitating YouTube's own buttons — it should look like a guest, not like a native control. */
+#wanderoad-btn {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  margin-left: 8px;
+  padding: 0 14px;
+  border-radius: 18px;
+  cursor: pointer;
+  font: 500 14px/1 Roboto, Arial, sans-serif;
+  color: #f6ecd8;
+  background: #4e7f79;
+  vertical-align: middle;
+}
+#wanderoad-btn:hover {
+  background: #5a908a;
+}
+#wanderoad-btn.wr-on {
+  background: #c8503f;
+}
+#wanderoad-btn svg {
+  flex: none;
+}

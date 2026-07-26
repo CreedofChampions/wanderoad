@@ -1,0 +1,16 @@
+The seven car models in this folder are by Quaternius (https://quaternius.com), released
+under Creative Commons Zero 1.0 Universal (public domain):
+
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+Attribution is NOT required. It is given anyway, because it should be:
+
+    Cars by Quaternius — CC0. https://quaternius.com/packs/cars.html
+
+They were fetched anonymously over plain HTTP from Poly Pizza (https://poly.pizza), which
+serves the same CC0 files. No account and no API key were involved.
+
+Each model is untextured: geometry is POSITION + NORMAL only and every part is separated by
+material name (White / Grey / Black / Windows / Headlights / TailLights ...). Wanderoad reads
+those names and re-materials the whole car with its own painted shader, so nothing here ships
+a texture or a PBR material into the game.

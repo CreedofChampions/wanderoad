@@ -259,3 +259,111 @@ canvas {
 #hud[data-net='offline']::after {
   background: #b98a6a;
 }
+
+/* ── garage ───────────────────────────────────────────────────────────────
+ * A single sheet over the game. It is the only piece of the interface the player is meant
+ * to look AT rather than glance at, so it is the only piece allowed to be opaque. */
+#menu {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 26, 38, 0.55);
+  backdrop-filter: blur(7px);
+  pointer-events: auto;
+}
+#menu .sheet {
+  width: min(46rem, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+  background: rgba(246, 236, 216, 0.97);
+  color: var(--ink);
+  border-radius: 18px;
+  padding: clamp(1.2rem, 3vw, 2rem) clamp(1.2rem, 3vw, 2.2rem) 1.4rem;
+  box-shadow: 0 24px 70px rgba(14, 18, 25, 0.45);
+}
+#menu h2 {
+  font-size: clamp(1.6rem, 4vw, 2.2rem);
+  font-weight: 400;
+  letter-spacing: 0.05em;
+}
+#menu .hint {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+  margin-bottom: 0.4rem;
+}
+#menu h3 {
+  font-size: 0.78rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-weight: 600;
+  opacity: 0.62;
+  margin: 1.15rem 0 0.45rem;
+}
+#menu h3 small {
+  text-transform: none;
+  letter-spacing: 0.06em;
+  font-weight: 400;
+  opacity: 0.7;
+  margin-left: 0.5rem;
+}
+#menu .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+#menu button,
+#menu .btn {
+  font: inherit;
+  font-size: 0.92rem;
+  color: var(--ink);
+  background: rgba(58, 67, 86, 0.08);
+  border: 1px solid rgba(58, 67, 86, 0.16);
+  border-radius: 10px;
+  padding: 0.42rem 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+#menu button:hover,
+#menu .btn:hover {
+  background: rgba(58, 67, 86, 0.16);
+  transform: translateY(-1px);
+}
+#menu button.on {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: #f6ecd8;
+}
+#menu button:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+#menu .foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(58, 67, 86, 0.14);
+}
+#menu .foot [data-act='close'] {
+  margin-left: auto;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #f6ecd8;
+}
+
+/* the one persistent affordance: how to open the garage */
+#openMenu {
+  position: absolute;
+  top: clamp(1rem, 4vw, 2rem);
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  opacity: 0.34;
+  pointer-events: none;
+}

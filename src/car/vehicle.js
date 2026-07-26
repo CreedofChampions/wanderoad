@@ -27,7 +27,10 @@ import {
   PRESETS,
   ASSIST,
 } from './tuning.js';
-import { clamp, clamp01, lerp, angleDelta, damp } from '../core/math.js';
+import { clamp, clamp01, lerp, angleDelta, damp, hash2i } from '../core/math.js';
+
+/** Deterministic [-1,1] from a position — the bump field for loose surfaces. */
+const noiseAt = (x, z) => (hash2i(Math.round(x), Math.round(z), 0x5eed) / 4294967296) * 2 - 1;
 
 const TWO_PI = Math.PI * 2;
 
@@ -129,6 +132,7 @@ export class Vehicle {
     this.onGround = true;
     this.surfaceKind = 'ground';
     this.gripScale = 1;
+    this.rough = 0;
     this.wheels = [
       { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
       { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
@@ -176,7 +180,14 @@ export class Vehicle {
     const taper = STEER.minAngle + (STEER.maxAngle - STEER.minAngle) / (1 + Math.pow(v / STEER.taperSpeed, STEER.taperPow));
     // The limit that matters: whatever angle produces a comfortable cornering force here.
     const g = attack ? STEER.attackG : STEER.comfortG;
-    const comfort = v > 1 ? Math.atan((this.wb * g) / (v * v)) : STEER.maxAngle;
+    // The comfort limit, with a floor that only exists at low speed. A lateral-acceleration
+    // cap has nothing sensible to say at walking pace — squeezing the lock down there is what
+    // made turning feel heavy in a car park — but letting the floor reach into the cruising
+    // band puts the go-kart straight back. So it is full below 5 m/s and gone by 12.
+    const byG = v > 1 ? Math.atan((this.wb * g) / (v * v)) : STEER.maxAngle;
+    const parkish = 1 - clamp01((v - 5) / 7);
+    const byRadius = Math.atan(this.wb / STEER.minRadius) * parkish;
+    const comfort = Math.max(byG, byRadius);
     let m = Math.min(taper, comfort);
     m = Math.max(m, this.assist.lockFloor * 0.35, STEER.minAngle * 0.22);
     const beta = Math.abs(this.slip);
@@ -427,7 +438,16 @@ export class Vehicle {
     const limiter = this.rpm >= S.redline ? 0.15 : 1;
     const engineTorque = S.peakTorque * curveAt(TORQUE_CURVE, rpmFrac) * this.throttle * shiftCut * limiter;
     let driveForce = ((engineTorque * ratio) / S.wheelRadius) * (1 - GEARBOX.driveLoss);
-    if (this.reverse) driveForce = -Math.abs(driveForce) * 0.45;
+    /* Reverse should not need a gear key. Hold the brake with the car stopped and it backs
+     * up; touch the throttle and it goes forward again. "The ability to stop, turn around and
+     * change direction is key" — and on a keyboard the cheapest way to make that true is to
+     * let the pedals mean what they obviously mean. */
+    if (Math.abs(vLong) < 0.6 && this.brake > 0.35 && this.throttle < 0.05) this.reverse = true;
+    else if (this.throttle > 0.15 && vLong > -0.2) this.reverse = false;
+    if (this.reverse) {
+      // In reverse the brake IS the accelerator, and reverse is deliberately slow.
+      driveForce = -Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
+    }
 
     const driveLoad = S.drive === 'awd' ? W : loadRear;
     const maxTraction = TYRE.muLongPeak * this.gripScale * driveLoad;
@@ -443,6 +463,15 @@ export class Vehicle {
     // slightly, which is what makes wheelspin feel like wheelspin.
     const tractionCap = maxTraction * 1.15;
     if (Math.abs(driveForce) > tractionCap) driveForce = Math.sign(driveForce) * tractionCap;
+
+    /* A soft speed governor. Chasing a cozy top speed through drag area alone means either
+     * absurd aero numbers or a gutless car, and a hard limiter feels like hitting a wall. A
+     * taper over the last 15 km/h reads as the car simply running out of legs, which is what
+     * a real car near its top speed feels like anyway. */
+    const vMax = S.topSpeed / 3.6;
+    if (vLong > vMax - 4.2) {
+      driveForce *= clamp01((vMax - vLong) / 4.2);
+    }
     const slipRatio = maxTraction > 1 ? clamp(driveForce / maxTraction, -3, 3) * TYRE.peakSlipRatio : 0;
 
     /* ── brakes ────────────────────────────────────────────────────────── */
@@ -489,8 +518,14 @@ export class Vehicle {
      * have at all, and off a made road by a rolling resistance five times higher.
      */
     const drag = 0.5 * 1.225 * S.cdA * vLong * Math.abs(vLong);
-    const crr = lerp(0.055, 0.014, clamp01(this.gripScale * (surf ? surf.onRoad : 1)));
-    const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + 1.4 * vLong;
+    /* Off-road has to be a real decision, not a texture change: "speed should dramatically
+     * slow when off-road, at least 50%", "shouldn't be able to go over 100 km/h off-road
+     * ever". Rolling resistance on grass and sand is genuinely several times tarmac's, so
+     * this is honest physics pushed to the top of its honest range — plus a hard ceiling,
+     * because the point of the game is to stay on the road. */
+    const onRoad = surf ? surf.onRoad : 1;
+    const crr = lerp(0.145, 0.014, clamp01(onRoad));
+    const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + lerp(9.5, 1.4, clamp01(onRoad)) * vLong;
     // Closed throttle drives the engine through the transmission; the retarding force
     // scales with gear and rpm exactly as the drive force does.
     // ~95 N·m of pumping and friction losses at the crank with the throttle shut, which
@@ -500,6 +535,27 @@ export class Vehicle {
       this._shiftTimer > 0
         ? 0
         : (1 - this.throttle) * 95 * (0.3 + 0.7 * rpmFrac) * (ratio / S.wheelRadius) * Math.sign(vLong) * contact;
+
+    /* Loose surface. Off the carriageway the car should feel like it is on gravel — bumpy,
+     * reluctant to turn, and unwilling to build speed. The bump is a real vertical impulse
+     * from a hash of the position, so it is deterministic and it shakes the camera and the
+     * suspension the way a rough surface would. */
+    if (contact && onRoad < 0.6) {
+      const loose = 1 - onRoad;
+      const wob =
+        noiseAt(this.x * 0.31, this.z * 0.31) * 0.6 + noiseAt(this.x * 1.13 + 11.7, this.z * 1.13 - 4.2) * 0.4;
+      this.vy += wob * loose * Math.min(vMag, 24) * 0.055 * dt * 60;
+      // Loose gravel does not steer. This is on top of the grip loss, and it is what makes
+      // rejoining the road something you plan rather than something you flick.
+      fyFront *= 1 - 0.34 * loose;
+      fyRear *= 1 - 0.28 * loose;
+      this.rough = loose;
+    } else this.rough = 0;
+
+    /* Hard off-road ceiling. Above it the tyres simply stop putting power down — you can
+     * arrive off-road at speed and coast, but you cannot BUILD speed in a field. */
+    const offCap = lerp(27.8, 200, clamp01(onRoad * 1.4)); // 100 km/h off the carriageway
+    if (contact && vLong > offCap) driveForce = Math.min(driveForce, 0);
 
     /* ── integrate the planar body ─────────────────────────────────────── */
     const fxBody = fxTotal - drag - rr - engBrake;

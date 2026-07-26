@@ -199,6 +199,81 @@ export function edgesInBox(x0, z0, x1, z1, seed, pad = 40) {
 
 const _seg = { d: 0, t: 0, x: 0, z: 0 };
 
+/** Deepest fill or cutting a road is allowed to ask the land for, in metres. */
+const MAX_EARTHWORK = 18;
+
+/**
+ * Give an edge its elevation profile. Shared by the collision/carve field and by the visible
+ * ribbon so the two can never disagree about where the road is.
+ *
+ * Three passes, in order, and the order matters:
+ *   1. sample the raw land under the curve
+ *   2. smooth it, so the gradient is one a car can climb
+ *   3. clamp how far the smoothed line may stray from the land, and lift it clear of water
+ *
+ * Step 3 is what stops the cliffs and the drowned roads. Without the clamp, a smoothed line
+ * across a valley sits forty metres above the ground and the embankment that connects them
+ * is a wall no batter can soften. Without the water lift, the smoothed line follows the land
+ * straight down into a lake, and the player drives underwater — both were reported from the
+ * first live build.
+ */
+export function profileEdge(e, landHeight, waterAt = null) {
+  const n = e.y.length;
+  const land = new Float32Array(n);
+  for (let k = 0; k < n; k++) land[k] = landHeight(e.pts[k * 2], e.pts[k * 2 + 1]);
+  e.y.set(land);
+
+  // Arterials are graded harder than lanes: a trunk road is engineered, a back lane follows
+  // the ground.
+  const passes = e.tier === 0 ? 6 : 3;
+  const tmp = new Float32Array(n);
+  for (let p = 0; p < passes; p++) {
+    for (let k = 0; k < n; k++) {
+      const a = e.y[Math.max(0, k - 1)];
+      const b = e.y[k];
+      const c = e.y[Math.min(n - 1, k + 1)];
+      tmp[k] = a * 0.25 + b * 0.5 + c * 0.25;
+    }
+    e.y.set(tmp);
+  }
+
+  for (let k = 0; k < n; k++) {
+    const d = e.y[k] - land[k];
+    if (d > MAX_EARTHWORK) e.y[k] = land[k] + MAX_EARTHWORK;
+    else if (d < -MAX_EARTHWORK) e.y[k] = land[k] - MAX_EARTHWORK;
+    if (waterAt) {
+      const w = waterAt(e.pts[k * 2], e.pts[k * 2 + 1]);
+      // A causeway, not a ford. 1.1 m of freeboard reads as a raised road rather than a
+      // road that happens to be dry.
+      if (w !== null && e.y[k] < w + 1.1) e.y[k] = w + 1.1;
+    }
+  }
+
+  // Clamping breaks the smoothness it was applied to, so smooth once more — gently. Then
+  // re-apply the floors, because a smoothing pass averages a raised point back down towards
+  // its drowned neighbours and quietly puts the road under the water again. Floors last.
+  for (let k = 1; k < n - 1; k++) tmp[k] = e.y[k - 1] * 0.2 + e.y[k] * 0.6 + e.y[k + 1] * 0.2;
+  tmp[0] = e.y[0];
+  tmp[n - 1] = e.y[n - 1];
+  e.y.set(tmp);
+  if (waterAt) {
+    for (let k = 0; k < n; k++) {
+      const w = waterAt(e.pts[k * 2], e.pts[k * 2 + 1]);
+      if (w !== null && e.y[k] < w + 1.1) e.y[k] = w + 1.1;
+    }
+    // One more smooth of the SHAPE only, clamped so it can never dip below the floor again.
+    for (let k = 1; k < n - 1; k++) {
+      const avg = e.y[k - 1] * 0.25 + e.y[k] * 0.5 + e.y[k + 1] * 0.25;
+      const w = waterAt(e.pts[k * 2], e.pts[k * 2 + 1]);
+      tmp[k] = w !== null ? Math.max(avg, w + 1.1) : avg;
+    }
+    tmp[0] = e.y[0];
+    tmp[n - 1] = e.y[n - 1];
+    e.y.set(tmp);
+  }
+  return e;
+}
+
 /**
  * A prebuilt road field for one region. Build it once per chunk (or once per physics
  * frame for the car) and query it thousands of times; the edge list is tiny.
@@ -209,31 +284,11 @@ export class RoadField {
    * @param {number} seed world seed
    * @param {(x:number,z:number)=>number} landHeight raw land height, WITHOUT road carving
    */
-  constructor(x0, z0, x1, z1, seed, landHeight, pad = 60) {
+  constructor(x0, z0, x1, z1, seed, landHeight, pad = 60, waterAt = null) {
     this.edges = edgesInBox(x0, z0, x1, z1, seed, pad);
     this.seed = seed;
-    // Give every edge its elevation profile: the raw land under the curve, then a
-    // three-pass box smooth so the road climbs at a gradient a car can actually take.
-    for (const e of this.edges) {
-      const n = e.y.length;
-      for (let k = 0; k < n; k++) e.y[k] = landHeight(e.pts[k * 2], e.pts[k * 2 + 1]);
-      // Arterials get more smoothing passes than lanes: a trunk road is graded, a back
-      // lane follows the land. Five passes on a 1.8 km span pulls the steepest gradients
-      // down from ~15% to something a car can climb without dropping two gears, and the
-      // difference between the smoothed line and the raw land becomes the cutting or
-      // embankment that terrain.js then carves.
-      const passes = e.tier === 0 ? 6 : 3;
-      const tmp = new Float32Array(n);
-      for (let pass = 0; pass < passes; pass++) {
-        for (let k = 0; k < n; k++) {
-          const a = e.y[Math.max(0, k - 1)];
-          const b = e.y[k];
-          const c = e.y[Math.min(n - 1, k + 1)];
-          tmp[k] = a * 0.25 + b * 0.5 + c * 0.25;
-        }
-        e.y.set(tmp);
-      }
-    }
+    this._land = landHeight;
+    for (const e of this.edges) profileEdge(e, landHeight, waterAt);
   }
 
   /**
@@ -286,29 +341,92 @@ export class RoadField {
   }
 
   /**
-   * The carve mask at a point: 1 on the road crown, falling to 0 at the far edge of the
-   * verge. Terrain multiplies its own relief down by this and adds the road height, which
-   * is what cuts a shelf into a hillside and raises a causeway over a marsh.
+   * The carve field at a point, blended over EVERY nearby road rather than snapped to the
+   * nearest one.
+   *
+   * This used to take the single closest edge and bend the land towards it. That is fine
+   * until two roads pass near each other at different elevations — and then the "closest
+   * edge" flips from one to the other between neighbouring vertices, the carve target jumps
+   * by twenty metres, and the terrain grows an 80° wall. Every cliff in the first playable
+   * build came from this, and so did the Z-shaped kink where the road appeared to break and
+   * jump sideways: measured over a 2.4 km square, the raw land had ZERO slopes above 45° and
+   * the carved land had 1296 of them, all within 12 m of a road.
+   *
+   * So: accumulate. Each edge contributes a weight that falls off across its own shoulder,
+   * the target height is the weighted mean, and the mask is the combined coverage. Two roads
+   * near each other now produce a smooth saddle between them instead of a step.
    */
   carve(x, z, out = { mask: 0, y: 0, edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0, width: 0 }) {
-    const q = this.query(x, z);
-    out.d = q.d;
-    out.y = q.y;
-    out.tier = q.tier;
-    out.tx = q.tx;
-    out.tz = q.tz;
-    out.width = q.width;
-    if (!isFinite(q.d)) {
-      out.mask = 0;
-      out.edge = 0;
-      return out;
+    let wSum = 0;
+    let ySum = 0;
+    let cover = 0;
+    let bestEdge = 0;
+    let bd = Infinity;
+    let bw = 0,
+      bt = 0,
+      btx = 1,
+      btz = 0;
+
+    for (const e of this.edges) {
+      const half = e.width * 0.5;
+      // The widest this edge could possibly reach: its shoulder grows with how far the road
+      // sits above or below the land, and 60 m covers the tallest embankment the smoothing
+      // can produce.
+      const reach = half + e.verge * 2.6 + 60;
+      if (x < e.minX - reach || x > e.maxX + reach || z < e.minZ - reach || z > e.maxZ + reach) continue;
+
+      const pts = e.pts;
+      const n = pts.length / 2 - 1;
+      let ed = Infinity;
+      let ey = 0;
+      let etx = 1,
+        etz = 0;
+      for (let k = 0; k < n; k++) {
+        const ax = pts[k * 2],
+          az = pts[k * 2 + 1];
+        const bx = pts[k * 2 + 2],
+          bz = pts[k * 2 + 3];
+        const r = segDist(x, z, ax, az, bx, bz);
+        if (r.d < ed) {
+          ed = r.d;
+          ey = lerp(e.y[k], e.y[k + 1], r.t);
+          const dx = bx - ax,
+            dz = bz - az;
+          const l = Math.hypot(dx, dz) || 1;
+          etx = dx / l;
+          etz = dz / l;
+        }
+      }
+      if (ed > reach) continue;
+
+      // Shoulder width scales with the height difference this edge is asking for, so an
+      // embankment is battered at about 1:1.5 and never becomes a wall.
+      const drop = Math.abs(ey - this._land(x, z));
+      const shoulder = half + 3.0 + Math.min(drop, MAX_EARTHWORK + 4) * 1.6;
+      const w = 1 - smoothstep(half, shoulder, ed);
+      if (w <= 0.0005) continue;
+
+      wSum += w;
+      ySum += w * ey;
+      cover = Math.max(cover, w);
+      if (ed < bd) {
+        bd = ed;
+        bw = e.width;
+        bt = e.tier;
+        btx = etx;
+        btz = etz;
+        bestEdge = 1 - smoothstep(half - 0.4, half + 0.35, ed);
+      }
     }
-    const half = q.width * 0.5;
-    const verge = TIERS[q.tier].verge;
-    // Fully flat across the carriageway, then a shoulder that eases back into the land.
-    out.mask = 1 - smoothstep(half, half + verge * 2.6, q.d);
-    // 'edge' is 1 exactly on the carriageway — used for the tarmac texture and for grip.
-    out.edge = 1 - smoothstep(half - 0.4, half + 0.35, q.d);
+
+    out.d = bd;
+    out.tier = bt;
+    out.tx = btx;
+    out.tz = btz;
+    out.width = bw;
+    out.mask = cover;
+    out.edge = bestEdge;
+    out.y = wSum > 1e-6 ? ySum / wSum : 0;
     return out;
   }
 }

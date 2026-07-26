@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Wanderoad</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0e1219;
+        overflow: hidden;
+      }
+      iframe {
+        border: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The game is bundled inside the extension, not fetched. Manifest V3 forbids remotely
+         hosted code, and a local copy also means it works with no connection at all. It
+         starts in solo mode; multiplayer is something the player turns on. -->
+    <iframe src="game/index.html?offline&feel=cruiser&terrain=meadow" allow="gamepad *; autoplay"></iframe>
+  </body>
+</html>

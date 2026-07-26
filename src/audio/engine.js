@@ -15,9 +15,10 @@
  */
 
 import { clamp, clamp01, lerp } from '../core/math.js';
+import { Radio } from './radio.js';
 
 export class EngineAudio {
-  constructor({ volume = 0.5 } = {}) {
+  constructor({ volume = 0.38 } = {}) {
     this.ctx = null;
     this.volume = volume;
     this.enabled = true;
@@ -49,7 +50,7 @@ export class EngineAudio {
     this.engGain.gain.value = 0;
     const engFilter = ctx.createBiquadFilter();
     engFilter.type = 'lowpass';
-    engFilter.frequency.value = 900;
+    engFilter.frequency.value = 420;
     engFilter.Q.value = 0.8;
     this.engFilter = engFilter;
     this.engGain.connect(engFilter).connect(master);
@@ -58,7 +59,7 @@ export class EngineAudio {
     for (const [type, mul, gain] of [
       ['sawtooth', 0.5, 0.5],
       ['sawtooth', 1.0, 0.34],
-      ['square', 2.0, 0.1],
+      ['triangle', 2.0, 0.06],
       ['sine', 0.25, 0.42],
     ]) {
       const o = ctx.createOscillator();
@@ -109,11 +110,15 @@ export class EngineAudio {
     /* ── tyre scrub — the limit cue ──────────────────────────────────────── */
     this.scrubFilter = ctx.createBiquadFilter();
     this.scrubFilter.type = 'bandpass';
-    this.scrubFilter.frequency.value = 2400;
-    this.scrubFilter.Q.value = 5.5;
+    this.scrubFilter.frequency.value = 1100;
+    this.scrubFilter.Q.value = 2.6;
     this.scrubGain = ctx.createGain();
     this.scrubGain.gain.value = 0;
     noise.connect(this.scrubFilter).connect(this.scrubGain).connect(master);
+
+    /* The radio. Generative and original — no recording is bundled, so there is no licence
+     * riding along with the game. Starts off; the player turns it on. */
+    this.radio = new Radio(ctx, master);
   }
 
   /** @param {Vehicle} car */
@@ -126,34 +131,55 @@ export class EngineAudio {
     const speed = Math.abs(car.speed);
     const rpmFrac = clamp01((car.rpm - 900) / (car.spec.redline - 900));
 
-    // Engine pitch follows rpm directly; the base is low enough that idle is a burble and
-    // the redline is a bark rather than a whine.
-    const base = 34 + rpmFrac * 118;
+    /* THE PITCH. The first live build was described as "way too high pitched and strong",
+     * "like you're attacked with bees", and it was: 34 Hz rising to 152 Hz puts the whole
+     * engine in the ear's most sensitive band and keeps it there. A real engine's fundamental
+     * at 6000 rpm on a four-cylinder is about 200 Hz, but you do not HEAR the fundamental —
+     * you hear the low harmonics through a car body. So the range is now 26 to 74 Hz, which
+     * is felt more than heard, and the sawtooth harmonics do the rest. */
+    const base = 26 + rpmFrac * 48;
     for (const { o, mul } of this.oscs) o.frequency.setTargetAtTime(base * mul, t, k);
 
     // Off throttle the engine gets quieter AND darker — that is most of what makes a
     // lift-off audible.
     const load = clamp01(car.throttle * 0.85 + rpmFrac * 0.3);
-    this.engGain.gain.setTargetAtTime(0.055 + load * 0.2, t, k);
-    this.engFilter.frequency.setTargetAtTime(420 + load * 2600 + rpmFrac * 900, t, k);
+    // Quieter, and much darker. The low-pass used to open to 3.9 kHz under load, which is
+    // where the bees lived.
+    this.engGain.gain.setTargetAtTime(0.032 + load * 0.10, t, k);
+    this.engFilter.frequency.setTargetAtTime(260 + load * 640 + rpmFrac * 240, t, k);
 
     // Wind starts to matter around 55 km/h and dominates by 200.
+    // Wind is the one layer allowed to grow with speed, because it is broadband and calm.
+    // Even so it is half what it was, and its band no longer climbs into a whistle.
     const windAmt = Math.pow(clamp01((speed - 15) / 60), 1.4);
-    this.windGain.gain.setTargetAtTime(windAmt * 0.16, t, k);
-    this.windFilter.frequency.setTargetAtTime(500 + speed * 12, t, k);
+    this.windGain.gain.setTargetAtTime(windAmt * 0.085, t, k);
+    this.windFilter.frequency.setTargetAtTime(330 + speed * 4.5, t, k);
 
     // Tyre roar tracks wheel speed and gets rougher off tarmac.
     const rough = car.surfaceKind === 'tarmac' ? 0.35 : 1.0;
-    this.roadGain.gain.setTargetAtTime(clamp01(speed / 26) * 0.1 * (0.6 + rough), t, k);
-    this.roadFilter.frequency.setTargetAtTime(90 + speed * 7, t, k);
+    this.roadGain.gain.setTargetAtTime(clamp01(speed / 26) * 0.062 * (0.6 + rough), t, k);
+    this.roadFilter.frequency.setTargetAtTime(78 + speed * 3.2, t, k);
     this.roadFilter.Q.setTargetAtTime(lerp(2.4, 0.9, rough), t, k);
 
     // The limit cue. Nothing below 0.72 — a constant hint of scrub would be noise, and a
     // cue that is always on is not a cue.
     this._limitSmooth = lerp(this._limitSmooth, car.limit, Math.min(1, dt * 12));
     const scrub = clamp01((this._limitSmooth - 0.72) / 0.28);
-    this.scrubGain.gain.setTargetAtTime(scrub * scrub * 0.19 * clamp01(speed / 8), t, 0.03);
-    this.scrubFilter.frequency.setTargetAtTime(1700 + scrub * 1400, t, k);
+    // The scrub is a warning, so it stays audible — but 2.4 kHz with Q 5.5 was a shriek.
+    this.scrubGain.gain.setTargetAtTime(scrub * scrub * 0.10 * clamp01(speed / 8), t, 0.03);
+    this.scrubFilter.frequency.setTargetAtTime(900 + scrub * 620, t, k);
+
+    // The station thins out when the driving gets busy, and comes back when it calms down.
+    if (this.radio) {
+      const calm = clamp01(1 - Math.max(car.limit, Math.abs(car.slip) / 0.5) * 1.2);
+      this.radio.update(dt, calm);
+    }
+  }
+
+  /** Cycle the station. Returns its label for the HUD. */
+  nextStation() {
+    this.start();
+    return this.radio ? this.radio.next() : 'no audio';
   }
 
   /** A short soft double note. Cozy game, cozy horn. */
