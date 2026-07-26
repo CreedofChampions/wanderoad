@@ -22,11 +22,33 @@ technically better.
 - [ ] **Roads that follow the land.** The operator's brief: "winding *round turns* roads which
       follow the curves of hills", modelled on real Swiss alpine drives (Furka, Grimsel, Susten,
       Klausen, San Bernardino). Today the network is a hash lattice with Hermite splines — the
-      curves are smooth but they ignore the terrain entirely. What is wanted is a road that
-      contours: it should follow a hillside at a constant gradient, turn back on itself where
-      the slope is too steep to climb directly, and open out on the flat. That is a routing
-      problem, not a spline problem — cost-based search over the heightfield where gradient is
-      expensive and staying near a contour is cheap.
+      curves are smooth but they ignore the terrain entirely.
+
+      **ATTEMPTED AND REVERTED, 2026-07-26. Read this before trying the same thing.**
+      Two ideas were implemented and measured over a 2.4 km square against a 0.029% baseline
+      of ground steeper than 45 degrees:
+
+      | approach | cliffs | level-0 chunk build |
+      |---|---|---|
+      | baseline (hash lattice, terrain-blind) | 0.029% | 36 ms |
+      | node siting scored on slope + height | 0.039% | 50 ms |
+      | + per-point contour relaxation | 0.071% | 86 ms |
+      | + slope penalty and a shorter slide | 0.049% | 119 ms |
+
+      Every variant made the world WORSE and slower, and the reason is worth keeping: routing
+      a road into flat ground puts it along valley FLOORS, and the carve then has to cut its
+      shelf into the steeper valley SIDES. The cliffs are a property of the carve meeting
+      steep ground, not of where the centreline runs — so improving the route in isolation
+      moves the road towards exactly the places where the carve does the most damage.
+      Contour-relaxing individual points is worse still: matching a neighbour's height sends
+      the point sideways across a ravine to find it, which is how the 80–90 degree band
+      appeared for the first time.
+
+      **What would actually work:** solve the route and the carve TOGETHER. The cost of a
+      candidate point has to include what the carve will have to do there — the earthwork
+      volume and the steepest face it will leave — not just the ground it sits on. That is a
+      proper cost-based search with a gradient limit and switchback insertion, and it is more
+      than one pass of work. Do not attempt it as a tweak to nodePos again.
 - [ ] **Road junctions must meet at one level.** "There are cliffs directly coming through the
       roads as one road intersects to another. Roads should intersect on the same level with
       each other at all times." The accumulated carve fixed the terrain step, but the two
