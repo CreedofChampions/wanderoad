@@ -188,6 +188,25 @@ let _secret = null;
 let _id = null;
 
 /** The 64-hex secret. Created on first call and persisted. Only ever leaves in a POST body. */
+/* TWO WINDOWS ON ONE MACHINE WERE THE SAME PLAYER.
+ * Identity is a secret in localStorage, and localStorage is shared by every tab of a profile.
+ * So opening the game twice produced one playerId, the server excluded it from its own peer
+ * list as "self", and neither window ever saw the other — reported as "2 cars in same place
+ * don't see each other". It is correct behaviour for one person in two tabs; it is useless
+ * for testing multiplayer, and it is wrong for two people sharing a computer.
+ *
+ * `?seat=2` (any value) forks the identity: a separate secret, a separate player, everything
+ * else unchanged. It is how you test multiplayer with two windows, and how a second person on
+ * the same machine gets to be themselves. */
+function seatSuffix() {
+  try {
+    const seat = new URLSearchParams(location.search).get('seat');
+    return seat ? '.seat' + String(seat).replace(/[^a-z0-9]/gi, '').slice(0, 8) : '';
+  } catch {
+    return '';
+  }
+}
+
 export function getSecret() {
   if (_secret) return _secret;
   let s = readStore(SECRET_KEY);

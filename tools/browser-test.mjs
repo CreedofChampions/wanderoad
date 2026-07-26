@@ -146,7 +146,7 @@ async function main() {
   const { chrome, ws, send, evalJs, shot, logs } = await connect();
 
   try {
-    await send('Page.navigate', { url: URL_UNDER_TEST + (URL_UNDER_TEST.includes('?') ? '&' : '?') + 'debug&probe&feel=cruiser&terrain=meadow' });
+    await send('Page.navigate', { url: URL_UNDER_TEST + (URL_UNDER_TEST.includes('?') ? '&' : '?') + 'debug&probe&cheat&terrain=meadow' });
 
     /* ── 1. it boots ─────────────────────────────────────────────────────── */
     let booted = false;

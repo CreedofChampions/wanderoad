@@ -32,9 +32,11 @@ import { Vehicle } from './car/vehicle.js';
 import { Input } from './car/input.js';
 import { ChaseCamera } from './car/camera.js';
 import { Autopilot } from './car/autopilot.js';
+import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak } from './game/streak.js';
-import { configFromUrl, applyFeel, applyTerrain, terrainBias, FEELS } from './game/presets.js';
+import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
+import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Hud } from './ui/hud.js';
 import { Menu } from './ui/menu.js';
@@ -61,7 +63,10 @@ const OFFLINE = params.has('offline');
 /* Feel and terrain come from the URL so the preview gallery can link to every combination
  * without a second build. They must be applied BEFORE anything reads the tuning tables. */
 const CFG = configFromUrl();
-const FEEL = applyFeel(CFG.feel);
+if (CFG.cheat) setCheat(true);
+/* The car IS the feel. One choice, not two — see src/game/garage.js. */
+const CAR = carFromUrl();
+const FEEL = applyCarFeel(CAR);
 const LAND = applyTerrain(CFG.terrain);
 setBiomeBias(terrainBias(CFG.terrain));
 
@@ -160,26 +165,28 @@ async function boot() {
 
   setStat('unloading the car…', 0.52);
   const me = identity();
-  const car = new Vehicle({ tier: FEEL.tier, terrain: local, preset: FEEL.assist });
+  const car = new Vehicle({ tier: CAR.tier, terrain: local, preset: FEEL.assist });
   car.placeAt(spawn.x, spawn.z, spawn.heading);
   /* Real CC0 bodywork if it loads, the hand-built box if it does not. The fallback matters:
    * a network hiccup on a 180 KB GLB must not cost the player their car. */
-  const carKey = params.get('car') && CARS[params.get('car')] ? params.get('car') : FEEL.car || 'coupe';
+  const carKey = CAR.id;
   let model;
   try {
     model = await loadCar({ car: carKey, paint: me.look?.paint ?? 0, base: new URL('./models/cars/', location.href).href });
   } catch (err) {
     console.error('[car] model failed to load, using the built-in body', err?.message ?? err);
-    model = buildCar({ tier: FEEL.tier, paint: me.look?.paint ?? 0 });
+    model = buildCar({ tier: CAR.tier, paint: me.look?.paint ?? 0 });
   }
   scene.add(model.group);
 
-  const chase = new ChaseCamera(camera, { mode: FEEL.camera });
+  const chase = new ChaseCamera(camera, { mode: 'sport' });
   const input = new Input(window);
   input.attachTouch(canvas);
   const auto = new Autopilot();
   const streak = new Streak();
+  let trail = null;
   const hud = new Hud();
+  trail = new StreakTrail({ scene });
   const audio = new EngineAudio();
 
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
@@ -187,6 +194,11 @@ async function boot() {
   let carKeyLive = carKey;
   async function swapCar(key) {
     if (!CARS[key] || key === carKeyLive) return;
+    const spec = FLEET_BY_ID[key];
+    if (spec && !isUnlocked(spec, Math.max(bestStreak(), streak.state.best))) {
+      hud.say(`${spec.label} unlocks at ${(spec.unlockAt / 1000).toFixed(1)} km`, 3);
+      return;
+    }
     try {
       const next = await loadCar({ car: key, paint: me.look?.paint ?? 0, base: new URL('./models/cars/', location.href).href });
       scene.remove(model.group);
@@ -195,7 +207,14 @@ async function boot() {
       scene.add(model.group);
       carKeyLive = key;
       window.WANDEROAD.model = model;
-      hud.say(CARS[key].label, 2);
+      // The car owns its feel, so changing car changes how it drives.
+      if (spec) {
+        const f = applyCarFeel(spec);
+        car.setTier(spec.tier);
+        car.setPreset(f.assist);
+      }
+      trail.reset(car);
+      hud.say(`${CARS[key].label} — ${spec ? spec.blurb : ''}`, 3.2);
     } catch (err) {
       console.error('[car] swap failed', err?.message ?? err);
       hud.say('that one would not load', 2.5);
@@ -206,12 +225,10 @@ async function boot() {
     onAuto: () => auto.toggle(car),
     isAuto: () => auto.on,
     onCar: swapCar,
-    onFeel: (k) => {
-      applyFeel(k);
-      car.setPreset(FEELS[k].assist);
-      chase.mode = FEELS[k].camera;
-      chase.reset();
-      hud.say(`${FEELS[k].label}`, 2);
+    bestStreak: () => Math.max(bestStreak(), streak.state.best),
+    onCheat: (on) => {
+      setCheat(on);
+      hud.say(on ? 'every car unlocked' : 'unlocks restored', 2.4);
     },
     onReset: () => backToRoad(),
     camera: () => chase.mode,
@@ -235,6 +252,7 @@ async function boot() {
       car.placeAt(s.x, s.z, s.heading);
     }
     chase.reset();
+    trail.reset(car);
     hud.say('back on the road', 2);
   }
 
@@ -337,10 +355,18 @@ async function boot() {
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
     if (input.tapped('reverse')) car.reverse = !car.reverse;
     if (input.tapped('nextCar')) {
-      const i = CAR_KEYS.indexOf(carKeyLive);
-      const k = CAR_KEYS[(i + 1) % CAR_KEYS.length];
-      menu.setCurrent({ car: k });
-      swapCar(k);
+      /* Cycle to the next car you can actually drive. Stepping onto a locked one and being
+       * told no is not a control, it is a wall you have to press through. */
+      const best = Math.max(bestStreak(), streak.state.best);
+      const open = FLEET.filter((c) => isUnlocked(c, best)).map((c) => c.id);
+      if (open.length < 2) {
+        hud.say('one car so far — drive further to unlock more', 2.6);
+      } else {
+        const i = open.indexOf(carKeyLive);
+        const k = open[(i + 1) % open.length];
+        menu.setCurrent({ car: k });
+        swapCar(k);
+      }
     }
     if (input.tapped('horn')) audio.horn();
     if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
@@ -377,6 +403,7 @@ async function boot() {
     /* scoring */
     const surf = car.terrain.surface(car.x, car.z);
     streak.update(dt, car, surf);
+    trail.update(dt, car, streak.state);
 
     /* place the model */
     const tilt = car.groundTilt();
@@ -460,6 +487,8 @@ async function boot() {
     chase,
     streak,
     auto,
+    trail,
+    fleet: FLEET,
     solids,
     remotes,
     post,

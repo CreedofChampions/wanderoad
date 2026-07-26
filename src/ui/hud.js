@@ -8,6 +8,8 @@
  */
 
 import { fmtScore, fmtDistance } from '../game/streak.js';
+import { nextUnlock, fmtUnlock } from '../game/garage.js';
+import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
 
 export class Hud {
@@ -26,6 +28,19 @@ export class Hud {
     this.streakEl.id = 'streak';
     this.streakEl.innerHTML =
       '<span id="streakKm">—</span><span id="streakMul"></span><span id="streakPts"></span>';
+
+    /* The unlock bar, along the bottom of the screen. It answers one question — how far am I
+     * from the next car — and it is the only place the game ever asks the player to want
+     * something. It glows while a streak is running and blips red when one breaks. */
+    this.bar = document.createElement('div');
+    this.bar.id = 'unlockBar';
+    this.bar.innerHTML =
+      '<div class="fill"></div><div class="lbl"><span class="run"></span><span class="next"></span></div>';
+    this.root.appendChild(this.bar);
+    this.barFill = this.bar.querySelector('.fill');
+    this.barRun = this.bar.querySelector('.run');
+    this.barNext = this.bar.querySelector('.next');
+    this._blip = 0;
     this.root.appendChild(this.streakEl);
     this.streakKm = this.streakEl.querySelector('#streakKm');
     this.streakMul = this.streakEl.querySelector('#streakMul');
@@ -83,10 +98,34 @@ export class Hud {
       this.streakPts.textContent = '';
     }
 
+    /* ── the unlock bar ─────────────────────────────────────────────── */
+    const nu = nextUnlock(Math.max(s.best, s.distance));
+    const live = s.distance > 0;
+    this.bar.classList.toggle('live', live);
+    if (nu) {
+      const p = clamp01(Math.max(s.best, s.distance) / nu.car.unlockAt);
+      this.barFill.style.width = `${(p * 100).toFixed(1)}%`;
+      this.barRun.textContent = live ? fmtDistance(s.distance) : `best ${fmtDistance(s.best)}`;
+      this.barNext.textContent = `${nu.car.label} at ${fmtUnlock(nu.car.unlockAt)}`;
+    } else {
+      this.barFill.style.width = '100%';
+      this.barRun.textContent = live ? fmtDistance(s.distance) : `best ${fmtDistance(s.best)}`;
+      this.barNext.textContent = 'every car unlocked';
+    }
+    if (this._blip > 0) {
+      this._blip -= dt;
+      if (this._blip <= 0) this.bar.classList.remove('broke');
+    }
+
     const ev = streak.drain();
     if (ev) {
       if (ev.kind === 'milestone') this.say(ev.text, 3.2);
-      else if (ev.kind === 'break') this.say(`${fmtDistance(ev.distance)} — streak ended`, 3.0);
+      else if (ev.kind === 'break') {
+        this.say(`${fmtDistance(ev.distance)} — streak ended`, 3.0);
+        this.bar.classList.add('broke');
+        this._blip = 1.2;
+      }
+      if (ev.kind === 'unlock') this.say(`${ev.label} unlocked`, 4.0);
     }
 
     // ── other people ──

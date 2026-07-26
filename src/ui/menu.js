@@ -11,7 +11,8 @@
  */
 
 import { CARS, CAR_KEYS } from '../car/loadedCar.js';
-import { FEELS, TERRAINS } from '../game/presets.js';
+import { TERRAINS } from '../game/presets.js';
+import { FLEET, FLEET_BY_ID, isUnlocked, cheatOn, fmtUnlock } from '../game/garage.js';
 
 const ESC = ['Escape', 'KeyM'];
 
@@ -37,17 +38,15 @@ export class Menu {
         <h2>Garage</h2>
         <p class="hint">Escape or M to close · everything here is also a URL parameter</p>
 
-        <h3>Car <small>changes now</small></h3>
+        <h3>Car <small>each one drives differently — unlocked by your best streak</small></h3>
         <div class="row" data-group="car"></div>
-
-        <h3>Feel <small>changes now</small></h3>
-        <div class="row" data-group="feel"></div>
 
         <h3>Land <small>reloads the world</small></h3>
         <div class="row" data-group="terrain"></div>
 
         <div class="foot">
           <button data-act="auto">Auto-drive</button>
+          <button data-act="cheat">Unlock all</button>
           <button data-act="camera">Camera: —</button>
           <button data-act="reset">Put me back on the road (R)</button>
           <a class="btn" href="./previews/">All previews</a>
@@ -56,8 +55,7 @@ export class Menu {
       </div>`;
     document.body.appendChild(el);
 
-    this._fill('car', CAR_KEYS.map((k) => [k, CARS[k].label]));
-    this._fill('feel', Object.keys(FEELS).map((k) => [k, FEELS[k].label]));
+    this._fillCars();
     this._fill('terrain', Object.keys(TERRAINS).map((k) => [k, TERRAINS[k].label]));
 
     el.addEventListener('click', (e) => this._onClick(e));
@@ -66,6 +64,19 @@ export class Menu {
       e.preventDefault();
       this.toggle();
     });
+  }
+
+  /* Cars carry their unlock state. A locked one is shown, greyed, with what it costs —
+   * seeing what you have not earned yet is the entire point of an unlock ladder. */
+  _fillCars() {
+    const best = this.hooks.bestStreak ? this.hooks.bestStreak() : 0;
+    const row = this.root.querySelector('[data-group="car"]');
+    row.innerHTML = FLEET.map((c) => {
+      const open = isUnlocked(c, best);
+      return `<button data-group="car" data-key="${c.id}" title="${c.blurb}"${
+        open ? '' : ` class="locked" data-unlock="${fmtUnlock(c.unlockAt)}"`
+      }>${c.label}</button>`;
+    }).join('');
   }
 
   _fill(group, entries) {
@@ -81,6 +92,11 @@ export class Menu {
     }
     const cam = this.root.querySelector('[data-act="camera"]');
     if (cam && this.hooks.camera) cam.textContent = `Camera: ${this.hooks.camera()}`;
+    const ch = this.root.querySelector('[data-act="cheat"]');
+    if (ch) {
+      ch.textContent = cheatOn() ? 'Unlocks: all open' : 'Unlock all (testing)';
+      ch.classList.toggle('on', cheatOn());
+    }
     const ad = this.root.querySelector('[data-act="auto"]');
     if (ad && this.hooks.isAuto) {
       const on = this.hooks.isAuto();
@@ -103,6 +119,12 @@ export class Menu {
       this.hooks.cycleCam?.();
       return this._mark();
     }
+    if (act === 'cheat') {
+      this.hooks.onCheat?.(!cheatOn());
+      this._fillCars();
+      this._mark();
+      return;
+    }
     if (act === 'auto') {
       this.hooks.onAuto?.();
       this._mark();
@@ -110,6 +132,9 @@ export class Menu {
     }
 
     if (group === 'car') {
+      const spec = FLEET_BY_ID[key];
+      const best = this.hooks.bestStreak ? this.hooks.bestStreak() : 0;
+      if (spec && !isUnlocked(spec, best)) return; // locked; the label already says why
       this.current.car = key;
       this._mark();
       b.disabled = true;
@@ -138,6 +163,7 @@ export class Menu {
   }
 
   show() {
+    this._fillCars();
     this.open = true;
     this.root.hidden = false;
     this._mark();

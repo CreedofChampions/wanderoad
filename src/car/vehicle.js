@@ -133,6 +133,7 @@ export class Vehicle {
     this.surfaceKind = 'ground';
     this.gripScale = 1;
     this.rough = 0;
+    this.forces = { drive: 0, brake: 0, contact: 1, traction: 0, drag: 0, rr: 0, engBrake: 0, net: 0, gear: 1, ratio: 0, latAvail: 1 };
     this.wheels = [
       { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
       { x: 0, y: 0, z: 0, compression: 0, load: 0, slipAngle: 0, slipRatio: 0, contact: true },
@@ -442,8 +443,21 @@ export class Vehicle {
      * up; touch the throttle and it goes forward again. "The ability to stop, turn around and
      * change direction is key" — and on a keyboard the cheapest way to make that true is to
      * let the pedals mean what they obviously mean. */
-    if (Math.abs(vLong) < 0.6 && this.brake > 0.35 && this.throttle < 0.05) this.reverse = true;
-    else if (this.throttle > 0.15 && vLong > -0.2) this.reverse = false;
+    /* THE DEADLOCK THIS ONCE CAUSED, because it is not obvious from the code:
+     * the auto-pilot brakes at 0.35 when it cannot find a road, which tripped this test and
+     * put the car in reverse. Reverse then only cleared when the car was moving forwards —
+     * but it was now crawling backwards, so it never cleared, and the auto-pilot sat at full
+     * throttle driving gently the wrong way for ever. It reported as "stopped moving" and
+     * cost two rounds of guessing at the wrong subsystem.
+     *
+     * Two fixes. The auto-pilot's own input never engages reverse — a chauffeur that decides
+     * to reverse is not a chauffeur. And throttle clears reverse whenever the car is nearly
+     * stationary, whichever way it happens to be creeping. */
+    if (!input.auto && Math.abs(vLong) < 0.6 && this.brake > 0.35 && this.throttle < 0.05) {
+      this.reverse = true;
+    } else if (this.throttle > 0.15 && vLong > -3) {
+      this.reverse = false;
+    }
     if (this.reverse) {
       // In reverse the brake IS the accelerator, and reverse is deliberately slow.
       driveForce = -Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
@@ -528,13 +542,22 @@ export class Vehicle {
     const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + lerp(9.5, 1.4, clamp01(onRoad)) * vLong;
     // Closed throttle drives the engine through the transmission; the retarding force
     // scales with gear and rpm exactly as the drive force does.
-    // ~95 N·m of pumping and friction losses at the crank with the throttle shut, which
-    // through top gear is about 0.05 g and through second is about 0.25 g — the same shape
-    // as a real car, and the reason lifting off in a low gear slows you noticeably.
+    /* Engine braking, and the shape of it matters more than the size.
+     *
+     * This used to scale as (1 - throttle), which sounds right and is badly wrong: at a
+     * quarter throttle it still applied three quarters of the full retarding torque, so
+     * holding a steady cruise was a tug of war the engine won. Measured on a flat road at
+     * 33 km/h: 1486 N of drive against 1330 N of engine braking, net negative, the car
+     * quietly decaying to a stop with the throttle still open. It made cruising impossible
+     * and it made the auto-pilot look broken.
+     *
+     * A real engine stops braking almost as soon as the throttle cracks open. This vanishes
+     * by a quarter throttle, which is what lets a light foot hold a speed. */
+    const closed = Math.max(0, 1 - this.throttle * 4);
     const engBrake =
       this._shiftTimer > 0
         ? 0
-        : (1 - this.throttle) * 95 * (0.3 + 0.7 * rpmFrac) * (ratio / S.wheelRadius) * Math.sign(vLong) * contact;
+        : closed * 95 * (0.3 + 0.7 * rpmFrac) * (ratio / S.wheelRadius) * Math.sign(vLong) * contact;
 
     /* Loose surface. Off the carriageway the car should feel like it is on gravel — bumpy,
      * reluctant to turn, and unwilling to build speed. The bump is a real vertical impulse
@@ -559,6 +582,21 @@ export class Vehicle {
 
     /* ── integrate the planar body ─────────────────────────────────────── */
     const fxBody = fxTotal - drag - rr - engBrake;
+
+    /* Force telemetry. Cheap, always on, and the reason is practical: "full throttle and the
+     * car does not move" is impossible to diagnose from the outside, and it has now happened
+     * twice. Every term that can cancel the drive is recorded here. */
+    this.forces.drive = driveForce;
+    this.forces.brake = brakeForce;
+    this.forces.contact = contact;
+    this.forces.traction = maxTraction;
+    this.forces.drag = drag;
+    this.forces.rr = rr;
+    this.forces.engBrake = engBrake;
+    this.forces.net = fxBody;
+    this.forces.gear = this.gear;
+    this.forces.ratio = ratio;
+    this.forces.latAvail = latAvail;
     const fyBody = (fyFront * Math.cos(steerAngle) + fyRear) * 1.0;
 
     // The body frame is rotating, so the two velocity components are coupled: a car holding

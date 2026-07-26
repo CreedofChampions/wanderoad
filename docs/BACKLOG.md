@@ -12,9 +12,20 @@ technically better.
 
 ## Now — the failing requirements, worst first
 
-Every item below is a **currently failing check** in `npm run test:browser`, with the number
-it reported. See docs/REQUIREMENTS.md for the full list and how each is measured. Fix one,
-watch its check go green, ship.
+**BLOCKING, from the last batch — fix before anything else ships:**
+
+- [ ] **G1 regression — the streak banks 0 m.** `npm run test:browser` was banking 185 m and
+      now reports 0. Introduced somewhere in the fleet / trail / engine-braking batch. The
+      streak is the entire game mechanic, so nothing deploys until this is green. The live
+      site was deliberately left on the previous build.
+- [ ] **Auto-drive cannot hold a kilometre.** `node tools/streak-runs.mjs` reports 0/10 with a
+      median peak of ~40 m, ending "stopped moving". Three causes have already been found and
+      fixed by measurement (a reverse deadlock, a look-ahead that read the wrong road, and an
+      engine-braking curve that fought the throttle at cruise) and it is still 0/10, so there
+      is at least one more. Instrument `car.forces` during an auto-drive run — it is on
+      permanently now — rather than guessing again.
+
+**Then, from the measured requirements suite:**
 
 - [ ] **R2 — roads cross each other at different heights.** 3 of 10 crossings mismatched, worst
       1.52 m. This is the operator's "some go under the others, some go above the others… they
@@ -55,6 +66,23 @@ watch its check go green, ship.
 - [ ] **O4 — no rollover off-road.** "There should be the potential to flip over like a real car."
 
 ## Next
+
+Newly asked for, not yet started:
+
+- [ ] **Intro cinematic.** A video-style playthrough on first load, in the spirit of Ocarina of
+      Time's opening — the world shown to you before you drive it. No reference to the original
+      pen's UI, just that kind of unhurried camera.
+- [ ] **Cinematic camera during auto-drive.** When the car is driving itself the camera should
+      pan around and show the world, not sit behind the boot.
+- [ ] **Positional ambient audio.** The sea gets louder as you approach it; birds around trees.
+- [ ] **Forests, not scatter.** Dense woods in some places, sparse in others, and plains with no
+      trees at all. Today the density is uniform per biome.
+- [ ] **Flower beds** and other soft ground cover.
+- [ ] **100 Ghibli-flavoured props** as rare points of interest, including the petrol station.
+      CC0 only — check every licence and log it in docs/CREDITS.md.
+- [ ] Weather and horizon effects, inspired by Slow Roads. Explicitly LOW priority: the
+      operator's note was "the goal is to wrap up this project soon so we shouldn't get totally
+      caught away".
 
 - [ ] Water still looks poor at distance — moire on large sheets, and the shoreline is hard.
 - [ ] Grass aliases at 100–300 m even with the angular width floor.

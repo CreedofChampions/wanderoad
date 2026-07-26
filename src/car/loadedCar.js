@@ -18,19 +18,15 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { createPaintedMaterial, MAT } from '../render/painted.js';
 import { RGB, P } from '../core/palette.js';
 import { clamp01 } from '../core/math.js';
+import { FLEET } from '../game/garage.js';
 
-/** The fleet. `wheelbase` is the real-world length we scale each model to. */
-export const CARS = {
-  coupe: { file: 'coupe.glb', label: 'Coupe', tier: 'sports', length: 4.3 },
-  hatch: { file: 'hatch.glb', label: 'Hatch', tier: 'gt', length: 4.0 },
-  sedan: { file: 'sedan.glb', label: 'Sedan', tier: 'gt', length: 4.5 },
-  estate: { file: 'estate.glb', label: 'Estate', tier: 'gt', length: 4.6 },
-  taxi: { file: 'taxi.glb', label: 'Taxi', tier: 'gt', length: 4.5 },
-  rally: { file: 'rally.glb', label: 'Rally', tier: 'sports', length: 4.2 },
-  patrol: { file: 'patrol.glb', label: 'Patrol', tier: 'sports', length: 4.6 },
-};
+/* The fleet lives in src/game/garage.js, because a car and the way it drives are the same
+ * choice and there must be exactly one list of them. This module only turns one into meshes. */
+export const CARS = Object.fromEntries(
+  FLEET.map((c) => [c.id, { file: c.file, label: c.label, tier: c.tier, length: c.length }])
+);
 
-export const CAR_KEYS = Object.keys(CARS);
+export const CAR_KEYS = FLEET.map((c) => c.id);
 
 /* Body colours, in the game's own palette rather than the model's. The model's baseColor is
  * ignored entirely for body panels — that is the point of re-materialling. */

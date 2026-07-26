@@ -168,10 +168,15 @@ export function terrainBias(name) {
   return t.bias;
 }
 
-/** Parse the whole configuration out of a URL. */
+/** Parse the whole configuration out of a URL.
+ *
+ * `feel` is kept only so old preview links still resolve to something sensible. The feel is
+ * now a property of the CAR — see src/game/garage.js — because picking a body and then
+ * separately picking how it handles is a testing convenience, not a game. */
 export function configFromUrl(search = location.search) {
   const p = new URLSearchParams(search);
   const feel = FEELS[p.get('feel')] ? p.get('feel') : 'road';
-  const terrain = TERRAINS[p.get('terrain')] ? p.get('terrain') : 'rolling';
-  return { feel, terrain, debug: p.has('debug'), offline: p.has('offline') };
+  const terrain = TERRANS_OK(p.get('terrain')) ? p.get('terrain') : 'rolling';
+  return { feel, terrain, debug: p.has('debug'), offline: p.has('offline'), cheat: p.has('cheat') };
 }
+const TERRANS_OK = (k) => !!TERRAINS[k];

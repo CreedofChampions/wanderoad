@@ -376,3 +376,81 @@ canvas {
   opacity: 0.34;
   pointer-events: none;
 }
+
+/* ── unlock bar ───────────────────────────────────────────────────────────
+ * Along the very bottom. It answers one question — how far to the next car — and it is the
+ * only place the game asks the player to want something. Dim until a streak is running,
+ * then it lights; red when one breaks. */
+#unlockBar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(246, 236, 216, 0.1);
+  transition: height 0.4s ease, background 0.5s ease;
+}
+#unlockBar .fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, rgba(168, 202, 224, 0.5), rgba(78, 127, 121, 0.85));
+  transition: width 0.5s ease, box-shadow 0.5s ease;
+}
+#unlockBar.live {
+  height: 5px;
+  background: rgba(246, 236, 216, 0.16);
+}
+#unlockBar.live .fill {
+  background: linear-gradient(90deg, rgba(168, 202, 224, 0.9), rgba(120, 176, 216, 1));
+  box-shadow: 0 0 14px rgba(140, 190, 230, 0.75);
+}
+#unlockBar.broke .fill {
+  background: #c8503f;
+  box-shadow: 0 0 18px rgba(200, 80, 63, 0.9);
+  transition: none;
+}
+#unlockBar .lbl {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.7rem;
+  display: flex;
+  justify-content: space-between;
+  padding: 0 clamp(1rem, 4vw, 3rem);
+  font-size: 0.74rem;
+  letter-spacing: 0.14em;
+  opacity: 0.4;
+  transition: opacity 0.5s ease;
+  pointer-events: none;
+}
+#unlockBar.live .lbl {
+  opacity: 0.85;
+}
+#unlockBar .run {
+  font-variant-numeric: tabular-nums;
+  color: var(--cream);
+}
+#unlockBar .next {
+  color: var(--warm);
+}
+
+/* locked cars in the garage */
+#menu button.locked {
+  opacity: 0.42;
+  cursor: not-allowed;
+  position: relative;
+}
+#menu button.locked::after {
+  content: attr(data-unlock);
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: -1.05rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+#menu .row {
+  margin-bottom: 0.5rem;
+}

@@ -20,10 +20,14 @@
 import { CAMERA } from './tuning.js';
 import { clamp, clamp01, lerp, angleDelta, damp, dampAngle } from '../core/math.js';
 
-const MODES = ['cruise', 'sport', 'hood'];
+/* Sport is the only chase camera. The cruise rig was a calmer alternative and the hood view
+ * an extra, but the streak trail is a world-space object that reads correctly from exactly one
+ * distance and angle, and "sport is the only camera needed" settled it. Hood stays as a
+ * second entry so the key still does something worth doing. */
+const MODES = ['sport', 'hood'];
 
 export class ChaseCamera {
-  constructor(camera, { mode = 'cruise' } = {}) {
+  constructor(camera, { mode = 'sport' } = {}) {
     this.camera = camera;
     this.mode = mode;
     this.yaw = 0;
@@ -33,7 +37,7 @@ export class ChaseCamera {
     this.vxs = 0;
     this.vys = 0;
     this.vzs = 0;
-    this.fov = CAMERA.cruise.fov;
+    this.fov = CAMERA.sport.fov;
     this.pitch = 0;
     this._kick = 0;
     this._shakeT = 0;
@@ -54,7 +58,7 @@ export class ChaseCamera {
    * @param {(x:number,z:number)=>number} groundAt  used to keep the camera out of the hill
    */
   update(car, dt, groundAt) {
-    const C = CAMERA[this.mode] || CAMERA.cruise;
+    const C = CAMERA[this.mode] || CAMERA.sport;
     const speed = Math.abs(car.speed);
     const sNorm = clamp01(speed / (250 / 3.6));
 
