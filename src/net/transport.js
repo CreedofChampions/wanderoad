@@ -137,7 +137,10 @@ export function createTransport({ backend = 'auto', base44AppId = null, phpBase 
       } catch (err) {
         lastErr = err;
         state.lastError = String(err && err.message ? err.message : err);
-        if (name !== 'local') console.error(`[net] ${name} unavailable:`, state.lastError);
+        // Not an error: walking the chain IS the selection mechanism, and a backend that is
+        // not present on this host is the normal case (there is no PHP on a dev server).
+        // Logging it as an error trains everyone to ignore console errors.
+        if (name !== 'local') console.info(`[net] ${name} not available here, trying the next backend`);
       }
     }
     state.errors++;

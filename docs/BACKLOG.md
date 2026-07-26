@@ -88,6 +88,11 @@ technically better.
 
 ## Rules the cron must not break
 
+- **`npm run test:browser` must report 27/27 and print "THE GAME WORKS" before anything
+  ships, and `npm run test:live` must do the same after.** It drives a real headless Chrome
+  with real key events and measures real visibility. It exists because the game once shipped
+  completely unplayable behind a suite that passed.
+
 - No GPL or AGPL. MIT, Apache-2.0, BSD, CC0, public domain only. Record every licence in
   docs/CREDITS.md.
 - `node tools/bench-car.mjs` must pass in full before anything ships.

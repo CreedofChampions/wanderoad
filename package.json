@@ -8,7 +8,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 4173",
-    "serve": "vite preview --port 4173 --host"
+    "serve": "vite preview --port 4173 --host",
+    "test": "node tools/bench-car.mjs && node tools/bench-slope.mjs && node tools/diag-water.mjs && node tools/diag-cliffs.mjs",
+    "test:browser": "node tools/browser-test.mjs http://localhost:5173/",
+    "test:live": "node tools/browser-test.mjs https://crumbtown.org/wanderoad/",
+    "ship": "npm run build && node tools/pack-extension.mjs && python deploy/deploy.py --skip-build"
   },
   "dependencies": {
     "@base44/sdk": "^0.8.3",

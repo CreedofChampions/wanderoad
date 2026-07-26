@@ -71,7 +71,17 @@ async function boot() {
   const canvas = document.createElement('canvas');
   $('#app').appendChild(canvas);
 
-  const renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', stencil: false });
+  /* `?probe` keeps the drawing buffer around after the frame is presented so an automated
+   * test can read the canvas back and check the game is actually drawing something. It costs
+   * a little memory bandwidth, so it is off unless a test asks for it. */
+  const PROBE = params.has('probe');
+  const renderer = new WebGLRenderer({
+    canvas,
+    antialias: false,
+    powerPreference: 'high-performance',
+    stencil: false,
+    preserveDrawingBuffer: PROBE,
+  });
   if (!renderer.capabilities.isWebGL2) {
     setStat('this browser has no WebGL2 — try Chrome, Edge or Firefox');
     return;
