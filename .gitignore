@@ -1,7 +1,10 @@
 node_modules/
 dist/
 .chrome-shoot/
+.chrome-test/
+.chrome-probe/
 shots/
 base44/.app.jsonc
 .env
 *.log
+wanderoad-extension-*.zip
