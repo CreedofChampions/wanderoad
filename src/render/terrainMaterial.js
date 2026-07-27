@@ -128,6 +128,24 @@ void main(){
 
   lit *= tintG; mid *= tintG; shade *= tintG;
 
+  // ── sand where the dunes take over ────────────────────────────────────────
+  // The dunes entry in BIOME_TINT is a MULTIPLIER over the green stops above, and a
+  // multiplier cannot turn green into sand: at 89% dunes weight the ground measured
+  // (139,138,93) on screen — dry grass, not the "rose-and-ochre sand sea" the palette
+  // describes. So sand gets its own stops and is blended in by the biome weight, exactly
+  // the way the snow block below already does it. Threshold rather than linear so a
+  // meadow carrying a few per cent of dunes does not go sandy; by the time the sand sea
+  // is genuinely dominant it has fully taken over.
+  float sandAmt = smoothstep(0.30, 0.80, w[3]);
+  if(sandAmt > 0.001){
+    vec3 sLit   = mix(K_SAND_LIT,   K_SAND_MID,    blot * 0.55);
+    vec3 sMid   = mix(K_SAND_MID,   K_SAND_SHADE,  blot * 0.40);
+    vec3 sShade = mix(K_SAND_SHADE, K_SAND_HOLLOW, blot * 0.62);
+    lit   = mix(lit,   sLit,   sandAmt);
+    mid   = mix(mid,   sMid,   sandAmt);
+    shade = mix(shade, sShade, sandAmt);
+  }
+
   // ── rock on the steep parts ───────────────────────────────────────────────
   float rockAmt = smoothstep(0.36, 0.66, slope) * (0.55 + 0.45*grain);
   vec3 rLit = K_ROCK_LIT * tintR, rShd = K_ROCK_SHADE * tintR;

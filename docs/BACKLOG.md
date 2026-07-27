@@ -39,6 +39,42 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
+- [x] **CP1 — dunes now actually look like a desert.** The operator asked for "a new desert
+      theme"; the terrain SHAPE and the off-road sand physics shipped, but the COLOUR never did.
+      Measured on screen at 89% dunes weight, beside the car: **(139,138,93)** — olive dry grass.
+
+      Cause: `BIOME_TINT`'s dunes entry is a colour **multiplier** (1.42, 1.06, 0.78) applied over
+      the shared green terrain stops, and a multiplier cannot turn green into sand — the most it
+      can do is make dry grass, which is exactly what it did. Its own comment claims a
+      "rose-and-ochre sand sea", which was never achievable that way.
+
+      Fixed by giving sand its OWN stops (`sandLit/sandMid/sandShade/sandHollow` in
+      `core/palette.js`) and blending them in by the dunes biome weight, exactly the way the snow
+      stops are already blended in by the snow scalar a few lines below — same pattern, no new
+      mechanism. Thresholded (`smoothstep(0.30, 0.80, w[3])`) so a meadow carrying a few per cent
+      of dunes does not go sandy.
+
+      After, same three samples: **(164,134,107) / (183,152,114) / (176,144,111)** — red channel
+      leads everywhere, green no longer dominates anywhere. Verified visually too, not just
+      numerically. `npm run test:browser` 40/40 (the real GPU compile is the gate for any shader
+      change), `npm test` green, live 40/40.
+
+- [ ] **C2's brake test can land on low-grip ground and read a false failure.** Seen once on live
+      immediately after the dunes work: `C2 the brakes stop the car promptly — 109 km/h to 0 in
+      145 m` against a 55 m bar, then **41 m (34 m scaled) on both immediate re-runs**, and 40/40
+      on localhost with the identical build. So it is site variance, not a brake regression — but
+      it is worth closing, and it is newly more likely to bite: the same round made off-road sand
+      dramatically harsher for non-rally cars, so a run-up that strays off the tarmac now brakes
+      far worse than it used to.
+
+      C2 already searches for a clear stretch before its run-up (added when auto-drive's cruise
+      governor capped it at 35 km/h). The gap is that nothing asserts the car was still ON the
+      road for the braking measurement itself. The fix is small and in the same spirit as the
+      guard O2 already has: record `onRoad` at the moment braking starts and finishes, and either
+      retry or fail loudly if the stop happened off the carriageway — rather than silently
+      reporting a sand-braking distance as if it were a tarmac one. Not done this pass; one item
+      per pass, and the dunes fix was the item.
+
 - [x] **RESOLVED — startup frame rate regressed on the LIVE build.** Now **60 fps across three
       consecutive live runs**, 40/40 each. Fixed as a SIDE EFFECT of the water grading pass, not
       by deliberate perf work: that pass cut the shore foam's depth reach from 1.25 m to 0.40 m,

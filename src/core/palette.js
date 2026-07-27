@@ -51,6 +51,16 @@ export const P = {
   tMid: '#6A924F',
   tShade: '#456A54',
   tHollow: '#33564F',
+  /* Sand, as its OWN set of stops rather than a tint over the green ones. BIOME_TINT's
+   * dunes entry describes "rose-and-ochre sand sea", but it can only ever multiply the
+   * green terrain stops above — and a multiplier cannot turn green into sand. Measured
+   * beside the car at 89% dunes weight, the ground rendered (139,138,93): dry grass, not
+   * desert. These get blended in by the dunes weight the same way the snow stops already
+   * are by the snow scalar. */
+  sandLit: '#E4C89A',
+  sandMid: '#CDA877',
+  sandShade: '#A67C55',
+  sandHollow: '#7E5C42',
   ridgeNear: '#8FA9A2',
   ridgeMid: '#9CB0B4',
   ridgeFar: '#AEBCC9',
@@ -172,6 +182,10 @@ const vec3 K_T_LIT      = ${C.tLit};
 const vec3 K_T_MID      = ${C.tMid};
 const vec3 K_T_SHADE    = ${C.tShade};
 const vec3 K_T_HOLLOW   = ${C.tHollow};
+const vec3 K_SAND_LIT   = ${C.sandLit};
+const vec3 K_SAND_MID   = ${C.sandMid};
+const vec3 K_SAND_SHADE = ${C.sandShade};
+const vec3 K_SAND_HOLLOW= ${C.sandHollow};
 const vec3 K_ROCK_LIT   = ${C.rockLit};
 const vec3 K_ROCK_SHADE = ${C.rockShade};
 const vec3 K_PATH_LIT   = ${C.pathLit};
