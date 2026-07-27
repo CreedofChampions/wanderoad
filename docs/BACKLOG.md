@@ -12,6 +12,53 @@ technically better.
 
 ## Now — the failing requirements, worst first
 
+- [ ] **BLOCKING — startup frame rate regressed on the LIVE build.** `npm run test:live` reports
+      **22.8 / 23.8 / 22.9 fps** across three consecutive runs at the "running at a playable rate
+      once warm" check (bar is 24), where it was 40/40 green before the second playtest round.
+      Reproducible, not variance.
+
+      **What is and is not affected, measured:** the very next check, "still running at a playable
+      rate after driving", passes at **58–60 fps** in every one of those same runs. So steady
+      state is fine and the world settles — this is specifically a STARTUP burst cost in the first
+      seconds after load.
+
+      **Why localhost hid it:** `npm run test:browser` against localhost passes 40/40. The warm
+      check samples 4 s after the world reports streamed (browser-test.mjs ~line 474); localhost
+      serves the bundle fast enough that the initial build burst is over by then, and the live
+      host does not. Any future perf work has to be judged against `test:live`, not localhost —
+      localhost is not a valid gate for this particular check.
+
+      **Prime suspects, all landed in the same round and all doing work at spawn:** station access
+      spurs and their junction geometry, the station "town" set-dressing clusters, ships on large
+      water, snow-dusted pine variants, flowers, and the higher tree/scatter build-ahead radius
+      from the pop-in fix. Each is individually modest; the burst is presumably their sum. The
+      honest first step is to MEASURE which one dominates (build time per subsystem during the
+      first seconds) rather than tuning them all down blindly — this project has a documented
+      history of "obvious" perf and terrain fixes that measured worse afterwards.
+
+      Not shipped as a regression knowingly: the round was already deployed when the live figure
+      came back, and the game is playable throughout (23 fps briefly, then 60). Recorded here as
+      the top item rather than left to be rediscovered.
+
+- [ ] **Valley mist is written and reverted — it fails GPU program validation.** The operator
+      asked for the original scene's valley mist. It was implemented (analytic exponential-density
+      integral inside `aerial()`, a `uMist` uniform in GL_UNI, a matching horizon band in
+      `skyDome`/`skyDomeLite`, and its own `mstHash`/`mstNoise` in GL_LIGHT) and it broke the
+      renderer completely: **every** RawShaderMaterial failed with
+      `THREE.WebGLProgram: Shader Error 1282 - VALIDATE_STATUS false` and the game rendered black.
+      Reverted; the working tree shipped green at 40/40 without it.
+
+      **The lesson worth keeping:** it passed every static check its author ran — bracket balance,
+      symbol resolution across all eleven real chunk combinations, the GL_LIGHT-without-hash case
+      specifically. It failed at GPU VALIDATION, which no node-side check can see. Shader work
+      must be gated on `npm run test:browser`, never on static analysis alone.
+
+      The reverted implementation is preserved at `D:\OpenClaw\tmp\glsl.mist.bak` and
+      `D:\OpenClaw\tmp\uniforms.mist.bak`. Suspects not yet distinguished: a SwiftShader
+      instruction/complexity limit (the suite runs headless software GL), a uniform-count limit
+      from adding to GL_UNI which every shader includes, or the GL_LIGHT/cloud-material
+      interaction. A focused pass is underway.
+
 **Budget note (26 July 2026):** the project wraps on the 28th and at least half the week's
 usage stays unspent. One small item per pass, no research, no subagents, no refactors. A
 recorded finding is a complete pass.
