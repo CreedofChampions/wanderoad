@@ -192,11 +192,49 @@ Newly asked for, not yet started:
       (plains keep their boulders). `node tools/diag-forests.mjs`.
 - [x] **Flower beds.** A separate clustered ground-cover layer with a dense core and a soft
       edge, `src/render/flowers.js`, through the same painted pipeline as everything else.
-- [ ] Left by W4/W5, both small and both in someone else's file. `BIOME_TERRAIN.rough` is dead
-      — documented as the ridged-vs-fbm mix, read by nothing, each biome hard-codes its own.
-      And the alpine preset now has arterials at a 6.6% median / 51% worst gradient, which is a
-      mountain pass; the lever is the road profile's smoothing length in `src/world/roads.js`
-      (`grade`), not the terrain.
+- [ ] Left by W4/W5, both small and both in someone else's file.
+
+      `BIOME_TERRAIN.rough` is dead — documented as such in `biomes.js` itself (line ~166),
+      and deliberately left in place rather than removed: "that is a behaviour change dressed
+      as a tidy-up." Leaving it stand; not worth re-litigating a decision that was already made
+      on purpose.
+
+      **Investigated this pass, NOT fixed, recorded instead — the road-`grade` lever named
+      here previously was the wrong diagnosis.** Fresh reading, `node tools/diag-relief.mjs`:
+
+      ```
+      preset   summit h(m)  radius(m)  steepest face  median grade  worst grade
+      meadow          104        654          13.8°          2.0%        27.1%
+      rolling         104        654          13.8°          2.8%        26.7%
+      alpine          177       1076          14.2°          7.4%        52.9%
+      plains           81        599          11.8°          0.8%        22.1%
+      dunes            83        604          12.0°          1.0%        22.7%
+      marsh            78        591          11.5°          1.2%        19.9%
+      ```
+
+      Every preset's worst grade is close to `tan(steepest face)` except alpine, which is
+      almost exactly DOUBLE (tan 14.2° = 25.3%, worst measured 52.9%). `landmarks.js` already
+      documents the mechanism, at line 66: massif sites are jittered within their lattice cell,
+      and "two overlapping domes add their gradients where they meet — the one case where this
+      construction can produce a face steeper than its ratio promises." Alpine's height
+      multiplier (~1.7x, so taller domes) carries a proportionally larger radius (radius is
+      tied to height by `RATIO_LO`/`RATIO_HI` in `landmarks.js`) on the SAME 3.6 km lattice
+      spacing every other preset uses, so alpine's domes overlap their neighbours far more
+      often — this is a land-side effect specific to how the lattice scales, not a per-road
+      smoothing question.
+
+      Why this is not this pass's fix: `roads.js`'s `grade` (the smoothing-length lever
+      previously named here) only changes how far the ROAD departs from land that is already
+      this steep — it trades gradient for deeper cuts/higher fills up to the 18 m earthwork
+      clamp, which past sessions have already shown is non-monotonic (see the W4 entry above:
+      an earlier grade-adjacent experiment made cliffs worse, not better). The land itself is
+      the thing that is too steep, so the road lever cannot cleanly fix it. A real fix belongs
+      in `landmarks.js` — most likely damping how two nearby sites combine (a max-weighted
+      blend instead of an additive one where domes overlap, or spacing the lattice cell wider
+      at higher `LANDMARK.scale` so bigger domes get proportionally more room) — and it needs
+      its own before/after pass across `diag-cliffs.mjs`, `diag-relief.mjs` (W4 depends on
+      alpine's relief staying dramatic) and the W5 landmark-visibility check, not a one-line
+      tweak. Left for a session with room for that.
 - [X] **100 Ghibli-flavoured props** as rare points of interest, including the petrol station.
       **DONE 26 July.** 100 kinds, all modelled in code in the painted pipeline — no
       third-party asset was downloaded, so there is no licence to audit (reasoning in
