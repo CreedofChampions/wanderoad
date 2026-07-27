@@ -119,6 +119,7 @@ uniform float uCloudAmount;
 uniform float uFogMul;
 uniform float uFogNear;      // metres before aerial perspective starts
 uniform float uFogFar;       // metres to full haze
+uniform vec3  uMist;         // valley mist: (amount, sea altitude m, scale height m)
 // There is deliberately no uChunkOrigin. Chunk vertices are local to their node and the
 // node's world position rides in three's own modelMatrix, so one material with one uniform
 // set draws every chunk in the world. Global precision is handled by rebasing the whole
@@ -142,6 +143,14 @@ vec3 skyDome(vec3 d, out float sunMask){
   float horiz = pow(1.0 - clamp(yy, 0.0, 1.0), 3.4);
   col = mix(col, K_SKY_ANTI,    horiz * (1.0-az) * 0.62);
   col = mix(col, K_SKY_HORSUN,  horiz * pow(az, 2.1) * 0.92);
+
+  /* The mist sea meeting the sky. aerial() takes the far ground down to K_MIST at
+   * the skyline; without the same colour arriving in the bottom two degrees of the
+   * dome the horizon becomes the seam between a silver land and a blue sky. Fifteen
+   * ALU, no noise, and it scales with uMist.x so turning the mist off takes this off
+   * with it rather than leaving a band hanging in an empty sky. */
+  col = mix(col, mix(K_MIST, K_SKY_HORSUN, pow(az, 2.2)*0.6),
+            smoothstep(0.045, -0.02, yy) * clamp(uMist.x, 0.0, 1.0) * 0.34);
 
   // Mie forward-scatter halo
   float ang = dot(d, uSunDir);
@@ -181,6 +190,10 @@ vec3 skyDomeLite(vec3 d){
   float horiz = pow(1.0 - clamp(yy, 0.0, 1.0), 3.4);
   col = mix(col, K_SKY_ANTI,   horiz*(1.0-az)*0.62);
   col = mix(col, K_SKY_HORSUN, horiz*pow(az, 2.1)*0.92);
+  // Same mist band as skyDome above — a reflection that stops at the mist sea while
+  // the sky it reflects carries on into it is a visible edge on the far bank.
+  col = mix(col, mix(K_MIST, K_SKY_HORSUN, pow(az, 2.2)*0.6),
+            smoothstep(0.045, -0.02, yy) * clamp(uMist.x, 0.0, 1.0) * 0.34);
   float ang = max(dot(d, uSunDir), 0.0);
   col = mix(col, K_SUN_GLOW, clamp(pow(ang,7.0)*0.72 + pow(ang,1.9)*0.16, 0.0, 0.9));
   return col;
@@ -353,6 +366,21 @@ float gFogAmt = 0.0;   // written by aerial(), read back as the alpha channel so
 // was 2 km across and 1700 m of visibility was generous; a car doing 90 m/s down a steppe
 // arterial needs to see the next ridge, so the game drives these from the camera's far
 // plane and softens them per biome (dunes haze up, highlands clear).
+/* ── valley mist ──────────────────────────────────────────────────────────────
+ * Its own hash and its own value noise, deliberately, rather than GL_HASH/GL_NOISE:
+ * GL_LIGHT is concatenated on its own — with no hash and no noise chunk in front of
+ * it — by render/clouds.js's CLOUD_FS, which calls fragHead(GL_LIGHT, CLOUD_FS). Reaching for
+ * pn2() in here would fail to compile that one material out of eleven, and a shader
+ * that fails to compile is a silently missing cloud deck. Two small functions with
+ * names nothing else uses keeps this chunk dependency-free, which is the property the
+ * cloud material has always relied on.
+ */
+float mstHash(vec2 p){ vec3 q = fract(vec3(p.xyx)*0.1031); q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y)*q.z); }
+float mstNoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(mstHash(i),             mstHash(i+vec2(1,0)), f.x),
+             mix(mstHash(i+vec2(0,1)),   mstHash(i+vec2(1,1)), f.x), f.y); }
+
 vec3 aerial(vec3 col, float dist, vec3 V, float worldY){
   dist = (dist == dist) ? min(dist, 1.0e6) : 1.0e6;   // a NaN depth must not
   float d  = max(dist - uFogNear, 0.0);   // poison the colour
@@ -361,12 +389,104 @@ vec3 aerial(vec3 col, float dist, vec3 V, float worldY){
   float mie = pow(clamp(dot(-V, uSunDir), 0.0, 1.0), 3.4);
   vec3 fc = mix(K_HAZE, K_SKY_HORSUN, mie*0.88);
   fc = mix(fc, K_SKY_ANTI, clamp(dot(-V,uSunDir),-1.0,0.0)*-0.32);
-  // mist pooling in the valley floor
-  float pool = smoothstep(46.0, 8.0, worldY) * smoothstep(120.0, 420.0, dist);
-  fc = mix(fc, K_MIST, pool*0.45);
-  f  = clamp(f + pool*0.16, 0.0, 1.0);
-  gFogAmt = f;
-  return mix(col, fc, f);
+
+  /* ── the mist that pools in the valleys ─────────────────────────────────────
+   * What stood here was two smoothsteps on the fragment's own altitude —
+   * smoothstep(46,8,worldY) * smoothstep(120,420,dist), tinted 45% toward
+   * K_MIST. It had no shape in it (nothing but height and range went in, so
+   * nothing but a flat wash came out) and, worse, it could not tell a hollow
+   * from a plain: every point at 10 m got the same mist whether it sat at the
+   * bottom of a bowl or on an open shelf, because the ray that reached it was
+   * never consulted.
+   *
+   * This is the analytic integral of an exponential density along the eye ray:
+   *
+   *     rho(y)  = exp(-(y - y0)/H)                 y0 = uMist.y, H = uMist.z
+   *     optical = INT rho ds = dist * (exp(-a) - exp(-b)) / (b - a)
+   *
+   * with a and b the camera's and the fragment's altitudes measured in scale
+   * heights. Two exps, no loop, no texture, no second pass — and it pools by
+   * CONSTRUCTION rather than by a rule, because what it measures is how much
+   * low, dense air the ray actually crossed. A valley floor seen from a ridge
+   * fills up; the ridge opposite it, at the identical distance, stays legible;
+   * and a camera down IN the valley sees everything, at every height, through
+   * the thick of it. tools/diag-mist.mjs measures all three on real world
+   * coordinates rather than asserting them here — measured 2.8x on the first
+   * and 3.3x on the third, on seed 20260726.
+   *
+   * Being honest about its one blind spot: the density is a function of
+   * ALTITUDE, not of the shape of the ground, so a hollow and an open shelf at
+   * the same height get the same mist. Distinguishing them would need the
+   * terrain in the shader, which aerial() has no way to reach from inside
+   * eleven different materials. Altitude is what reads on screen.
+   */
+  float mist = 0.0;
+  if(uMist.x > 0.001){
+    float H  = max(uMist.z, 4.0);
+    float a  = clamp((uCamPos.y - uMist.y)/H, -3.0, 24.0);   // clamped so a camera
+    float b  = clamp((worldY    - uMist.y)/H, -3.0, 24.0);   // far under the sea
+    float ea = exp(-a), eb = exp(-b);                        // cannot blow up exp()
+    float db = b - a;
+    float mean = (abs(db) < 1.0e-3) ? ea : (ea - eb)/db;     // the L'Hopital limit
+    /* 1/1300: one optical depth per 1300 m of ray held at the mist sea's own level.
+     * Tuned on the printed profile in tools/diag-mist.mjs, not by eye — a valley
+     * floor reads 0.21 at 320 m, 0.40 at 700 m and 0.81 at 2.8 km, which is a veil
+     * you can see the land through at every one of those ranges. At 1/760 the same
+     * floor was 0.59 by 700 m, and a distance where you can no longer read the shape
+     * of the ground is a distance where the mist has stopped being pretty.
+     *
+     * The near ramp keeps the bonnet, the tarmac under the wheels and the grass at
+     * the roadside clear: mist you are standing inside is grease on the lens. */
+    float opt = max(mean, 0.0) * dist * (1.0/1300.0) * uMist.x
+              * smoothstep(16.0, 165.0, dist);
+    mist = 1.0 - exp(-opt);
+    /* The gate is the whole frame-cost story. Below 2% mist the layering below moves
+     * the result by less than 0.4% of a colour mix — invisible — so everything inside
+     * ~90 m of the lens skips it, and that near field is exactly where the grass
+     * overdraws the screen five times over. Measured: 13% of ground fragments take
+     * this branch from a driving pose, 100% from a 90 m crane (where there is no
+     * grass in front of the lens to overdraw anything). */
+    if(mist > 0.02){
+      /* Layering, or it is a density and not weather. Two terms:
+       *
+       * SHEETS are a function of altitude ALONE, so they are exact, world-locked
+       * and identical from every angle — the horizontal watermark a standing mist
+       * deck leaves across a hillside, ~53 m of band.
+       *
+       * PATCHES need the fragment's xz, which aerial()'s signature does not carry
+       * and cannot be given without editing eleven shaders in files this change
+       * does not own. They are reconstructed along the eye ray from the VIEW DEPTH
+       * instead of the true ray length, which is short by 1/cos(off-axis) — up to
+       * ~20% at the corners of a 64 deg frame. The field is 1.2 km across and the
+       * modulation is +/-17%, so the worst case is a tenth of a blotch of slide
+       * during a pan, against a mist that is already drifting on the wind. That is
+       * a trade, it is made knowingly, and it buys the mist its shape.
+       *
+       * Named mstPatch, NOT "patch": patch is a RESERVED WORD in GLSL ES 3.00
+       * (kept for tessellation), and ANGLE's translator rejects it outright. This
+       * one identifier was the entire "mist broke every shader" incident — the
+       * chunk lives in GL_LIGHT, GL_LIGHT is concatenated into every material in
+       * the game, so eleven materials failed to compile over one variable name.
+       * No static node-side check can see it; only a real GPU compile can. */
+      float sheet = mstNoise(vec2(worldY*0.019 + 4.7, worldY*0.052));
+      vec2  pxz   = uCamPos.xz - V.xz*dist + uCloudDrift*0.30;
+      float mstPatch = mstNoise(pxz*0.00082);
+      mist = clamp(mist * (0.83 + 0.34*mstPatch*(0.45 + 0.55*sheet)), 0.0, 1.0);
+    }
+  }
+  /* Mist colour. K_MIST is a pale silver-green, and it goes LUMINOUS toward the
+   * sun rather than merely brighter: backlit mist is the most Ghibli thing in the
+   * pen's whole valley, and it is the difference between this and a grey wash. */
+  vec3 mc = mix(K_MIST, K_SKY_HORSUN, mie*0.62);
+  mc = mix(mc, K_SUN_GLOW, mie*mie*0.30);
+
+  /* Alpha is the post chain's distance channel: mist is depth as much as haze is,
+   * so it has to land there too or a misted valley comes back sharp out of the
+   * watercolour pass. Composited over the haze, not added to it — the two are the
+   * same photons and adding them double-counts. */
+  gFogAmt = clamp(f + mist*(1.0 - f)*0.90, 0.0, 1.0);
+  col = mix(col, fc, f);
+  return mix(col, mc, mist);
 }
 `;
 

@@ -165,7 +165,10 @@ async function boot() {
   grass.setAngular((camera.fov * DEG) / innerHeight);
 
   setStat('finding a road…', 0.34);
-  const spawn = findSpawn(SEED);
+  // LAND.spawnHigh: only the alpine preset sets it — "alpine start should be in the
+  // mountains". The mid-drive rescue calls to findSpawn() below deliberately DON'T pass
+  // it: a rescue should hand you the nearest sane road, not march you back up a massif.
+  const spawn = findSpawn(SEED, 0, 0, { highBias: LAND.spawnHigh ?? 0 });
   streamer.forceChunk(spawn.x, spawn.z);
 
   /* A local exact terrain sampler around the player. The streamer's height cache is only

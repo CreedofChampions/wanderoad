@@ -481,9 +481,27 @@ export function findDrySpot(seed, hintX = 0, hintZ = 0) {
  * Find a good spawn: walk outward from a hint until we are on an arterial road with
  * shallow gradient. Deterministic given the seed, so "new game" always starts in the same
  * place for everyone — which matters, because that is where players will meet.
+ *
+ * `opts.highBias` (0..1, default 0) rewards ALTITUDE: at 1 a candidate earns up to 800
+ * points of score credit for sitting up to 400 m above datum. It exists for the alpine
+ * preset — "alpine start should be in the mountains" (operator) — whose massifs are the
+ * whole point and whose spawn used to land on the flattest valley pocket like everyone
+ * else's. The numbers are chosen against the two terms already in the score, in this
+ * order of priority:
+ *   1. WATER-SAFETY is untouched — the waterMargin gate below rejects wet candidates
+ *      before scoring can save them, biased or not (BACKLOG item W8 stays fixed).
+ *   2. GRADE still wins: the credit ceiling (800) is below the saturated grade penalty
+ *      (900), and more to the point a HIGH candidate at a sane grade always beats a high
+ *      candidate at a cliff grade by hundreds of points, so the bias picks the gentlest
+ *      road up the mountain rather than the steepest road anywhere.
+ *   3. Distance (0.012/m, ≤36 points over the box) becomes a tie-break, which is what
+ *      it already was between pleasant candidates.
+ * Deterministic: same seed, same opts, same spawn. Presets that do not set it (the other
+ * five) score exactly as before, to the bit.
  */
-export function findSpawn(seed, hintX = 0, hintZ = 0) {
+export function findSpawn(seed, hintX = 0, hintZ = 0, opts = {}) {
   const R = 3000;
+  const highBias = opts.highBias || 0;
   const t = new Terrain(seed, hintX - R, hintZ - R, hintX + R, hintZ + R, 120);
   let best = null;
   for (const e of t.roads.edges) {
@@ -501,7 +519,10 @@ export function findSpawn(seed, hintX = 0, hintZ = 0) {
        * grade term saturates at both ends and distance decides everything in between. */
       const grade = Math.abs(e.y[k + 1] - e.y[k - 1]) / (2 * e.span);
       const dist = Math.hypot(x - hintX, z - hintZ);
-      const score = smoothstep(0.045, 0.13, grade) * 900 + dist * 0.012;
+      // e.y[k] is the road's own profile height — already computed, so the altitude credit
+      // costs nothing on the presets that don't ask for it (highBias 0 multiplies it away).
+      const high = highBias * Math.min(Math.max(e.y[k], 0), 400) * 2.0;
+      const score = smoothstep(0.045, 0.13, grade) * 900 + dist * 0.012 - high;
       // Cheap reject before the height/water probe below: a candidate that cannot beat the
       // current best on score alone can never win, wet or not, so there is no reason to pay
       // for a Terrain.height() + biome-weights call on it.

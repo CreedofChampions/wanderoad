@@ -273,7 +273,11 @@ vec2 rippleFrame(vec2 p){
   // A ~270 m domain warp so the streaks meander instead of ruling the whole world in parallel
   // lines. Amplitude times frequency stays well under one, so the map keeps a bounded
   // derivative and the frame stays as well-behaved as the plain rotation underneath it.
-  vec2 w = vec2(pn2(p*0.0037 + 11.3), pn2(p*0.0037 + 41.7)) * 46.0;
+  // 22 m of warp, down from 46: at 46 the finer ripple bands were bent into closed
+  // fingerprint whorls — the surface read as marbled paper. At 22 the streaks still
+  // meander (the wavelength is unchanged) but stay open lines, the way wind-streaks lie
+  // on real water and in the pen's river.
+  vec2 w = vec2(pn2(p*0.0037 + 11.3), pn2(p*0.0037 + 41.7)) * 22.0;
   vec2 s = p + w;
   return vec2(dot(s, RIP_AXIS), dot(s, vec2(-RIP_AXIS.y, RIP_AXIS.x)));
 }
@@ -320,7 +324,11 @@ void main(){
   float h0 = ripple(q, drift, uTime, gust, fw);
   float hx = ripple(q + vec2(e.x, 0.0), drift, uTime, gust, fw);
   float hy = ripple(q + vec2(0.0, e.y), drift, uTime, gust, fw);
-  float amp = mix(0.055, 0.20, clamp(sp*0.22, 0.0, 1.0)) * (0.55 + 0.9*gust);
+  // Gust coupling at 0.62+0.55 rather than the old 0.55+0.9: a gust used to nearly
+  // treble the ripple amplitude, and a treble-height ripple field under a grazing
+  // reflection is where the "marbled oil slick" read came from (see the normal-scale
+  // note below) — patchy islands of maximum chop inside calm water.
+  float amp = mix(0.055, 0.20, clamp(sp*0.22, 0.0, 1.0)) * (0.62 + 0.55*gust);
   // Shallow water is choppier: the bed shortens the wave.
   amp *= mix(1.35, 1.0, smoothstep(0.3, 2.6, depth));
   // Flat and calm on a genuinely large body — the operator's report, "large bodies of water
@@ -328,15 +336,30 @@ void main(){
   // current where its bed actually falls, and shallow water beside a deep lake still shortens
   // its own wave — this only pulls down the ceiling those terms are allowed to reach.
   amp *= mix(1.0, ${OPEN_CALM_AMP.toFixed(3)}, calm);
-  vec2 dh = (vec2(hx, hy) - h0)/e * amp * 14.0;
+  /* Normal scale 8.5, down from 14. The old value was tuned on the pen's narrow river,
+   * always seen at a steep angle; on a lake seen at grazing incidence a hard-tilted normal
+   * swings the reflected ray across the WHOLE sky dome, and the surface renders as
+   * high-contrast marbled contour lines (white horizon band against blue zenith) instead of
+   * as water. The operator's report — "the water is ugly" — was this, before anything else:
+   * every screenshot at 100-600 m showed the marbling. The band-limiting above is untouched;
+   * this is amplitude, not anti-aliasing. */
+  vec2 dh = (vec2(hx, hy) - h0)/e * amp * 8.5;
+  /* Soft-limit the tilt. The finite-difference slope scales with band FREQUENCY, so the
+   * capillary bands tilt the normal several times harder than the long swells — hard
+   * enough to swing the reflected ray from horizon to zenith between neighbouring pixels,
+   * which is glitter on a real sea but marbling on a painted one. The rational soft clamp
+   * leaves small slopes untouched (denominator ~1) and compresses the extremes toward an
+   * asymptote of ~24 deg, so ripples keep their character and lose their violence. */
+  dh /= 1.0 + 2.2*length(dh);
   // Back out of the ripple frame into world xz. The warp is ignored in this rotation: it is a
   // few degrees of shear, and the normal only has to look right, not integrate.
   vec2 axC = vec2(-RIP_AXIS.y, RIP_AXIS.x);
   vec3 N = normalize(vec3(-(dh.x*RIP_AXIS.x + dh.y*axC.x), 1.0, -(dh.x*RIP_AXIS.y + dh.y*axC.y)));
   // Flatten with distance so a lake two kilometres away is a plate of colour and not a
-  // boiling field of highlights. Barely stronger than the pen's 0.75 over 120-520 m: with
-  // the bands gated above, this is now a look control rather than an anti-aliasing measure.
-  N = normalize(mix(N, vec3(0.0,1.0,0.0), smoothstep(110.0, 560.0, vDist)*0.82));
+  // boiling field of highlights. Starts at 70 m and lands at 92% (was 110-560 m, 82%):
+  // the marbling described above lived precisely in the 110-560 m window the old ramp
+  // left at full strength, and a painting keeps its detailed brushwork for the FOREGROUND.
+  N = normalize(mix(N, vec3(0.0,1.0,0.0), smoothstep(70.0, 430.0, vDist)*0.92));
 
   float ndl = dot(N, uSunDir);
   float sh = sunShadow(P, ndl) * cloudShadow(P);
@@ -359,16 +382,35 @@ void main(){
   vec2 dc = q - drift*0.471;   // 0.8/1.7
   float caus = pn2(vec2(dc.x*1.7, dc.y*2.9 + uTime*0.5));
   caus = pow(clamp(caus*0.5 + 0.5, 0.0, 1.0), 3.0);
-  body += ${C.wSpark}*caus*0.20*(1.0 - smoothstep(0.05, 0.40, bedDepth))*sh*bandLimit(fw, vec2(1.7, 2.9));
+  // Caustics are a CLOSE-UP delight: past ~200 m the anisotropic footprint can keep the
+  // band's view-aligned axis alive while the cross axis collapses, and what survived read
+  // as white curls smeared over the shelf. The explicit distance fade ends the argument.
+  body += ${C.wSpark}*caus*0.15*(1.0 - smoothstep(0.05, 0.40, bedDepth))*sh*bandLimit(fw, vec2(1.7, 2.9))
+          * smoothstep(240.0, 110.0, vDist);
 
   // ── reflection ─────────────────────────────────────────────────────────────
   // Sky only. The pen also had a planar mirror pass for its one valley; a streaming world
   // would need one render target per water body per frame, and stylised water keeps its own
   // colour at grazing angles anyway — which is why the Fresnel term is clamped so low.
-  vec3 R = reflect(-V, N);
-  vec3 refl = skyDomeLite(normalize(vec3(R.x, max(R.y, 0.012), R.z)));
-  float fres = 0.035 + 0.70*pow(1.0 - clamp(dot(N,V), 0.0, 1.0), 4.0);
-  fres = clamp(fres, 0.0, 0.46);
+  /* The reflection COLOUR reads through a mostly-calmed normal, while the sun glitter
+   * below keeps the full ripple normal. This is the painted-water decoupling: in a
+   * painting the sheet of water is one smooth wash of sky colour with the ripples drawn
+   * ON it as sparse strokes and sparkles — the wash never churns. Resampling the sky
+   * dome through the full ripple field is what a simulation does, and at grazing
+   * incidence it swings the reflected ray across the whole dome and renders marbled
+   * contour lines instead of water (the operator's "the water is ugly", verbatim). */
+  vec3 Nr = normalize(mix(N, vec3(0.0, 1.0, 0.0), 0.65));
+  vec3 R = reflect(-V, N);      // full ripple normal — the glints live on this
+  vec3 Rr = reflect(-V, Nr);    // calmed normal — the colour wash lives on this
+  /* The reflected ray's elevation is floored at 0.11, not 0.012. At grazing incidence —
+   * which is ALL distant water in a driving camera — a floor of 0.012 samples the sky's
+   * pale horizon band, and the whole far lake came back as a sheet of grey-white. 0.11
+   * samples the blue mid-sky instead: distant water is a plate of luminous blue. */
+  vec3 refl = skyDomeLite(normalize(vec3(Rr.x, max(Rr.y, 0.11), Rr.z)));
+  float fres = 0.045 + 0.60*pow(1.0 - clamp(dot(Nr,V), 0.0, 1.0), 4.0);
+  // Cap 0.36 (was 0.46): stylised water keeps its own colour at grazing angles — the
+  // body plates stay legible out to the haze instead of surrendering to the mirror.
+  fres = clamp(fres, 0.0, 0.36);
 
   vec3 col = mix(body, refl, fres*0.86);
   col = mix(col*0.74 + K_SHADOW*0.10, col, sh*0.82 + 0.18);
@@ -383,8 +425,10 @@ void main(){
     float r2 = pn2(vec2(e2.x*0.155, e2.y*1.05) + 41.0);
     float rib = smoothstep(0.28, 0.62, abs(r1)*0.75 + abs(r2)*0.45);
     float bright = smoothstep(0.0, 0.5, r1 + r2);
+    // 0.10, down from 0.16 — near-white strokes over the pale shallow plate were carrying
+    // half the marbled read on shelving shores. The creases still say "downstream".
     col = mix(col, mix(${C.wDeepShade}, ${C.wSpark}, bright),
-              rib*0.16*(0.4 + 0.6*sh)*bandLimit(fw, vec2(0.155, 1.05)));
+              rib*0.10*(0.4 + 0.6*sh)*bandLimit(fw, vec2(0.155, 1.05)));
   }
 
   // ── quantised sun glitter ──────────────────────────────────────────────────
@@ -403,15 +447,40 @@ void main(){
 
   // ── shore foam ─────────────────────────────────────────────────────────────
   // Keyed off the measured depth, so the foam band is a genuine contour of the bed and
-  // widens by itself wherever the shore shelves gently.
-  float edge = 1.0 - smoothstep(0.0, 1.25, depth);
+  // widens by itself wherever the shore shelves gently. Reaches 0.55 m of depth, not the
+  // old 1.25: on a gently shelving shore 1.25 m of depth is tens of metres of horizontal
+  // run, and the "foam" was a chalk apron around every lake. A painted foam line is a
+  // LINE — a scalloped ribbon at the waterline, not a coat.
+  float edge = 1.0 - smoothstep(0.0, 0.40, depth);
   vec2 ds = q - drift*0.824;   // 0.7/0.85
-  float scallop = mix(0.5, pn2(vec2(ds.x*0.85, ds.y*2.2))*0.5 + 0.5, bandLimit(fw, vec2(0.85, 2.2)));
+  float scEdge = bandLimit(fw, vec2(0.85, 2.2));
+  float scallop = mix(0.5, pn2(vec2(ds.x*0.85, ds.y*2.2))*0.5 + 0.5, scEdge);
   float foam = clamp(smoothstep(0.42, 0.96, edge*(0.50 + 0.95*scallop)), 0.0, 1.0);
-  col = mix(col, ${C.wFoam}*mix(0.80, 1.10, scallop), foam*0.55);
+  // Once the scallop noise is band-limited away the foam has no breakup left and turns
+  // into a solid chalk apron across every distant flat shelf — so it dims with the same
+  // gate that removed its texture, down to a pale suggestion rather than a coat.
+  foam *= mix(0.35, 1.0, scEdge);
+  // Foam belongs to the water: fade it out across the dry side of the waterline (raw
+  // vD.x < 0 is the seam-tolerance band drawn over ground the terrain calls dry), so the
+  // brightest paint in this shader never sits on the beach.
+  foam *= smoothstep(-0.14, 0.02, vD.x);
+  col = mix(col, ${C.wFoam}*mix(0.80, 1.10, scallop), foam*0.36);
 
-  // cat's paws darken the surface where a gust touches down
-  col *= mix(1.0, 0.86, smoothstep(0.75, 1.6, gust));
+  /* ── the waterline itself ──────────────────────────────────────────────────
+   * The discard above keeps its full 0.5 m tolerance (the seam-prevention property —
+   * see the comment at the discard). What changes is what the tolerance band LOOKS
+   * like. It used to render as pale wet-stone with foam on top: a light grey ring
+   * around every shore, whose aliased discard contour showed against the grass as a
+   * jagged chalk line. Instead the band now fades to a dark wet-earth tone, deepest
+   * at the outer (discard) edge — so the aliased contour is a dark-against-green edge
+   * at one third the contrast, reading as the wet margin every painted lake has, and
+   * the scallop noise breaks its line the way a brush would. */
+  float rim = smoothstep(0.22, -0.30, vD.x) * mix(0.72, 1.0, scallop);
+  col = mix(col, ${C.wetStone} * vec3(0.52, 0.55, 0.52), rim*0.85);
+
+  // cat's paws darken the surface where a gust touches down — one shade calmer than
+  // before (0.90 vs 0.86): at distance the fbm's diagonal grain was reading as stripes.
+  col *= mix(1.0, 0.90, smoothstep(0.75, 1.6, gust));
 
   col += K_SUN * pow(clamp(dot(V,-uSunDir), 0.0, 1.0), 5.0) * 0.16 * sh;
   col = aerial(col, vDist, V, P.y);

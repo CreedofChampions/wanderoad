@@ -632,10 +632,40 @@ Newly asked for, not yet started:
       operator's note was "the goal is to wrap up this project soon so we shouldn't get totally
       caught away".
 
-- [ ] Water still looks poor at distance — moire on large sheets, and the shoreline is hard.
+- [x] Water still looks poor at distance — moire on large sheets, and the shoreline is hard.
 
-      **Investigated this pass, NOT fixed, recorded instead.** Two separate claims, checked
-      separately.
+      **FIXED (grading pass, 2026-07-27), operator's report verbatim: "fix the water please --
+      its ugly".** The screenshot-at-distance comparison the note below asked for was done, and
+      it found the real culprit was neither moire nor the discard line but the REFLECTION: at
+      grazing incidence (all mid-distance water in a driving camera) the full ripple normal
+      swung the reflected ray across the whole sky dome, so 100–600 m of every lake rendered as
+      high-contrast marbled contour lines (pale horizon band against blue zenith — screenshots
+      showed fingerprint whorls), and past the normal-flatten distance the floor-at-0.012
+      reflection sampled the WHITE horizon band, so the far lake was a grey sheet. What changed,
+      all in `render/water.js`, all amplitude/colour grading — `bandLimit()` and the per-band
+      Nyquist gates are UNTOUCHED, and the `-0.5` discard tolerance (seam prevention) is
+      UNTOUCHED to the character:
+        - reflection colour now reads through a 65%-calmed normal (glints keep the full one) —
+          the painted decoupling: the sky wash never churns, the sparkle still winks;
+        - reflected-ray elevation floored at 0.11 (was 0.012) so distant water reflects blue
+          mid-sky, not white horizon haze — the far lake is now a luminous blue plate;
+        - fresnel cap 0.36 (was 0.46), normal scale 8.5 (was 14) plus a rational soft-limit on
+          tilt (~24° asymptote), distance flatten 70–430 m @ 92% (was 110–560 @ 82%);
+        - domain warp 22 m (was 46): streaks now meander as open lines instead of closing into
+          whorls; ripple-gust coupling 0.62+0.55 (was 0.55+0.9);
+        - foam: reaches 0.55 m of depth (was 1.25 — a chalk apron on every shelving shore),
+          opacity 0.36, fades across the dry side of the waterline, and dims with the same
+          band-limit gate that removes its scallop texture (a solid distant apron otherwise);
+        - the 0.5 m seam-tolerance band now fades to a dark wet-earth rim instead of pale
+          wet-stone + foam, so the aliased discard contour reads as the dark wet margin every
+          painted lake has, at a third the contrast; caustics get an explicit ≤240 m fade.
+      Verified against real frames (lake at 2600,-480, seed 20260726): sunward, cross-light and
+      shoreline close-ups before/after; no chevron banding at distance (band-limiting still
+      doing its job), no dry-gap at the shore seam, suite screenshots (causeway between two
+      bodies) read calm turquoise. `npm test` green, `npm run test:browser` 40/40.
+
+      **Investigated the pass before, NOT fixed then, recorded instead.** Two separate claims,
+      checked separately.
 
       Moire: `render/water.js` is NOT missing an obvious fix here — every procedural layer
       already runs through `bandLimit()`, an analytic per-band Nyquist gate keyed off
@@ -990,6 +1020,41 @@ Newly asked for, not yet started:
       collision geometry.
 
 ## Done
+
+- [x] **Valley mist ("from the original") — shipped, and the shader-killing bug was ONE
+      reserved word.** (2026-07-27) The reverted implementation (analytic exponential-density
+      mist integral in `aerial()`, `uMist` in GL_UNI, horizon bands in `skyDome`/`skyDomeLite`,
+      its own `mstHash`/`mstNoise` pair) was reapplied from the saved backups and the real
+      fault hunted down on a live GPU rather than theorised about. It was NOT an instruction
+      limit, NOT a uniform limit, NOT the GL_LIGHT/CLOUD_FS chunk interaction: the layering
+      variable was named `patch`, and **`patch` is a reserved word in GLSL ES 3.00** (kept for
+      tessellation). ANGLE rejects it at compile ("ERROR: 'patch' : Illegal use of reserved
+      word"), the chunk lives in GL_LIGHT which every material concatenates, so all eleven
+      materials failed and the game went black — on the real GTX 1060/ANGLE-D3D11 exactly as
+      under SwiftShader (both were captured; the headless suite on this machine actually runs
+      the real GPU). Renamed to `mstPatch` (comment at the site tells the story), updated
+      `tools/diag-mist.mjs`'s source-text assertion to match. Static node-side checks can
+      never catch this class of bug; only a GPU compile can — which is the whole lesson of
+      the incident, now twice over. Verified: zero console errors at boot, mist visibly
+      pooling in the low valleys from a 137 m ridge (screenshot), silvery veil over distant
+      lake water, near field crisp, summits clear; `node tools/diag-mist.mjs` ALL CHECKS
+      PASSED; `npm test` green; `npm run test:browser` 40/40 "THE GAME WORKS".
+
+- [x] **"Alpine start should be in the mountains" (operator) — spawn now biased to altitude,
+      preset-driven, water-safe.** (2026-07-27) `findSpawn()` takes `opts.highBias` (default
+      0 — the other five presets score bit-identically, since the credit term multiplies to
+      exactly zero); the alpine preset sets `spawnHigh: 1` and `main.js` passes it for the
+      initial spawn only (rescues stay unbiased — a rescue should find the nearest sane road,
+      not march you back up a massif). The credit: up to 800 points for up to 400 m of road
+      profile altitude — deliberately UNDER the saturated grade penalty (900) so the search
+      picks the gentlest road up the mountain, and three orders over the distance term so
+      altitude beats proximity. The W8 waterMargin gate is untouched and still rejects wet
+      candidates before scoring sees them. Measured across seeds (before → after, all
+      on-road at 0.0 m, all dry by 400+ m, grades 1.8–4.7%): 20260726: 8.6 m → 470.2 m
+      (massif 480 m at 291 m); seed 1: 86 m → 415 m; seed 7: 218 m → 516 m; seed 12345:
+      6.4 m → 452 m; seed 999: already at 570 m, unchanged. Determinism re-run: identical.
+      `node tools/diag-spawn-water.mjs`: ALL DRY. In-game screenshot at the real alpine
+      spawn: y=477 m mountain junction with a gas station in reach. Suite 40/40.
 
 - [x] **The car fell through the road, repeatedly, in real driving.** Reported by the operator
       twice while playing. The drawn tarmac and the ground the car actually stood on were built

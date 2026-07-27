@@ -145,7 +145,9 @@ console.log(`\n=== 1. THE MODEL vs THE SHADER ===`);
   has(/\(1\.0\/1300\.0\)/, `one optical depth per ${K.perDepth} m at the sea's own level`);
   has(/smoothstep\(16\.0, 165\.0, dist\)/, 'the near ramp is 16..165 m');
   has(/mist > 0\.02/, 'the layering branch is gated at 0.02');
-  has(/0\.83 \+ 0\.34\*patch\*\(0\.45 \+ 0\.55\*sheet\)/, 'the layering weights are 0.83 + 0.34 * patch * (0.45 + 0.55 * sheet)');
+  // mstPatch, not patch: `patch` is a reserved word in GLSL ES 3.00 and was the entire
+  // "mist broke every shader" incident — see the comment at the identifier in core/glsl.js.
+  has(/0\.83 \+ 0\.34\*mstPatch\*\(0\.45 \+ 0\.55\*sheet\)/, 'the layering weights are 0.83 + 0.34 * mstPatch * (0.45 + 0.55 * sheet)');
   has(/worldY\*0\.019 \+ 4\.7, worldY\*0\.052/, 'the sheets are a function of altitude alone');
   has(/pxz\*0\.00082/, 'the patch field is 1/0.00082 = 1219 m across');
   has(/uCloudDrift\*0\.30/, "the mist drifts on the cloud deck's own wind");

@@ -128,6 +128,12 @@ export const TERRAINS = {
     wave: 0.97,
     peak: 1.7,
     bias: [0.6, 0.5, 3.0, 0.2, 0.5],
+    /* "alpine start should be in the mountains" (operator). Read by main.js and passed to
+     * findSpawn() as its highBias — the spawn search then rewards altitude, so the game
+     * opens on high ground with the massifs around you instead of on the flattest valley
+     * pocket. Water-safety and the grade gate are unchanged — see the findSpawn header.
+     * Only this preset sets it; the other five spawn exactly as before. */
+    spawnHigh: 1,
   },
   plains: {
     label: 'Plains',
