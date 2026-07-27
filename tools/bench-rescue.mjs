@@ -11,7 +11,7 @@
  *   node tools/bench-rescue.mjs
  */
 
-import { Terrain } from '../src/world/terrain.js';
+import { Terrain, findSpawn, isDryAt } from '../src/world/terrain.js';
 import { BIOME_COUNT, waterLevelAt } from '../src/world/biomes.js';
 import { Vehicle } from '../src/car/vehicle.js';
 import { Autopilot } from '../src/car/autopilot.js';
@@ -39,7 +39,10 @@ const check = (ok, label, got, want) => {
   console.log(`${ok ? ' PASS' : ' FAIL'}  ${label.padEnd(46)} ${String(got).padStart(15)}   want ${want}`);
 };
 
-/** Exactly what main.js's backToRoad() does, so the bench measures the shipped path. */
+/** Exactly what main.js's backToRoad() does, so the bench measures the shipped path — water
+ *  check included, since a nearest-road point is not automatically dry (a cutting can duck
+ *  below the local water table while the land beside it stays dry; see the header note on
+ *  waterMargin() in world/terrain.js). */
 function makeRig({ tier = 'sports' } = {}) {
   const car = new Vehicle({ tier, terrain: T, preset: 'sport' });
   const log = [];
@@ -49,7 +52,12 @@ function makeRig({ tier = 'sports' } = {}) {
     recover: () => {
       placements++;
       const q = T.roads.query(car.x, car.z);
-      if (isFinite(q.d)) car.placeAt(q.qx, q.qz, Math.atan2(q.tx, q.tz));
+      if (isFinite(q.d) && isDryAt(q.qx, q.qz, SEED)) {
+        car.placeAt(q.qx, q.qz, Math.atan2(q.tx, q.tz));
+      } else {
+        const s = findSpawn(SEED, car.x, car.z);
+        car.placeAt(s.x, s.z, s.heading);
+      }
     },
   });
   return { car, rescue, log, placed: () => placements };

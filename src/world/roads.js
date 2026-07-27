@@ -23,7 +23,7 @@
  * the land then bends towards the road.
  */
 
-import { hash2i, clamp, smoothstep, lerp, segDist, TAU } from '../core/math.js';
+import { hash2i, clamp, clamp01, smoothstep, lerp, segDist, TAU } from '../core/math.js';
 
 /*
  * cell     lattice spacing, metres
@@ -400,10 +400,13 @@ function windOf(i, j, dir, tier, chord, n, maxSwing, seed) {
 }
 
 /**
- * A single edge, sampled into a polyline. `pts` is [x0,z0,x1,z1,...]; `y` is filled later
- * by the caller from the raw land height, then smoothed.
+ * The GEOMETRY of a single edge, sampled into a polyline. `pts` is [x0,z0,x1,z1,...].
+ *
+ * Pure in (i, j, dir, tier, seed) — no heights, nothing about the land — which is why the
+ * result can be cached and shared. It is the elevation that used to be box-dependent, never
+ * the shape.
  */
-function buildEdge(i, j, dir, tier, seed) {
+function buildGeom(i, j, dir, tier, seed) {
   const T = TIERS[tier];
   const i1 = dir === 0 ? i + 1 : i;
   const j1 = dir === 0 ? j : j + 1;
@@ -473,13 +476,9 @@ function buildEdge(i, j, dir, tier, seed) {
   // that biomes can override.
   const h = hash2i(i * 3 + dir, j * 7, seed ^ 0x77c1);
   const wj = 1 + ((h & 0xff) / 255 - 0.5) * 0.22;
-  return {
+  const g = {
     tier,
     pts,
-    y: new Float32Array(n + 1),
-    // water surface under each sample, -Infinity where the ground is dry. Filled by
-    // profileEdge and kept, because working it out is as expensive as a height sample.
-    water: new Float32Array(n + 1),
     // Nominal metres between samples. The winding adds a couple of per cent of arc length on
     // top; this is only used to convert a smoothing LENGTH into a number of passes.
     span: chord / n,
@@ -493,6 +492,61 @@ function buildEdge(i, j, dir, tier, seed) {
     maxZ: 0,
     segs: n,
     blk: null,
+  };
+  bounds(g);
+  return g;
+}
+
+/**
+ * Cached edge geometry, and the mutable per-query wrapper laid over it.
+ *
+ * `buildGeom` is the most expensive pure function in the file — a hermite, a winding
+ * integration and an unknot relaxation per edge, measured at 41 µs — and a road field asks
+ * for the same edges over and over: every terrain chunk, every rebuild of the car's local
+ * sampler, and the road ribbon all re-enumerate the same lattice. Caching the SHAPE is free
+ * of any correctness question because the shape has no inputs beyond the lattice and the
+ * seed.
+ *
+ * `pts` and `blk` are shared by every wrapper handed out for the same key, so NOTHING may
+ * write to them. `y`, `water` and `land` are per-wrapper, because those are what the caller
+ * fills in.
+ */
+const GEOM_CAP = 4096;
+const GEOM = new Map();
+
+function geomFor(i, j, dir, tier, seed) {
+  const key = `${seed}:${tier}:${i},${j},${dir}`;
+  let g = GEOM.get(key);
+  if (g === undefined) {
+    g = buildGeom(i, j, dir, tier, seed);
+    if (GEOM.size >= GEOM_CAP) GEOM.clear();
+    GEOM.set(key, g);
+  }
+  return g;
+}
+
+function edgeFrom(g) {
+  const n = g.pts.length / 2;
+  return {
+    tier: g.tier,
+    pts: g.pts,
+    y: new Float32Array(n),
+    // water surface under each sample, -Infinity where the ground is dry. Filled by
+    // profileEdge and kept, because working it out is as expensive as a height sample.
+    water: new Float32Array(n),
+    // raw land under each sample, filled by profileEdge — the earthwork clamp needs it again
+    // after the crossings have been levelled.
+    land: null,
+    span: g.span,
+    width: g.width,
+    verge: g.verge,
+    key: g.key,
+    minX: g.minX,
+    maxX: g.maxX,
+    minZ: g.minZ,
+    maxZ: g.maxZ,
+    segs: g.segs,
+    blk: g.blk,
   };
 }
 
@@ -597,11 +651,10 @@ export function edgesInBox(x0, z0, x1, z1, seed, pad = 40) {
       for (let i = i0; i <= i1; i++) {
         for (let dir = 0; dir < 2; dir++) {
           if (!connects(i, j, dir, tier, seed)) continue;
-          const e = buildEdge(i, j, dir, tier, seed);
-          bounds(e);
-          const m = e.width * 0.5 + e.verge + pad;
-          if (e.maxX < x0 - m || e.minX > x1 + m || e.maxZ < z0 - m || e.minZ > z1 + m) continue;
-          out.push(e);
+          const g = geomFor(i, j, dir, tier, seed);
+          const m = g.width * 0.5 + g.verge + pad;
+          if (g.maxX < x0 - m || g.minX > x1 + m || g.maxZ < z0 - m || g.minZ > z1 + m) continue;
+          out.push(edgeFrom(g));
         }
       }
     }
@@ -648,9 +701,98 @@ function passesFor(metres, spacing, w) {
   return clamp(Math.round((metres * metres) / (2 * w * spacing * spacing)), 1, 160);
 }
 
+/* ── a node has ONE height ───────────────────────────────────────────────────
+ *
+ * Every edge smooths its own elevation over its own kilometre of ground, and two edges that
+ * meet at a lattice node smooth over different ground — so they arrive at the SAME PLACE at
+ * different heights. Measured on the seeded world: three arterials meet at node 0:(0,0) at
+ * 17.0, 1.2 and 1.2 metres, and at a pass one edge left its shared node 18 m below the land
+ * while the other left it 18 m above, 36 m apart at a single point.
+ *
+ * carve() then blends the ground between them, so a junction is a crater: the shelf under
+ * each road sits metres below that road's own surface, the drawn tarmac hangs over a hole,
+ * and the car drops into it. That is the operator's "falling through onto a lower plane",
+ * and no amount of levelling crossings fixes it, because the two roads are not crossing —
+ * they are the same road.
+ *
+ * The fix is upstream of all of it: the node owns the height, both edges are pinned to it,
+ * and the pin is a pure function of (i, j, tier, seed) so every sampler agrees. The value is
+ * the land averaged over a disc the size of the tier's own smoothing length, which is what
+ * the smoothing was approximating in the first place — so the pin moves a well-behaved
+ * profile by centimetres and only bites where the two edges genuinely disagreed.
+ */
+const NODEY = new Map();
+const _np = [0, 0];
+/** Sample offsets on the disc: centre, an inner ring and an outer ring, with their weights. */
+const DISC = (() => {
+  const out = [[0, 0, 1]];
+  for (let a = 0; a < 8; a++) {
+    const th = (a / 8) * TAU;
+    out.push([Math.cos(th) * 0.55, Math.sin(th) * 0.55, 0.5]);
+    out.push([Math.cos(th + TAU / 16), Math.sin(th + TAU / 16), 0.22]);
+  }
+  return out;
+})();
+
+function nodeY(i, j, tier, seed, landHeight, tag) {
+  const key = `${tag}:${tier}:${i},${j}`;
+  const hit = NODEY.get(key);
+  if (hit !== undefined) return hit;
+  nodePos(i, j, tier, seed, _np);
+  const r = TIERS[tier].grade * 0.5;
+  let s = 0,
+    w = 0;
+  for (const [dx, dz, ww] of DISC) {
+    s += ww * landHeight(_np[0] + dx * r, _np[1] + dz * r);
+    w += ww;
+  }
+  const here = landHeight(_np[0], _np[1]);
+  // Inside the same earthwork budget every other part of the profile obeys, so the clamp
+  // below cannot pull the endpoint back off the node and un-share it again.
+  const y = clamp(s / w, here - MAX_EARTHWORK, here + MAX_EARTHWORK);
+  if (NODEY.size >= PROFILE_CAP) NODEY.clear();
+  NODEY.set(key, y);
+  return y;
+}
+
 /**
- * Give an edge its elevation profile. Shared by the collision/carve field and by the visible
- * ribbon so the two can never disagree about where the road is.
+ * Move an edge's two ends onto their nodes' heights, feathering the correction inwards over
+ * the tier's smoothing length so the road ramps to the junction instead of stepping at it.
+ */
+function pinToNodes(e, landHeight, seed, tag) {
+  const [i, j, dir] = e.key
+    .slice(e.key.indexOf(':') + 1)
+    .split(',')
+    .map(Number);
+  const y0 = nodeY(i, j, e.tier, seed, landHeight, tag);
+  const y1 = nodeY(dir === 0 ? i + 1 : i, dir === 0 ? j : j + 1, e.tier, seed, landHeight, tag);
+  const n = e.y.length;
+  const d0 = y0 - e.y[0];
+  const d1 = y1 - e.y[n - 1];
+  if (d0 === 0 && d1 === 0) return;
+  /* Reach in SAMPLES, from a length in metres, exactly as the smoothing does. 2.6 grade
+   * lengths is where the gradient this correction adds stops mattering: measured on the
+   * standard massif, the worst arterial grade goes 28.0% at one length to 26.7% at 2.6
+   * against 24.5% for the unpinned network, and tools/diag-cliffs.mjs improves from 0.006%
+   * of ground over 45° to 0.002% (it was 0.019% before any of this).
+   *
+   * Capped at half the edge so the two feathers meet in the middle rather than overlapping:
+   * a jittered lane can be a fifth of its cell long, and where both ramps still had authority
+   * at an endpoint the pin no longer landed on the node — which is the one thing it is for. */
+  const reach = clamp((TIERS[e.tier].grade * 2.6) / Math.max(e.span, 1e-3), 2, (n - 1) * 0.5);
+  for (let k = 0; k < n; k++) {
+    const a = 1 - smoothstep(0, reach, k);
+    const b = 1 - smoothstep(0, reach, n - 1 - k);
+    e.y[k] += d0 * a + d1 * b;
+  }
+}
+
+/**
+ * The FIRST of the two stages that give an edge its elevation: the raw profile, before any
+ * crossing is levelled. Module-private on purpose — it used to be exported, three other files
+ * called it to get "the road height", and every one of them was then drawing or placing
+ * something on a road that had since been levelled somewhere else. `edgeProfile()` below is
+ * the one and only public answer to "how high is this road".
  *
  * Three passes, in order, and the order matters:
  *   1. sample the raw land under the curve
@@ -663,11 +805,15 @@ function passesFor(metres, spacing, w) {
  * straight down into a lake, and the player drives underwater — both were reported from the
  * first live build.
  */
-export function profileEdge(e, landHeight, waterAt = null) {
+function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
   const n = e.y.length;
   const land = new Float32Array(n);
   for (let k = 0; k < n; k++) land[k] = landHeight(e.pts[k * 2], e.pts[k * 2 + 1]);
   e.y.set(land);
+  /* Kept, not thrown away: levelling a crossing happens AFTER the earthwork clamp below, so
+   * the clamp has to be re-applied afterwards, and re-sampling the land to do it would cost
+   * as much as the whole profile. */
+  e.land = land;
 
   /* The water surface under every sample, worked out ONCE. It used to be re-queried in each of
    * the three floor passes below and again in RoadField's constructor — four times per sample
@@ -688,6 +834,11 @@ export function profileEdge(e, landHeight, waterAt = null) {
   const tmp = new Float32Array(n);
   const T = TIERS[e.tier];
   blur(e.y, tmp, n, passesFor(T.grade, e.span, 0.25), 0.25);
+
+  /* Both edges at a junction to the junction's own height, BEFORE the earthwork clamp and the
+   * two smoothing passes below, so those can absorb the correction the way they were designed
+   * to. They preserve the end samples themselves, so the pin survives them. */
+  if (tag !== null) pinToNodes(e, landHeight, seed, tag);
 
   for (let k = 0; k < n; k++) {
     const d = e.y[k] - land[k];
@@ -723,6 +874,219 @@ export function profileEdge(e, landHeight, waterAt = null) {
   return e;
 }
 
+/* ── one road, ONE height ────────────────────────────────────────────────────
+ *
+ * `profileEdge` is pure: give it a key and a seed and it always returns the same elevation.
+ * `levelCrossings` was not, and that one fact was the worst bug in the game.
+ *
+ * It levelled a lane against `this.edges` — whatever happened to be inside the RoadField's
+ * BOX — so an edge's height was a property of the question you asked, not of the world. The
+ * boxes are all different: a level-0 terrain chunk is 64 m with 80 m of pad, a coarse chunk
+ * is kilometres, the car's local sampler is 840 m, the road ribbon's window is 3800 m. Same
+ * lane, same seed, same point, four different heights — measured at up to 3.8 m between the
+ * chunk the worker meshes and the ground the car stands on, and up to 24 m between the
+ * ribbon the player can see and either of them. The car drove out from under a road that was
+ * still being drawn, and since the ribbon is FrontSide it vanished on the way through.
+ *
+ * So the levelling neighbourhood is now derived from the EDGE, never from the caller:
+ *
+ *   raw   profileEdge and nothing else. Already pure.
+ *   L1    raw, levelled against every ARTERIAL that crosses this edge. Arterials are never
+ *         moved by anything, so for tier 0 this is also the final answer.
+ *   L2    L1, levelled against the L1 height of every LANE that crosses it and outranks it
+ *         (the same stable key order the old two-pass code used).
+ *
+ * Each level is a pure function of (seed, edge key, height field) and is memoised, so every
+ * sampler in every worker returns the same number and the recursion is one hop deep — L2
+ * needs its partners at L1, and L1 needs nobody. That bound is the point: the old code's
+ * "level against whatever is in the list, in order" is an unbounded chain, which is exactly
+ * why widening the box kept changing the answer.
+ */
+
+/** How far outside an edge's own bounds a road has to be before it cannot be crossing it.
+ *  levelAgainst captures at 18 m of horizontal distance; edgesInBox's own margin adds the
+ *  partner's half-width and verge on top of this, so 24 m is comfortably generous. */
+const CROSS_PAD = 24;
+
+/**
+ * The furthest a road can reach into carve(), and therefore the smallest pad any field may
+ * have — enforced in the constructor, not asked of the callers.
+ *
+ * carve() blends over every edge whose shoulder covers the point, and it stops looking at
+ * `half + verge * 2.6 + 60`, which is 77.8 m for the widest arterial. A field built with a
+ * smaller pad than that can be missing a road that the carve at its own boundary depends on,
+ * and then carve() — and with it Terrain.height() — is once again a function of the box you
+ * asked about rather than of the world. There are eight call sites building fields with
+ * eight different pads (chunk.js, terrain.js x3, props.js, scatter.js, grass.js, the road
+ * ribbon), three of them below 80; a floor here is the only place that fixes all of them at
+ * once. Costs nothing measurable now that edge geometry is cached.
+ */
+const CARVE_REACH = 80;
+
+const PROFILE_CAP = 4096;
+/** key -> { y, water, land } straight out of profileEdge */
+const RAW = new Map();
+/** key -> Float32Array, levelled against arterials only */
+const LVL1 = new Map();
+/** key -> { y, water }, the final canonical profile */
+const LVL2 = new Map();
+
+function cacheSet(map, key, v) {
+  if (map.size >= PROFILE_CAP) map.clear();
+  map.set(key, v);
+  return v;
+}
+
+/**
+ * THE elevation of one edge, applied to it: profiled, pinned to its junctions and levelled
+ * against everything that crosses it, exactly as a RoadField would give it.
+ *
+ * For code that needs a road's height without wanting a whole field — world/props.js puts a
+ * petrol-station forecourt on an arterial, and it used to profile a private copy precisely
+ * BECAUSE a RoadField's `y` was not a function of the edge alone. It is now, so the private
+ * copy is not just unnecessary, it is a second opinion about where the road is, which is the
+ * one thing this file no longer allows.
+ */
+export function edgeProfile(e, seed, landHeight, waterAt = null) {
+  const p = canonicalProfile(e, worldTag(seed, landHeight, waterAt), seed, landHeight, waterAt);
+  e.y.set(p.y);
+  e.water.set(p.water);
+  return e;
+}
+
+/**
+ * What the cached heights were computed FROM, as one short string.
+ *
+ * The profile caches hold metres, so they are only valid while the height field itself is
+ * unchanged — and the terrain preset mutates that field in place (game/presets.js
+ * applyTerrain rewrites BIOME_TERRAIN, world/biomes.js setBiomeBias, landmarks.js
+ * setLandmarkScale), including inside the chunk worker, which re-applies it on every job.
+ * A "bump a counter in every setter" scheme would therefore invalidate the cache once per
+ * chunk, and would silently rot the moment someone added a sixth knob. Fingerprinting the
+ * field itself cannot rot: two land samples, taken ONCE per RoadField rather than per edge,
+ * so the cost is two height evaluations against a build that already costs milliseconds.
+ */
+function worldTag(seed, land, waterAt) {
+  return `${seed}|${waterAt ? 'w' : 'd'}|${Math.round(land(0, 0) * 64)}|${Math.round(land(1237.5, -911.25) * 64)}`;
+}
+
+const keyOrder = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+
+function rawProfile(e, tag, seed, land, waterAt) {
+  const k = `${tag}:${e.key}`;
+  const hit = RAW.get(k);
+  if (hit) return hit;
+  profileEdge(e, land, waterAt, seed, tag);
+  return cacheSet(RAW, k, {
+    y: Float32Array.from(e.y),
+    water: Float32Array.from(e.water),
+    land: Float32Array.from(e.land),
+  });
+}
+
+function applyRaw(e, p) {
+  e.y.set(p.y);
+  e.water.set(p.water);
+  e.land = p.land;
+}
+
+/** A private copy of an edge that shares its (immutable) geometry but owns its heights. */
+function workEdge(e, raw) {
+  const w = edgeFrom(e);
+  w.y.set(raw.y);
+  w.water.set(raw.water);
+  // levelAgainst caps its corrections against this, so it has to be here, not null.
+  w.land = raw.land;
+  return w;
+}
+
+/**
+ * Every edge that could cross this one, in key order, with no heights on it yet.
+ *
+ * The box is the EDGE's own bounds — that is the whole trick. Two samplers asking about the
+ * same edge ask the same question and get the same list. The heights are left to the caller
+ * because a profile is forty land-and-water samples and most of this list is not used: an
+ * edge yields only to the arterials and to the lanes whose key sorts before its own.
+ */
+function partnersOf(e, seed) {
+  const list = edgesInBox(e.minX, e.minZ, e.maxX, e.maxZ, seed, CROSS_PAD);
+  const out = [];
+  for (const o of list) if (o.key !== e.key) out.push(o);
+  out.sort(keyOrder);
+  return out;
+}
+
+/**
+ * Levelled against the arterials that cross it, each at its RAW height. Final for arterials,
+ * which are never moved by anything.
+ *
+ * Letting arterials level against each other was tried and is in the git history of this
+ * comment for a reason: two arterials SHARE their end node, and each smooths its own profile
+ * over its own kilometre of ground, so at a pass one arrives 18 m below the land and the
+ * other 18 m above it. Levelling that pair moved every arterial in a 4 km square, by up to
+ * 36 m, and put a 134% gradient on the trunk network where tools/diag-relief.mjs had been
+ * reading 24%. The disagreement is real and worth fixing one day — at the source, with a
+ * node height that both edges are pinned to — but it is not a levelling problem.
+ */
+function level1(e, tag, seed, land, waterAt) {
+  if (e.tier === 0) return rawProfile(e, tag, seed, land, waterAt).y;
+  const k = `${tag}:${e.key}`;
+  const hit = LVL1.get(k);
+  if (hit) return hit;
+  const raw = rawProfile(e, tag, seed, land, waterAt);
+  const work = workEdge(e, raw);
+  const arts = partnersOf(e, seed).filter((o) => o.tier === 0);
+  for (const o of arts) applyRaw(o, rawProfile(o, tag, seed, land, waterAt));
+  levelAgainst(work, arts, arts.length);
+  return cacheSet(LVL1, k, work.y);
+}
+
+/**
+ * THE road elevation. Pure in (seed, edge key, height field) — assert that and the ribbon,
+ * the chunk mesh and the car's wheels can no longer disagree about where the road is.
+ */
+function canonicalProfile(e, tag, seed, land, waterAt) {
+  const k = `${tag}:${e.key}`;
+  const hit = LVL2.get(k);
+  if (hit) return hit;
+  const raw = rawProfile(e, tag, seed, land, waterAt);
+  if (e.tier === 0) return cacheSet(LVL2, k, { y: raw.y, water: raw.water });
+
+  const arts = [];
+  const lanes = [];
+  for (const o of partnersOf(e, seed)) {
+    if (o.tier === 0) arts.push(o);
+    // "Outranks" is the same stable key order the old two-pass code used: arbitrary, but
+    // CONSISTENT, which is what stops A pulling B while B pulls A and the pair oscillating.
+    else if (o.key < e.key) lanes.push(o);
+  }
+
+  const work = workEdge(e, raw);
+  for (const o of arts) applyRaw(o, rawProfile(o, tag, seed, land, waterAt));
+  levelAgainst(work, arts, arts.length);
+  cacheSet(LVL1, k, Float32Array.from(work.y));
+  // Each outranking lane at ITS OWN level-1 height. One hop, and no further: that bound is
+  // the difference between an answer and the unbounded chain the old code had.
+  for (const o of lanes) o.y.set(level1(o, tag, seed, land, waterAt));
+  levelAgainst(work, lanes, lanes.length);
+
+  /* Floors last, and both of them. levelCrossings runs after profileEdge's earthwork clamp,
+   * so a correction that meets a road in a valley can leave the lane far outside the 18 m
+   * budget the carve's batter is sized for; and a lane pulled down over water can end up
+   * under it. Every other constraint here has a tolerance — "the road is under the lake"
+   * does not. */
+  const y = work.y;
+  const wl = raw.water;
+  const ld = raw.land;
+  for (let i = 0; i < y.length; i++) {
+    const d = y[i] - ld[i];
+    if (d > MAX_EARTHWORK) y[i] = ld[i] + MAX_EARTHWORK;
+    else if (d < -MAX_EARTHWORK) y[i] = ld[i] - MAX_EARTHWORK;
+    if (y[i] < wl[i]) y[i] = wl[i];
+  }
+  return cacheSet(LVL2, k, { y, water: wl });
+}
+
 /**
  * A prebuilt road field for one region. Build it once per chunk (or once per physics
  * frame for the car) and query it thousands of times; the edge list is tiny.
@@ -734,20 +1098,29 @@ export class RoadField {
    * @param {(x:number,z:number)=>number} landHeight raw land height, WITHOUT road carving
    */
   constructor(x0, z0, x1, z1, seed, landHeight, pad = 60, waterAt = null) {
-    this.edges = edgesInBox(x0, z0, x1, z1, seed, pad);
+    this.edges = edgesInBox(x0, z0, x1, z1, seed, Math.max(pad, CARVE_REACH));
     this.seed = seed;
     this._land = landHeight;
-    for (const e of this.edges) profileEdge(e, landHeight, waterAt);
-    levelCrossings(this.edges);
-    /* Levelling can pull a lane down to meet a road that crosses it lower, and a lane that
-     * crosses water can end up a few centimetres under it. Re-apply the water floor last:
-     * every other constraint has a tolerance, and "the road is under the lake" does not. */
-    if (waterAt) {
-      for (const e of this.edges) {
-        // e.water already carries the 1.1 m of freeboard, and is dry-safe (-Infinity).
-        for (let k = 0; k < e.y.length; k++) if (e.y[k] < e.water[k]) e.y[k] = e.water[k];
-      }
+    const tag = worldTag(seed, landHeight, waterAt);
+    for (const e of this.edges) {
+      const p = canonicalProfile(e, tag, seed, landHeight, waterAt);
+      e.y.set(p.y);
+      e.water.set(p.water);
     }
+  }
+
+  /**
+   * A field covering ONE edge from end to end, for anything that has to know the carved
+   * ground along a whole road rather than around a point — the visible ribbon, above all.
+   *
+   * A ribbon is built for the entire edge at once and an arterial is over two kilometres
+   * long, so most of it lies outside whatever window asked for it. Carving it against the
+   * window's edge list left the far end blending over an incomplete set of neighbours and
+   * put the tarmac 18 m off the ground there. Like the levelling, the answer has to be a
+   * property of the edge.
+   */
+  static forEdge(edge, seed, landHeight, waterAt = null) {
+    return new RoadField(edge.minX, edge.minZ, edge.maxX, edge.maxZ, seed, landHeight, CARVE_REACH, waterAt);
   }
 
   /**
@@ -821,16 +1194,22 @@ export class RoadField {
    * the target height is the weighted mean, and the mask is the combined coverage. Two roads
    * near each other now produce a smooth saddle between them instead of a step.
    */
-  carve(x, z, out = { mask: 0, y: 0, edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0, width: 0 }) {
+  carve(x, z, out = { mask: 0, y: 0, edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0, width: 0, land: NaN }) {
     let wSum = 0;
     let ySum = 0;
+    let widthSum = 0;
     let cover = 0;
-    let bestEdge = 0;
+    let edgeMax = 0;
     let bd = Infinity;
-    let bw = 0,
-      bt = 0,
+    let bt = 0,
       btx = 1,
       btz = 0;
+    /* The raw land here, evaluated at most ONCE and only if some edge actually needs it.
+     * It used to be sampled inside the per-edge loop, so a point near a junction paid for
+     * the same biome-and-relief evaluation three times — and it is the single most expensive
+     * thing in this function at 3.6 µs against 5.0 µs for the whole call. NaN is the "not
+     * yet" marker because a height of 0 is a perfectly ordinary answer. */
+    let landH = NaN;
 
     for (const e of this.edges) {
       const half = e.width * 0.5;
@@ -872,40 +1251,94 @@ export class RoadField {
       }
       if (ed > reach) continue;
 
-      // Shoulder width scales with the height difference this edge is asking for, so an
-      // embankment is battered at about 1:1.5 and never becomes a wall.
-      const drop = Math.abs(ey - this._land(x, z));
-      const shoulder = half + 3.0 + Math.min(drop, MAX_EARTHWORK + 4) * 1.6;
-      const w = 1 - smoothstep(half, shoulder, ed);
-      if (w <= 0.0005) continue;
-
-      wSum += w;
-      ySum += w * ey;
-      cover = Math.max(cover, w);
+      /* Nearest-edge bookkeeping (bd/bt/btx/btz — groundFromCarve reads bd straight off `out.d`
+       * for the batter shoulder) has to happen for every edge that clears `reach`, BEFORE the
+       * weight threshold below can `continue` past it. It used to sit after that continue, so
+       * the edge that is geometrically closest — and is exactly what a point on its shoulder,
+       * away from every OTHER road, wants for its batter — could drop out of the running the
+       * moment its own blend weight dipped under 0.0005, and `d` would jump to whatever edge
+       * was next, tens of metres further out. Measured over the alpine preset that was worth
+       * an 18 m step in Terrain.height() 2 cm away, dwarfing the width/edge cliffs this
+       * function was already rewritten to remove. A weight near zero barely moves wSum/ySum
+       * either way, so gating the BLEND on it is fine; gating WHICH EDGE IS NEAREST on it is
+       * not — those are different questions and only one of them cares about the threshold. */
       if (ed < bd) {
         bd = ed;
-        bw = e.width;
         bt = e.tier;
         btx = etx;
         btz = etz;
-        bestEdge = 1 - smoothstep(half - 0.4, half + 0.35, ed);
       }
+
+      /* Shoulder width scales with the height difference this edge is asking for, so an
+       * embankment is battered at about 1:1.5 and never becomes a wall.
+       *
+       * Inside the carriageway there is no batter yet — smoothstep(half, shoulder, ed) is
+       * identically zero for ed <= half whatever the shoulder works out to — so the weight
+       * is exactly 1 and the land sample that only feeds the shoulder is not needed. That is
+       * not an approximation, it is the same number by a shorter route, and it is the whole
+       * population of points the road ribbon asks about. */
+      let w = 1;
+      if (ed > half) {
+        if (landH !== landH) landH = this._land(x, z);
+        const drop = Math.abs(ey - landH);
+        const shoulder = half + 3.0 + Math.min(drop, MAX_EARTHWORK + 4) * 1.6;
+        w = 1 - smoothstep(half, shoulder, ed);
+        if (w <= 0.0005) continue;
+      }
+
+      wSum += w;
+      ySum += w * ey;
+      // Same weight as y: a narrow lane and a wide arterial with near-equal claims on this
+      // point blend their WIDTH too, so the batter's half-width (groundFromCarve) and the
+      // camber's half-width (roadCamber) can never step just because the nearest edge flipped
+      // from one to the other — that flip is exactly where every 0.5 m cliff under a road
+      // measured out to.
+      widthSum += w * e.width;
+      cover = Math.max(cover, w);
+      // "Am I on SOME carriageway" is a max over edges, not a property of whichever is
+      // nearest — max of continuous functions is continuous, nearest-edge selection is not.
+      const edgeHere = 1 - smoothstep(half - 0.4, half + 0.35, ed);
+      if (edgeHere > edgeMax) edgeMax = edgeHere;
     }
 
     out.d = bd;
     out.tier = bt;
     out.tx = btx;
     out.tz = btz;
-    out.width = bw;
+    out.width = wSum > 1e-6 ? widthSum / wSum : 0;
     out.mask = cover;
-    out.edge = bestEdge;
+    out.edge = edgeMax;
     out.y = wSum > 1e-6 ? ySum / wSum : 0;
+    /* The raw land, if this call happened to need it, and NaN if it did not. Handed out so a
+     * caller that has to reproduce Terrain.height() — the road ribbon does — can finish the
+     * job without paying for a second land sample. It is only ever NaN when every
+     * contributing road had the point INSIDE its carriageway, and that is exactly the case
+     * where the land drops out of the formula anyway (the batter is 1, the ground is the
+     * road). Anything else and the nearest edge itself took the shoulder branch above. */
+    out.land = landH;
     return out;
   }
 }
 
 /**
- * Make every road that crosses another meet it at the same height.
+ * The crown-to-gutter fall the ground is given under a road, in metres, from one carve
+ * sample. About 18 cm across the carriageway, so water would run off it — and it is also
+ * what makes a road read as a made surface rather than a painted stripe.
+ *
+ * It is its own function, rather than four lines inline, because Terrain.height() needs it
+ * on two paths — the full formula and the carriageway shortcut — and a second copy of the
+ * 0.18 is exactly how the visible road and the drivable one drifted apart in the first
+ * place. render/road.js used to keep one. It does not any more.
+ */
+export function roadCamber(c) {
+  if (c.edge <= 0.001) return 0;
+  const half = c.width * 0.5;
+  const across = clamp01(half > 0 ? c.d / half : 0);
+  return c.edge * across * across * 0.18;
+}
+
+/**
+ * Pull one lane onto the roads that cross it, so a junction is one surface.
  *
  * The two tiers are independent lattices, so a lane and an arterial cross wherever they
  * happen to and each arrives at its own smoothed elevation. Measured over a 2.4 km square,
@@ -917,27 +1350,11 @@ export class RoadField {
  * and the lane is pulled to match, with the correction feathered out along the lane so it
  * arrives level rather than stepping. No new geometry, no junction graph — the roads simply
  * agree about where they are.
+ *
+ * WHO `others` IS MATTERS MORE THAN WHAT THIS FUNCTION DOES. See canonicalProfile: the list
+ * is derived from the lane's own bounds and never from a caller's query box, which is what
+ * makes the result a property of the world instead of of the question.
  */
-function levelCrossings(edges) {
-  /* Two passes with the same machinery. First every lane is levelled against the arterials,
-   * then every lane against the lanes that outrank it. "Outranks" is just a stable sort on the
-   * edge key: it is arbitrary, but it is CONSISTENT, which is what stops A pulling B while B
-   * pulls A and the pair oscillating. Levelling only against arterials left 2 of 10 crossings
-   * out, all of them lane-on-lane. */
-  const sorted = [...edges].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const arterials = sorted.filter((e) => e.tier === 0);
-  const lanes = sorted.filter((e) => e.tier !== 0);
-  if (!lanes.length) return;
-
-  for (const lane of lanes) levelAgainst(lane, arterials, arterials.length);
-  // Each lane now yields to every lane ahead of it in the stable order.
-  for (let i = 1; i < lanes.length; i++) levelAgainst(lanes[i], lanes, i);
-}
-
-/* Scratch for the shortlist below — reused, because levelAgainst runs once per PAIR of lanes
- * and a few hundred lanes in an 8 km field is tens of thousands of calls. */
-const _near = [];
-
 function levelAgainst(lane, others, count) {
   if (!count) return;
 
@@ -945,6 +1362,7 @@ function levelAgainst(lane, others, count) {
    * per-point loop. It used to sit inside it, so the test ran (points x others) times per
    * lane; sampling the roads three times finer to make them curve would have made the hottest
    * loop in the build three times hotter for no extra information. */
+  const _near = [];
   let nn = 0;
   for (let a = 0; a < count; a++) {
     const o = others[a];
@@ -981,7 +1399,15 @@ function levelAgainst(lane, others, count) {
     if (bestD < 18) {
       // Full authority on the carriageway, easing off across the shoulder.
       const w = 1 - smoothstep(4, 18, bestD);
-      fix[k] = bestY - lane.y[k];
+      /* Meet the other road, but never ask the land for more earthwork than profileEdge was
+       * allowed to. A lane crossing an arterial that runs 40 m lower in a valley used to be
+       * dragged the whole way down, ending up so far from the ground that the carve built a
+       * 30 m embankment to reach it. Capping the TARGET here rather than clamping the RESULT
+       * afterwards matters: a clamp applied after the feather puts a step in the profile
+       * between one sample and the next, which is a wall, not a road. */
+      const ld = lane.land ? lane.land[k] : lane.y[k];
+      const tgt = clamp(bestY, ld - MAX_EARTHWORK, ld + MAX_EARTHWORK);
+      fix[k] = tgt - lane.y[k];
       weight[k] = w;
     }
   }

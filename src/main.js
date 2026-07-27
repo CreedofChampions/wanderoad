@@ -23,7 +23,7 @@ import { Grass } from './render/grass.js';
 import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
-import { findSpawn, Terrain } from './world/terrain.js';
+import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
@@ -275,11 +275,19 @@ async function boot() {
   openHint.textContent = 'ESC — garage';
   hud.root.appendChild(openHint);
 
-  /** Put the player back on the nearest road, facing along it. */
+  /** Put the player back on the nearest road, facing along it.
+   *
+   * The nearest road is not automatically dry: a cutting can smooth-and-clamp its way below
+   * the local water table while the land right beside it stays dry, which is invisible to
+   * the raw-land-only check profileEdge() itself uses (see the header note on waterMargin()
+   * in world/terrain.js). So the query result is checked with the SAME water-safe test
+   * findSpawn() uses on its own candidates before it is trusted, and if it fails, this falls
+   * back to findSpawn() — the one place in the game that already has to solve "find dry
+   * land" — rather than a second, independently-written search living here. */
   function backToRoad() {
     const t = car.terrain || local;
     const q = t.roads.query(car.x, car.z);
-    if (isFinite(q.d)) {
+    if (isFinite(q.d) && isDryAt(q.qx, q.qz, SEED)) {
       car.placeAt(q.qx, q.qz, Math.atan2(q.tx, q.tz));
     } else {
       const s = findSpawn(SEED, car.x, car.z);
@@ -556,6 +564,9 @@ async function boot() {
     trail,
     fleet: FLEET,
     solids,
+    // `flora` is here so a test can reconcile the colliders against the trees the renderer
+    // ACTUALLY DREW rather than against a second opinion about what should be there.
+    flora,
     remotes,
     post,
     props,

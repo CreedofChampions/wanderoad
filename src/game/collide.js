@@ -22,6 +22,16 @@
  *      see. See `solidsFromScatter` — the scatter produces six prop classes and the renderer
  *      only draws three of them, so the naive "make every prop solid" version put invisible
  *      walls all over the highlands.
+ *      A COROLLARY THAT COST A ROUND: THE NUMBER OF COLLIDERS IS NOT AN INVARIANT. It fell
+ *      from 340 near the player to 37 when trees became a low-frequency field with real
+ *      empty plains, and every check watching it passed both times, because an absolute
+ *      count cannot be right or wrong on its own — 37 is correct on a plain and a disaster
+ *      in a wood, and the world now has both. Half of that fall was this rule arriving
+ *      (rocks and posts stopped being solid because nothing draws them); the other half was
+ *      the spawn landing where forestDensity is 0.00. What IS invariant is the relation:
+ *      colliders == drawn trees of a solid species, exactly. `tools/diag-collide.mjs`
+ *      measures it in deep forest, thin woodland and open plain and then drives a real car
+ *      into real trees; browser-test.mjs asserts it in the page.
  *   2. NOTHING SOLID IS PASSABLE. The narrow phase is SWEPT, not a point test. A point test
  *      only works while one step is shorter than the capture window, and the margin there is
  *      an accident rather than a design: the fastest car covers 2.10 m per solver step
@@ -115,6 +125,15 @@ const TRUNK_H = {
 };
 
 export class Solids {
+  /**
+   * The species table, hung on the class as well as exported, so that a black-box test with
+   * nothing but `window.WANDEROAD` can state the relation this file exists to keep — every
+   * DRAWN tree of a solid species has a collider, and nothing else has one — without
+   * shipping a second copy of the table for that copy to drift out of step with this one.
+   * tools/browser-test.mjs reads it as `solids.constructor.solidSpecies`.
+   */
+  static solidSpecies = TRUNK_R;
+
   constructor({ cell = 64 } = {}) {
     this.cell = cell;
     /** Map "cx,cz" -> array of {x, z, r, h, kind, chunk} */

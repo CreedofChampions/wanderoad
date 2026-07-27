@@ -22,7 +22,7 @@ import {
   BIOME_ROAD,
   waterLevelAt,
 } from './biomes.js';
-import { RoadField } from './roads.js';
+import { RoadField, roadCamber } from './roads.js';
 import { landmarkHeight } from './landmarks.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
 import { fbm2 } from '../core/noise.js';
@@ -84,6 +84,40 @@ const BATTER = 1.6;
  */
 function batterFall(half, shoulder, d) {
   return 1 - smoothstep(half, shoulder, d);
+}
+
+/**
+ * THE GROUND, given a carve sample and the raw land under it. Terrain.height() is this
+ * function plus the two evaluations that feed it — one place, so that "where is the ground"
+ * has one answer. Anything that needs it calls Terrain.height() rather than reassembling
+ * this from parts: render/road.js reassembled it, drifted, and put the drawn road 24 m from
+ * the drivable one, which is the bug this whole round is about.
+ */
+function groundFromCarve(c, land, drive = 1) {
+  if (c.mask <= 0.001) return land;
+  const target = c.y;
+
+  /* The embankment has to be as wide as it is tall. A fixed-width shoulder is fine where
+   * the road sits within a metre of the land, but where it crosses a dip on 12 m of fill
+   * the same shoulder becomes a 12 m wall in 13 m of ground — a 42° face the car cannot
+   * climb, and the single biggest source of the cliffs the first build was full of. Real
+   * earthworks use a batter of about 1:1.6, so the transition widens by 1.6 m per metre of
+   * fill or cutting and the face stays shallow however deep the fill gets.
+   *
+   * This is where essentially every sample over 45° in the world lives: 181 of 199 of them
+   * are fill, standing more than 4 m above the land, with the land 20–33 m below the road
+   * surface. The raw land has none at all, at any preset. So the batter, not the noise, is
+   * the thing to tune — and it is a WIDTH problem, not a shape problem (see batterFall). */
+  const drop = Math.abs(land - target);
+  const half = c.width * 0.5;
+  const shoulder = half + 3.0 + drop * BATTER;
+  const k = batterFall(half, shoulder, c.d) * clamp01(drive);
+  const h = lerp(land, target, k);
+
+  // Camber: the crown falls about 18 cm to the gutter so water would run off it, which is
+  // also what makes a road read as a made surface rather than a painted stripe. It comes
+  // out of roads.js so the visible ribbon can cut the identical shape — see roadCamber.
+  return h - roadCamber(c);
 }
 
 function reliefFromWeights(x, z, seed, w) {
@@ -232,42 +266,26 @@ export class Terrain {
 
   /** Final ground height, roads included. */
   height(x, z) {
-    const { w } = this.weights(x, z);
-    const land = reliefFromWeights(x, z, this.seed, w);
     const c = this.roads.carve(x, z, this._carve);
-    if (c.mask <= 0.001) return land;
+    const { w } = this.weights(x, z);
+    if (c.mask <= 0.001) return reliefFromWeights(x, z, this.seed, w);
 
     // How aggressively this biome grades under a road. A dune track barely levels the
     // sand; a wetland causeway is dead flat.
     let drive = 0;
     for (let i = 0; i < BIOME_COUNT; i++) drive += w[i] * BIOME_TERRAIN[i].drive;
 
-    const target = c.y;
+    /* Inside the nearest road's own carriageway the batter is exactly 1, so
+     * lerp(land, target, 1) is the target and the raw land cancels out of the arithmetic
+     * entirely — which means the biome relief stack under it, the most expensive thing in
+     * the whole generator, never has to be evaluated. The same number by a shorter route:
+     * measured 4.3 µs a sample on a road against 8.0 µs off one, and the road ribbon now
+     * takes fifty thousand of them per window. The `drive` guard is not decoration — this
+     * shortcut is only exact while every biome grades flat under a road, and the moment one
+     * does not, that biome falls through to the full formula on its own. */
+    if (c.d <= c.width * 0.5 && drive >= 0.99999) return c.y - roadCamber(c);
 
-    /* The embankment has to be as wide as it is tall. A fixed-width shoulder is fine where
-     * the road sits within a metre of the land, but where it crosses a dip on 12 m of fill
-     * the same shoulder becomes a 12 m wall in 13 m of ground — a 42° face the car cannot
-     * climb, and the single biggest source of the cliffs the first build was full of. Real
-     * earthworks use a batter of about 1:1.6, so the transition widens by 1.6 m per metre of
-     * fill or cutting and the face stays shallow however deep the fill gets.
-     *
-     * This is where essentially every sample over 45° in the world lives: 181 of 199 of them
-     * are fill, standing more than 4 m above the land, with the land 20–33 m below the road
-     * surface. The raw land has none at all, at any preset. So the batter, not the noise, is
-     * the thing to tune — and it is a WIDTH problem, not a shape problem (see batterFall). */
-    const drop = Math.abs(land - target);
-    const half = c.width * 0.5;
-    const shoulder = half + 3.0 + drop * BATTER;
-    const k = batterFall(half, shoulder, c.d) * clamp01(drive);
-    let h = lerp(land, target, k);
-
-    // Camber: the crown falls about 18 cm to the gutter so water would run off it, which is
-    // also what makes a road read as a made surface rather than a painted stripe.
-    if (c.edge > 0.001) {
-      const across = clamp01(c.d / half || 0);
-      h -= c.edge * across * across * 0.18;
-    }
-    return h;
+    return groundFromCarve(c, reliefFromWeights(x, z, this.seed, w), drive);
   }
 
   /** Surface normal by central differences. `e` is the sample spacing in metres. */
@@ -358,6 +376,108 @@ export function heightAt(x, z, seed) {
 }
 
 /**
+ * Metres of clearance the drivable ground must keep above the local water table before the
+ * car may be dropped there with no driver input. Shared by every place that does that —
+ * findSpawn's own loop, findSpawn's last-resort fallback, and backToRoad()'s fallback to
+ * findSpawn — so "dry enough" means exactly the same thing everywhere. See the header note on
+ * findDrySpot below for why 0.5 m and not 0.
+ */
+export const DRY_MARGIN = 0.5;
+
+/**
+ * How far above the local water table a point's ACTUAL drivable ground — Terrain.height(),
+ * roads included — sits, in metres. Negative means underwater.
+ *
+ * Built on waterLevelAt(), the one water-height function this game has, rather than a second
+ * formula: passing -Infinity as the "current" ground height makes the `groundY < y` gate
+ * inside it always true, so it always hands back the table height instead of null. null from
+ * a normal call only ever means "not flooded right now" — it says nothing about how close the
+ * ground is, which is exactly what a spawn needs to know.
+ *
+ * This asks about Terrain.height(), never about an edge's own e.y[k] and never about raw
+ * land, and that is not interchangeable: a road CUTTING can duck below the local water table
+ * while the land right there stays dry, because profileEdge()'s own water floor (and
+ * diag-water.mjs's check) both gate on raw land, not on the road's own smoothed-and-clamped
+ * height. Measured on the seeded world: a real tier-0 sample sat 2.25 m under its local water
+ * table while the raw land 0 m away was 8.1 m clear — dry by every existing check, 2.25 m
+ * underwater by the one that matters. That is the case this function exists to catch.
+ */
+export function waterMargin(t, x, z, y = t.height(x, z)) {
+  const { w } = t.weights(x, z);
+  const wl = waterLevelAt(w, -Infinity);
+  return wl === null ? Infinity : y - wl;
+}
+
+/** Safe to hand the car (x, z) with no driver input: dry, and clear of the water table by at
+ *  least DRY_MARGIN. */
+export function isDrySpot(t, x, z, y = t.height(x, z)) {
+  return waterMargin(t, x, z, y) >= DRY_MARGIN;
+}
+
+/**
+ * Standalone dry check for callers with no Terrain in hand, or whose Terrain might not
+ * actually cover (x, z) — same pattern as heightAt(): a small local sampler, fine for one
+ * call, not for a loop.
+ */
+export function isDryAt(x, z, seed) {
+  const t = new Terrain(seed, x - 60, z - 60, x + 60, z + 60, 20);
+  return isDrySpot(t, x, z);
+}
+
+/**
+ * Last resort for findSpawn(): no tier-0 arterial at all within the main loop's search box —
+ * a young or sparse corner of the lattice — so there is no road to be picky about, but the
+ * point handed back still has to be dry. This used to be `{ x: hintX, z: hintZ, ... }`,
+ * completely unvalidated: a hint that happens to land in or near water handed the player a
+ * car already sitting in it with no recourse. This is also exactly what backToRoad() falls
+ * back to when R is pressed (or the water rescue fires) somewhere with no road in range —
+ * see main.js.
+ *
+ * Ring search, growing outward, rebuilding the sampler whenever the ring would step outside
+ * the box it covers — Terrain silently clamps a query outside its own box to the box edge
+ * rather than erroring, which would be a worse bug than a slow search. Deterministic, like
+ * everything under world/: same rings, same order, every time for a given seed and hint.
+ */
+export function findDrySpot(seed, hintX = 0, hintZ = 0) {
+  const RING_STEP = 150;
+  const DIRS = 16;
+  const MAX_RINGS = 64; // 9.6 km out — if nothing here is dry the seed neighbourhood is water
+
+  let boxR = 3000;
+  let t = new Terrain(seed, hintX - boxR, hintZ - boxR, hintX + boxR, hintZ + boxR, 120);
+  let driest = null; // best-effort answer if literally nothing clears the margin
+
+  const probe = (x, z) => {
+    const y = t.height(x, z);
+    const margin = waterMargin(t, x, z, y);
+    if (!driest || margin > driest.margin) driest = { x, z, y, margin };
+    return margin >= DRY_MARGIN ? { x, z, y } : null;
+  };
+
+  const hit0 = probe(hintX, hintZ);
+  if (hit0) return { ...hit0, heading: 0, score: 0 };
+
+  for (let ring = 1; ring <= MAX_RINGS; ring++) {
+    const r = ring * RING_STEP;
+    if (r > boxR - 200) {
+      // Walked outside the sampler's own box — rebuild one that reaches further rather than
+      // ever trusting a point this function has not actually measured.
+      boxR = r + 3000;
+      t = new Terrain(seed, hintX - boxR, hintZ - boxR, hintX + boxR, hintZ + boxR, 120);
+    }
+    for (let a = 0; a < DIRS; a++) {
+      const ang = (a / DIRS) * Math.PI * 2;
+      const hit = probe(hintX + Math.cos(ang) * r, hintZ + Math.sin(ang) * r);
+      if (hit) return { ...hit, heading: 0, score: 0 };
+    }
+  }
+
+  // Every point this function measured, out to nearly 10 km, was within DRY_MARGIN of water.
+  // Hand back the driest one it actually saw — never a point nobody checked.
+  return { x: driest.x, z: driest.z, y: driest.y, heading: 0, score: 0 };
+}
+
+/**
  * Find a good spawn: walk outward from a hint until we are on an arterial road with
  * shallow gradient. Deterministic given the seed, so "new game" always starts in the same
  * place for everyone — which matters, because that is where players will meet.
@@ -382,12 +502,20 @@ export function findSpawn(seed, hintX = 0, hintZ = 0) {
       const grade = Math.abs(e.y[k + 1] - e.y[k - 1]) / (2 * e.span);
       const dist = Math.hypot(x - hintX, z - hintZ);
       const score = smoothstep(0.045, 0.13, grade) * 900 + dist * 0.012;
-      if (!best || score < best.score) {
-        const dx = e.pts[k * 2 + 2] - e.pts[k * 2 - 2];
-        const dz = e.pts[k * 2 + 3] - e.pts[k * 2 - 1];
-        best = { x, z, y: t.height(x, z), heading: Math.atan2(dx, dz), score };
-      }
+      // Cheap reject before the height/water probe below: a candidate that cannot beat the
+      // current best on score alone can never win, wet or not, so there is no reason to pay
+      // for a Terrain.height() + biome-weights call on it.
+      if (best && score >= best.score) continue;
+      const y = t.height(x, z);
+      // NEVER hand back a point in water, or within DRY_MARGIN of it — see the header note
+      // on waterMargin() for why a cutting can fail this while looking dry to every other
+      // check in the file.
+      if (waterMargin(t, x, z, y) < DRY_MARGIN) continue;
+      const dx = e.pts[k * 2 + 2] - e.pts[k * 2 - 2];
+      const dz = e.pts[k * 2 + 3] - e.pts[k * 2 - 1];
+      best = { x, z, y, heading: Math.atan2(dx, dz), score };
     }
   }
-  return best || { x: hintX, z: hintZ, y: t.height(hintX, hintZ), heading: 0, score: 0 };
+  // The old fallback returned the hint completely unvalidated. findDrySpot() never does.
+  return best || findDrySpot(seed, hintX, hintZ);
 }

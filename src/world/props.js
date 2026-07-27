@@ -24,16 +24,16 @@
  *     A slot therefore belongs to its edge, not to the box you happened to ask about, so the
  *     same prop is emitted exactly once no matter how the world is tiled — the same argument
  *     scatter.js makes for its global lattice.
- *   - `buildEdge()` output is box-independent (pts, width, key are pure hashes), but `e.y`
- *     is NOT: `RoadField` levels lane/arterial crossings against whichever edges are in the
- *     box. So placement never reads a RoadField's `y`. Where a road height is needed (the
- *     petrol-station forecourt) this file profiles a private copy of the edge with
- *     `profileEdge`, which IS pure.
+ *   - Edge geometry has always been box-independent (pts, width, key are pure hashes), and
+ *     `e.y` now is too — see "one road, ONE height" in roads.js. Where a road height is
+ *     needed (the petrol-station forecourt) this file asks `edgeProfile()` for THE elevation
+ *     rather than profiling a private copy, which is what it had to do while a RoadField's
+ *     `y` still depended on the box you asked about.
  *
  * No three.js and no DOM here — the geometry lives in src/render/props.js.
  */
 
-import { edgesInBox, profileEdge } from './roads.js';
+import { edgesInBox, edgeProfile } from './roads.js';
 import { landFn, waterFn } from './terrain.js';
 import { hash3i, rng, clamp01, TAU } from '../core/math.js';
 
@@ -505,8 +505,8 @@ function waterOk(rule, y, wy) {
  *
  * Unlike the props, this is a PURE function of the seed — no ground probe — because
  * src/game/fuel.js has to be able to ask "where is the nearest pump" from anywhere without
- * building a Terrain. It profiles a private copy of the edge to find the flat spot, which
- * `profileEdge` makes deterministic.
+ * building a Terrain. It reads the edge's canonical elevation to find the flat spot, which
+ * `edgeProfile` makes deterministic.
  */
 const STATION_P = [0.72, 0.1];
 /** Candidate positions along an edge, as fractions of its length. */
@@ -518,10 +518,6 @@ export const STATION_OFFSET = 15.5;
 /** Within this of the pumps, stopped, and you are refuelling. */
 export const STATION_RADIUS = 11;
 
-/** edge key -> its pure elevation profile. Cleared wholesale when it gets large; an LRU
- *  would be more code than the thing it protects. */
-const PROFILE_CACHE = new Map();
-
 let _land = null;
 let _water = null;
 let _fnSeed = null;
@@ -530,7 +526,6 @@ function pureFns(seed) {
     _fnSeed = seed;
     _land = landFn(seed);
     _water = waterFn(seed);
-    PROFILE_CACHE.clear(); // a profile is only pure for ONE seed
   }
   return { land: _land, water: _water };
 }
@@ -551,18 +546,15 @@ export function stationsInBox(x0, z0, x1, z1, seed) {
     const rnd = rng(hash3i(ids.i * 4 + ids.dir * 2 + ids.tier, ids.j, 0x5a, seed ^ SALT_STATION));
     if (rnd() >= p) continue;
 
-    // Profile a private copy. RoadField's `y` is levelled against whatever else is in ITS
-    // box, so it is not a function of the edge alone and cannot be used here — two clients
-    // querying different boxes would put the forecourt at two different heights.
-    // Cached: neighbouring tiles ask about the same arterials, and a profile is ~45 land and
-    // water samples. Safe to cache precisely BECAUSE it is a pure function of the edge.
-    const hit = PROFILE_CACHE.get(e.key);
-    if (hit) e.y.set(hit);
-    else {
-      profileEdge(e, land, water);
-      if (PROFILE_CACHE.size > 256) PROFILE_CACHE.clear();
-      PROFILE_CACHE.set(e.key, Float32Array.from(e.y));
-    }
+    /* THE road elevation — the same one the terrain carves to and the ribbon is drawn on.
+     * This used to profile a private copy, because a RoadField's `y` was levelled against
+     * whatever else happened to be in ITS box and so was not a function of the edge alone;
+     * two clients querying different boxes put the forecourt at two different heights. That
+     * is fixed at the source now (see "one road, ONE height" in world/roads.js), and a
+     * private profile here would be a forecourt built on a road that is not where the road
+     * is. Memoised inside edgeProfile, so neighbouring tiles asking about the same arterial
+     * still pay for it once. */
+    edgeProfile(e, seed, land, water);
     const cum = arcTable(e);
     const total = cum[cum.length - 1];
 

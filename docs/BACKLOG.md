@@ -114,6 +114,45 @@ recorded finding is a complete pass.
       carriageway, so it cannot fight you: 60 s pottering in 0.14 m of shallows, 60 s of
       lakeside road with deep water 9 m off, and twelve 0.9 s dips all give **0 rescues**.
       `node tools/bench-rescue.mjs`. A better-looking water treatment is still open.
+- [x] **W8 — findSpawn (and R / the rescue) could hand back a point in water.** The operator,
+      verbatim: "its a buggy mess still starting on water". `findSpawn()` scored candidates on
+      grade and distance only — no water check anywhere, including its own last-resort
+      fallback, which returned the hint point completely unvalidated whenever no tier-0
+      arterial was found nearby.
+
+      Root cause, confirmed by direct measurement rather than assumed: a road CUTTING can duck
+      below the local water table while the raw land at that exact point stays dry. A road's
+      height is smoothed over a ~200 m window and clamped to at most 18 m of cut (see
+      MAX_EARTHWORK), so a stretch heading down into a valley can sit well below the ground
+      immediately beside it — but `profileEdge()`'s own water floor (and diag-water.mjs's
+      check, which uses the identical function) both gate on RAW LAND, never on the road's own
+      smoothed-and-clamped height. Measured on the seeded world: a real tier-0 sample sat
+      **2.25 m under** its local water table while the raw land right there was 8.1 m clear —
+      dry by every check that existed, 2.25 m underwater by the one that matters.
+
+      `findSpawn()` now checks `Terrain.height()` (the ACTUAL drivable ground) against the
+      water table directly — `waterMargin()`/`isDrySpot()` in `world/terrain.js`, built on
+      `waterLevelAt()` rather than a second formula — in both the per-candidate loop and a new
+      ring-search fallback (`findDrySpot`, widens outward rather than ever returning an
+      unchecked point, out to ~10 km before giving up and returning the driest point it
+      actually measured). `backToRoad()` — R and the water rescue both go through it, see
+      `rescue.js`'s own comments on `recover` — now checks its road-query result the same way
+      before trusting it (`isDryAt`), falling back to the same `findSpawn()` rather than a
+      second, independently-written search. `rescue.js` itself needed no change: `_place()`
+      delegates 100% of positioning to `recover()` and only ever re-touches the heading at the
+      (x, z) `recover()` already chose.
+
+      Measured, not assumed: 30 real seeds, car placed at the worst real point the road
+      network itself produces (the exact shape of "drive near a cutting, press R" — 23/30
+      seeds have one within 0.5 m of water) — before, landed in or within 0.5 m of water
+      **19 times (63%)**, 8 of those genuinely underwater up to 2.20 m; the plain boot spawn
+      (hint 0,0) was cleaner but not immune, 1/200 seeds. After: **0/30 on every path** —
+      findSpawn's main loop, the forced fallback, and the backToRoad replica alike.
+      `node tools/diag-spawn-water.mjs`. R2 stayed 0/7, diag-water.mjs stayed 0 underwater,
+      diag-cliffs.mjs stayed at 0.002% (better than the 0.019% baseline — untouched by this
+      fix), `npm test` and `bench-rescue.mjs` (its `recover()` stub now kept in sync with the
+      real `backToRoad()`) stayed green. None of those exercise this path, which is exactly
+      why it went unnoticed until measured directly.
 - [ ] **G1 — the streak is not clear enough.** The operator wants how far he has gone without
       leaving the road to be obvious, not a small number in a corner.
 - [ ] **G6 — multiplayer has never been played.** "How do I test the multiplayer aspect?" Two
@@ -268,4 +307,9 @@ Newly asked for, not yet started:
   It only ever measures the DEFAULT preset — it never calls applyTerrain — so check
   `node tools/diag-relief.mjs` too, which runs the same test on all six (alpine is the one
   that grows walls: 0.078%, everything else under 0.005%).
+- `node tools/diag-spawn-water.mjs` must stay at 0 wet results on every section (see W8).
+  diag-water.mjs and diag-cliffs.mjs do not catch a road CUTTING sitting below its local
+  water table — they gate on raw land — so this is the only check that actually exercises
+  findSpawn/backToRoad's water safety; do not let it quietly go back to reporting 0 because
+  nobody is calling it any more.
 - Never regress a passing test to make a new feature work.
