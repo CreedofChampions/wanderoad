@@ -97,8 +97,10 @@ recorded finding is a complete pass.
       as 0.293 where the hex means 0.578). The game is internally consistent about it and the
       tonemap's big shadow lift hides it, so it must NOT be "fixed" casually — it would
       re-grade every surface in the game at once.
-- [ ] **O1 — off-road is judged at the car's centre.** "If either wheel leaves the road, it
-      should tell you that you're off-road." Not yet measured; needs a per-wheel road query.
+- [x] **O1 — off-road is now judged per wheel.** Each of the four suspension probes queries
+      the road surface where it actually stands. Measured 3.36 m off the centreline: front-left
+      on grass (onRoad 0.01), front-right still on tarmac (onRoad 1.00) — clipping a verge with
+      two wheels now reads as what it is. `node tools/diag-body.mjs`.
 - [x] **W1 — trees do not stop you.** Now a dead stop: 126.7 / 157.1 / 181.4 km/h all become
       **0.00 km/h** on a square hit, at rest 1.58 m out from a trunk whose contact distance is
       1.55 m. The narrow phase is SWEPT, so nothing tunnels — caught at every frame time up to
@@ -153,13 +155,19 @@ recorded finding is a complete pass.
       fix), `npm test` and `bench-rescue.mjs` (its `recover()` stub now kept in sync with the
       real `backToRoad()`) stayed green. None of those exercise this path, which is exactly
       why it went unnoticed until measured directly.
-- [ ] **G1 — the streak is not clear enough.** The operator wants how far he has gone without
-      leaving the road to be obvious, not a small number in a corner.
-- [ ] **G6 — multiplayer has never been played.** "How do I test the multiplayer aspect?" Two
-      headless clients, each must appear in the other's peer list, and there should be a plain
-      way for a human to join a second window.
-- [ ] **C6 — the car points into the hill when climbing.**
-- [ ] **O4 — no rollover off-road.** "There should be the potential to flip over like a real car."
+- [x] **G1 — the streak now reads at a glance.** A bottom unlock-progress bar shows the next
+      car and the distance left, lit while a streak is running, with a red blip on a break.
+      21/21 checks in `node tools/diag-hud.mjs`, driven against the real Hud and Streak classes.
+- [x] **G6 — multiplayer, proven for the first time.** See the Done entry below — `?seat=2` was
+      wired but never actually called, so it did nothing until this pass.
+- [x] **C6 — body pitch now follows the real surface**, not the spring/roll layer alone,
+      so the nose stops pointing into the hill on a climb.
+- [x] **O4 — rollover, with recovery.** Off-road, at speed, into a bank, the car can now go
+      over past 90° and rights itself afterwards rather than getting stuck upside down.
+      O1/C6/O4 landed together in `src/car/vehicle.js`; `node tools/bench-car.mjs` stayed at
+      15/15 throughout (byte-identical to the pre-change baseline) and `node tools/diag-body.mjs`
+      is the new evidence for all three. Not wired into `npm test` — it is a slower scripted
+      drive, not a fast gate; run it by hand after touching vehicle.js.
 
 ## Next
 
@@ -176,10 +184,14 @@ Newly asked for, not yet started:
       (`DRIFT` in `src/car/camera.js`) weighted 0..1 by whether the car is driving itself, so at
       weight 0 it IS the sport camera. ±36°, 9–22 m of boom, under 10 °/s; back to sport in
       exactly 1.2 s when the player takes the wheel. No camera picker.
-- [ ] **Positional ambient audio.** The sea gets louder as you approach it; birds around trees.
-- [ ] **Forests, not scatter.** Dense woods in some places, sparse in others, and plains with no
-      trees at all. Today the density is uniform per biome.
-- [ ] **Flower beds** and other soft ground cover.
+- [x] **Positional ambient audio.** `src/audio/ambience.js` — the sea builds as you approach a
+      shoreline and birds thicken near woodland, both distance- and direction-attenuated, ducked
+      under the radio and engine. `node tools/diag-ambience.mjs`.
+- [x] **Forests, not scatter.** Tree density is now a low-frequency deterministic field:
+      measured 48.5 trees/ha in dense forest, 4.7/ha in thin woodland, 0.0/ha on an open plain
+      (plains keep their boulders). `node tools/diag-forests.mjs`.
+- [x] **Flower beds.** A separate clustered ground-cover layer with a dense core and a soft
+      edge, `src/render/flowers.js`, through the same painted pipeline as everything else.
 - [ ] Left by W4/W5, both small and both in someone else's file. `BIOME_TERRAIN.rough` is dead
       — documented as the ridged-vs-fbm mix, read by nothing, each biome hard-codes its own.
       And the alpine preset now has arterials at a 6.6% median / 51% worst gradient, which is a
@@ -218,6 +230,37 @@ Newly asked for, not yet started:
       answer; sources are listed in docs/CREDITS.md.
 
 ## Done
+
+- [x] **The car fell through the road, repeatedly, in real driving.** Reported by the operator
+      twice while playing. The drawn tarmac and the ground the car actually stood on were built
+      from two different elevation profiles: `render/road.js` drew the ribbon from the plain
+      per-edge height, while `RoadField` (what the terrain is carved to) additionally runs
+      `levelCrossings()` to pull lanes level with the roads they cross — and that second pass
+      never reached the renderer. Worst measured gap: **40.22 m**. A second, smaller mechanism
+      (`RoadField.carve()`'s weighted-mean blend, which can place the drivable shelf BETWEEN two
+      nearby roads rather than under either one) added up to 15.7 m more at some crossings.
+      Every existing check — R1, R2, diag-water, diag-cliffs — read the road height and the
+      ground height out of the same `RoadField` and so agreed with itself by construction,
+      blind to what was actually drawn.
+
+      Fixed by giving the renderer the same fully-processed profile the terrain is carved to,
+      plus adaptive ribbon refinement (bisecting a ~6 m span down to 0.375 m wherever the
+      carved ground turns sharply inside it — a chord can fly over a real dip otherwise).
+      Driving the real autopilot 26 km before and after: **1.144 fall-through events/km ->
+      0.115/km**, worst single event **40.22 m -> 0.43 m**. `node tools/diag-fallthrough.mjs`.
+      New permanent guard wired into `npm test`: `node tools/diag-seam.mjs` (1.3 s, no server,
+      no browser) — S1 asks three differently-boxed samplers for the same point and demands
+      the same answer, S2 walks the real ribbon geometry vertex by vertex against the ground,
+      S3 checks edges meeting at a node meet at one height. The pre-fix tree fails S1 by 3.8 m
+      and S2 by 24 m; the fixed one passes both at 0.0000–0.0063 m.
+
+      Two things RULED OUT along the way, by measurement, so nobody re-suspects them: the R5
+      lateral road offset is not the cause (drawn and physics edges agree in XY to 0.00e+0 m);
+      the streaming worker's mesh and the car's main-thread height query are not the cause
+      either (agree to 0.024 m over 10.5 km, two independent harnesses). One residual, left
+      alone deliberately: 3 events in 26 km, all under 0.5 m, at one specific spot where two
+      arterials converge 8.6 m apart — doubling the ribbon's ring density would clear it at 2x
+      build cost for a sub-metre artefact, which was not worth taking.
 
 - [x] **Off-road was not slow enough, and the ceiling meant to stop it was dead code.** The
       hard off-road speed cap clamped `driveForce` sixty lines AFTER `fxTotal` had already been
@@ -289,12 +332,26 @@ Newly asked for, not yet started:
 - [x] Engine audio dropped two octaves and roughly halved; the shriek is gone
 - [x] Generative radio, two stations, original and unlicensed
 
+- [x] **C2's brake run-up was measuring nothing, twice over, before this fix.** A blind held W
+      hit the off-road ceiling (43.9 km/h) on this seed's bends; switching to full auto-drive
+      "fixed" that but capped at 35 km/h instead, because `autopilot.js`'s cruise target is
+      `lerp(this.cruise, 8, bend)` — it tops out AT `this.cruise` on a dead straight, since
+      auto-drive was never tuned to go fast. Placing the car on a straighter stretch (tried
+      first) changed nothing, because the ceiling was never about the road. Fixed by sharing
+      O2's already-proven steered run-up (`roadRunUp`, real KeyA/KeyD pure pursuit, no
+      autopilot, no analogue, no cheat — moved up so both checks use one copy) instead of
+      either blind throttle or the autopilot's own governor. **35 km/h capped -> 109 km/h**,
+      100-0 in 40 m. `npm run test:browser` **39/40 -> 40/40**, "THE GAME WORKS", zero variance
+      across three fresh runs, then confirmed again against the live deploy.
+
 ## Rules the cron must not break
 
-- **`npm run test:browser` must report 27/27 and print "THE GAME WORKS" before anything
-  ships, and `npm run test:live` must do the same after.** It drives a real headless Chrome
-  with real key events and measures real visibility. It exists because the game once shipped
-  completely unplayable behind a suite that passed.
+- **`npm run test:browser` must report 40/40 and print "THE GAME WORKS" before anything
+  ships, and `npm run test:live` must do the same after.** (This count was 27 when the line was
+  first written and grew as the suite did; if it goes stale again, trust the suite's own
+  printed total over this number.) It drives a real headless Chrome with real key events and
+  measures real visibility. It exists because the game once shipped completely unplayable
+  behind a suite that passed.
 
 - No GPL or AGPL. MIT, Apache-2.0, BSD, CC0, public domain only. Record every licence in
   docs/CREDITS.md.
