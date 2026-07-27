@@ -13,11 +13,17 @@
  */
 
 import { Object3D } from 'three';
-import { PROP_KINDS, PROP_IDS, PROP_BY_ID, propsInBox, stationsInBox, stationSpacing, fuelCansInBox, CAN_HOVER, CAN_RADIUS, CAN_FRACTION, CAN_FOOT, STATION_MAX_GRADE } from '../src/world/props.js';
+import {
+  PROP_KINDS, PROP_IDS, PROP_BY_ID, propsInBox, stationsInBox, stationSpacing, fuelCansInBox,
+  CAN_HOVER, CAN_RADIUS, CAN_FRACTION, CAN_FOOT, STATION_MAX_GRADE, STATION_APRON_HALF_DEPTH,
+  nearestStation, stationSpur,
+} from '../src/world/props.js';
 import { Props, missingGeometry, measureAll, CAN_BOB_AMP } from '../src/render/props.js';
 import { Terrain } from '../src/world/terrain.js';
 import { waterLevelAt, BIOME_COUNT, BIOME_NAMES } from '../src/world/biomes.js';
 import { edgesInBox } from '../src/world/roads.js';
+import { Solids } from '../src/game/collide.js';
+import { Vehicle } from '../src/car/vehicle.js';
 
 const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 const TILE = 512;
@@ -327,6 +333,8 @@ console.log('\n── petrol stations ──────────────
 
   let worstStep = 0;
   let worstGrade = 0;
+  let worstSpurRamp = 0;
+  let worstSpurEndFinite = true;
   for (const s of a.slice(0, 12)) {
     const terr = new Terrain(SEED, s.x - 40, s.z - 40, s.x + 40, s.z + 40, 40);
     const ca = Math.cos(s.yaw);
@@ -341,9 +349,27 @@ console.log('\n── petrol stations ──────────────
     const pad = Math.min(Math.max(hi + 0.04, s.y - 0.7), s.y + 0.3);
     worstStep = Math.max(worstStep, Math.abs(pad - s.y));
     worstGrade = Math.max(worstGrade, s.grade);
+
+    /* The access spur's own ramp, measured the way buildAccessSpur (src/render/props.js)
+     * actually computes it: the REAL road-carve height at the mouth (never s.y, which is only
+     * the host edge's own solo canonical height and can legitimately differ near a junction —
+     * see diag-stations.mjs's own note on this) against this same forecourt's padY. This is
+     * the number that actually decides whether the drawn driveway is a gentle grade or a
+     * cliff — the fall-through-class invariant this project has been bitten by once already,
+     * now checked for the spur specifically, using the identical Terrain the renderer used. */
+    const spur = stationSpur(s);
+    const hRoad = terr.height(spur.mouthX, spur.mouthZ);
+    if (!isFinite(hRoad)) worstSpurEndFinite = false;
+    else worstSpurRamp = Math.max(worstSpurRamp, Math.abs(hRoad - pad));
   }
   check(worstStep <= 0.71, 'worst step from road to forecourt (m)', worstStep.toFixed(2), '<= 0.7');
   check(worstGrade <= STATION_MAX_GRADE, 'steepest road a station sits on', worstGrade.toFixed(3), `<= ${STATION_MAX_GRADE} (STATION_MAX_GRADE)`);
+  check(worstSpurEndFinite, 'access spur mouth height is always a real number', worstSpurEndFinite, 'true');
+  // A real driveway grade over the spur's own ~8.9 m length (STATION_OFFSET - APRON_HALF_DEPTH
+  // + 0.4, world/props.js), not a flat pad — so this is deliberately looser than the 0.7 m
+  // forecourt-step bound above, while still catching a genuine cliff (a fall-through-class
+  // bug would show as many metres here, not a handful).
+  check(worstSpurRamp <= 3.0, 'worst rise/fall along the access spur, mouth to apron (m)', worstSpurRamp.toFixed(2), '<= 3.0 (a real driveway grade, not a cliff)');
 }
 
 console.log('\n── frame cost ────────────────────────────────────────────────────────────');
@@ -549,6 +575,93 @@ console.log('\n── frame cost ───────────────�
     }
   }
 
+  props.dispose();
+}
+
+console.log('\n── a real station hitbox actually stops the car ──────────────────────────');
+{
+  /* The operator's screenshot: the car was free to overlap the kiosk, the pumps and the
+   * canopy posts — nothing on a forecourt had a hitbox. This drives a REAL Vehicle at a REAL,
+   * loaded station's kiosk through the REAL Solids resolver (the same objects main.js wires
+   * together) and reads the car's own final position and velocity — not a flag, not a count of
+   * registered colliders, an actual stop. */
+  const scene = new Object3D();
+  const solids = new Solids();
+  const props = new Props({ seed: SEED, scene, solids });
+
+  // Stations sit a couple of km apart and the tile window only reaches ~1.2 km, so — rather
+  // than hope one falls within range of the origin on every seed — find a real one first
+  // (nearestStation is pure and cheap) and drive the window to ITS location, guaranteeing its
+  // tile actually gets built and baked.
+  const target = nearestStation(0, 0, SEED, 20000);
+  check(!!target, 'a real station exists somewhere to test collision against', target ? `${(target.dist / 1000).toFixed(2)} km from the origin` : 'none', 'one');
+
+  if (target) {
+    let st = null;
+    for (let i = 0; i < 4000 && !st; i++) {
+      props.update(1 / 60, target.x, target.z);
+      st = props.stations.find((s) => s.key === target.key) || null;
+    }
+    check(!!st, 'that station is actually live and baked (with its own padY/hitboxes)', st ? `${st.key} at ${st.x.toFixed(0)},${st.z.toFixed(0)}` : 'none', 'one');
+
+    if (st) {
+      // The car's own terrain is a flat stand-in AT THE STATION'S OWN GRADED HEIGHT, so the
+      // collider (baked against the REAL world) and the car (driven on the stub) agree on
+      // where the ground is — this tests the hitbox itself, not a second terrain sampler.
+      const STUB = {
+        surface: () => ({ y: st.padY, nx: 0, ny: 1, nz: 0, grip: 1, rough: 0.06, surfaceKind: 'tarmac', onRoad: 1, dominant: 0 }),
+        height: () => st.padY,
+      };
+      const car = new Vehicle({ tier: 'touring', terrain: STUB, preset: 'cruise' });
+
+      // Aim the car at the kiosk hut — STATION_HITBOXES' own local (0, -(AD-2.2)) entry in
+      // src/render/props.js — approaching from 14 m further out along the SAME local axis, so
+      // the run-up crosses real open apron before it reaches anything solid.
+      const ca = Math.cos(st.yaw), sa = Math.sin(st.yaw);
+      const kioskDX = 0, kioskDZ = -(STATION_APRON_HALF_DEPTH - 2.2);
+      const kioskX = st.x + kioskDX * ca - kioskDZ * sa;
+      const kioskZ = st.z + kioskDX * sa + kioskDZ * ca;
+      const startDZ = kioskDZ - 14;
+      const startX = st.x + 0 * ca - startDZ * sa;
+      const startZ = st.z + 0 * sa + startDZ * ca;
+      const heading = Math.atan2(kioskX - startX, kioskZ - startZ);
+      car.placeAt(startX, startZ, heading);
+      car.speed = 12; // a real, deliberate approach speed (43 km/h), not a crawl
+      car.vx = Math.sin(heading) * car.speed;
+      car.vz = Math.cos(heading) * car.speed;
+
+      const DT = 1 / 60;
+      let stopped = false;
+      let minDist = Infinity;
+      for (let k = 0; k < 60 * 8 && !stopped; k++) {
+        car.update(DT, { steer: 0, throttle: 0.5, brake: 0, handbrake: 0, analogue: true });
+        solids.resolve(car, 1.05, DT);
+        const d = Math.hypot(car.x - kioskX, car.z - kioskZ);
+        if (d < minDist) minDist = d;
+        if (k > 10 && Math.hypot(car.vx, car.vz) < 0.5) stopped = true;
+      }
+      const finalDist = Math.hypot(car.x - kioskX, car.z - kioskZ);
+      console.log(`       drove at the kiosk from 14 m out (43 km/h, half throttle held): closest approach ${minDist.toFixed(2)} m, stopped ${finalDist.toFixed(2)} m short`);
+      check(stopped, 'the car actually came to a stop rather than driving straight through', stopped, 'true');
+      check(minDist > 2.0, 'never got closer than the hitbox (kiosk r=2.5 m) plus the car radius allow', minDist.toFixed(2), '> 2.0 m');
+      check(finalDist < 13, 'and stopped NEAR the kiosk, not stalled short for an unrelated reason', finalDist.toFixed(2), '< 13 m (started 14 m out)');
+
+      // And the open apron itself must NOT be a wall — driving onto the forecourt (well clear
+      // of the kiosk/pump/post hitboxes) must not stop the car, or nobody could ever refuel.
+      const car2 = new Vehicle({ tier: 'touring', terrain: STUB, preset: 'cruise' });
+      const apronDZ = 3.5; // toward the road from centre, inside the forecourt, clear of every STATION_HITBOXES entry
+      const apronX = st.x + 0 * ca - apronDZ * sa;
+      const apronZ = st.z + 0 * sa + apronDZ * ca;
+      car2.placeAt(apronX, apronZ, 0);
+      car2.speed = 0;
+      for (let k = 0; k < 60 * 2; k++) {
+        car2.update(DT, { steer: 0, throttle: 0, brake: 0, handbrake: 0, analogue: true });
+        solids.resolve(car2, 1.05, DT);
+      }
+      const drift = Math.hypot(car2.x - apronX, car2.z - apronZ);
+      check(drift < 0.5, 'the open apron itself is drivable — a stationary car there is not pushed out by an invisible wall', drift.toFixed(3), '< 0.5 m');
+    }
+  }
   props.dispose();
 }
 

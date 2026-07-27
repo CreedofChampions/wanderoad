@@ -247,6 +247,77 @@ check(
   `passed [${atRest.passed.join(',')}], current ${atRest.current.join(',') || '(none)'}`
 );
 
+/* ── 1c. fleet unlock icons — the whole ladder riding the same bar ────────── */
+
+console.log('\nfleet unlock icons — every car in src/game/garage.js FLEET, on the milestone dots\' own scale:\n');
+check(
+  'one icon exists per FLEET car, built once in the constructor, in FLEET order',
+  hud.fleetEls.length === FLEET.length && hud.fleetEls.every((f, i) => f.car.id === FLEET[i].id),
+  `${hud.fleetEls.length} icons: ${hud.fleetEls.map((f) => f.car.id).join(', ')}`
+);
+check(
+  'every icon shows which car it is, and is never blank',
+  hud.fleetEls.every((f) => f.el.textContent.length > 0 && f.el.textContent === f.car.label[0]),
+  hud.fleetEls.map((f) => f.el.textContent).join('')
+);
+
+const fLefts = hud.fleetEls.map((f) => parseFloat(f.el.style.left));
+check('every icon has a real, in-range position', fLefts.every((x) => Number.isFinite(x) && x >= 0 && x <= 100), fLefts.map((x) => x.toFixed(1)).join(', '));
+check(
+  'the icons are laid out in ascending order, left to right, matching unlockAt order',
+  fLefts.every((x, i) => i === 0 || x > fLefts[i - 1]),
+  fLefts.map((x) => x.toFixed(1)).join(' < ')
+);
+check(
+  'the Estate — unlockAt 0 m, driven from the very first frame — is pinned to the left edge',
+  fLefts[0] === 0,
+  `${FLEET[0].label} sits at ${fLefts[0].toFixed(2)}%`
+);
+check(
+  'a car earned at the same distance as a milestone lands at the same x on the bar (one shared scale)',
+  Math.abs(fLefts[1] - mLefts[0]) < 0.01,
+  `${FLEET[1].label} (${FLEET[1].unlockAt / 1000} km) at ${fLefts[1].toFixed(2)}%, the 1 km milestone at ${mLefts[0].toFixed(2)}%`
+);
+
+console.log('   best         locked                                                current');
+const fleetState = () => ({
+  locked: hud.fleetEls.filter((f) => f.el.classList.contains('locked')).map((f) => f.car.id),
+  current: hud.fleetEls.filter((f) => f.el.classList.contains('current')).map((f) => f.car.id),
+});
+// Real Streak.best values either side of every rung, plus 0 and "every car unlocked" — the
+// same shape of boundary the ladder section below probes text with, checked here against the
+// icons' own locked/current classes instead.
+const probeFleet = (best, expectLocked, expectCurrent) => {
+  streak.distance = 0;
+  streak.best = best;
+  hud.update(DT, { car, streak, surface: ON });
+  const { locked, current } = fleetState();
+  console.log(`   ${String(best).padStart(9)} m  [${locked.join(',').padEnd(44)}]  ${current[0] ?? '—'}`);
+  check(`best ${best} m — locked = [${expectLocked.join(',')}]`, locked.join(',') === expectLocked.join(','), `got [${locked.join(',')}]`);
+  check(
+    `best ${best} m — current = ${expectCurrent[0] ?? '(none — every car unlocked)'}`,
+    current.join(',') === expectCurrent.join(','),
+    `got ${current.join(',') || '(none)'}`
+  );
+};
+probeFleet(0, ['hatch', 'coupe', 'sedan', 'rally', 'taxi', 'patrol'], ['hatch']);
+probeFleet(999, ['hatch', 'coupe', 'sedan', 'rally', 'taxi', 'patrol'], ['hatch']);
+probeFleet(1000, ['coupe', 'sedan', 'rally', 'taxi', 'patrol'], ['coupe']);
+probeFleet(20000, ['taxi', 'patrol'], ['taxi']);
+probeFleet(100000, [], []);
+
+/* ── 1d. the game title ────────────────────────────────────────────────────
+ * Existence and text here; resolved on-screen geometry (does it clear the place name it sits
+ * above) lives with the rest of the geometry checks further down, section 4b. */
+
+console.log('\nthe game title:\n');
+check(
+  'a title element exists, reading exactly "Cozy Drive"',
+  !!hud.title && hud.title.textContent === 'Cozy Drive',
+  hud.title ? `"${hud.title.textContent}"` : 'missing'
+);
+check('it has a stable id for the stylesheet to find', !!hud.title && hud.title.id === 'gameTitle', hud.title ? hud.title.id : 'missing');
+
 /* ── 2. the ladder ───────────────────────────────────────────────────────── */
 
 console.log('\nthe unlock line against the fleet ladder in src/game/garage.js:\n');
@@ -317,7 +388,17 @@ const decl = (body, prop) => {
   return m ? m[1].trim() : null;
 };
 
-const CLAIMED = ['#streak', '#streakKm', '#unlockBar', '#unlockBar .track', '#unlockBar .fill', '#unlockBar #unlockNext', '#unlockBar .milestone'];
+const CLAIMED = [
+  '#streak',
+  '#streakKm',
+  '#unlockBar',
+  '#unlockBar .track',
+  '#unlockBar .fill',
+  '#unlockBar #unlockNext',
+  '#unlockBar .milestone',
+  '#gameTitle',
+  '#unlockBar .carIcon',
+];
 const all = rules(css);
 // A stray brace turns every rule after it into nonsense and the whole HUD silently loses its
 // styling. Cheaper to catch here than in a screenshot.
@@ -355,6 +436,18 @@ check(
   'the milestone dot, passed, and current states are each really styled',
   ['#unlockBar .milestone', '#unlockBar .milestone.passed', '#unlockBar .milestone.current'].every((sel) => milestoneRuleSels.includes(sel)),
   milestoneRuleSels.join(', ')
+);
+
+const carIconRuleSels = touching.filter((r) => r.sel.trim().startsWith('#unlockBar .carIcon')).map((r) => r.sel.trim());
+check(
+  'the fleet icon, locked, and current states are each really styled',
+  ['#unlockBar .carIcon', '#unlockBar .carIcon.locked', '#unlockBar .carIcon.current'].every((sel) => carIconRuleSels.includes(sel)),
+  carIconRuleSels.join(', ')
+);
+check(
+  'the game title is really styled, not just claimed',
+  touching.some((r) => r.sel.trim() === '#gameTitle'),
+  `${touching.filter((r) => r.sel.trim() === '#gameTitle').length} rule(s)`
 );
 
 // The keyframe animation must not touch opacity: a screenshot lands on an arbitrary frame.
@@ -440,6 +533,39 @@ for (const [vw, vh, label] of [
 }
 check('the streak figure is big at every viewport', geomOk, 'figure >= 30 px, track >= 4 px, unlock line >= 10 px');
 check('nothing in the streak column collides with the speedo', collisions.length === 0, collisions.join('; ') || '5 viewports, phone to 1080p');
+
+/* ── 4b. the game title, resolved geometry ───────────────────────────────── */
+
+console.log('\ngame title vs the place name it sits above (same viewports, same method as above):\n');
+let titleOk = true;
+const titleCollisions = [];
+for (const [vw, vh, label] of [
+  [1400, 820, '1400x820'],
+  [1024, 768, '1024x768'],
+  [1920, 1080, '1920x1080'],
+  [768, 1024, '768x1024'],
+  [375, 667, '375x667'],
+]) {
+  const at = vw <= 640 ? '@media (max-width: 640px)' : '';
+  const val = (sel, prop) => (at && pick(sel, prop, at)) || pick(sel, prop) || '0';
+  const titleBottom = px(val('#gameTitle', 'bottom'), vw, vh);
+  const titleFont = px(val('#gameTitle', 'font-size'), vw, vh);
+  // #place's own top extent: its bottom offset plus the biome line, the coords line, and the
+  // gap between them — the exact same arithmetic style the speedo-collision check above already
+  // uses for the speedo's box, applied to #place instead.
+  const placeBottom = px(val('#place', 'bottom'), vw, vh);
+  const biomeFont = px(val('#biome', 'font-size'), vw, vh);
+  const coordsFont = px(val('#coords', 'font-size'), vw, vh);
+  const placeGap = px(val('#place', 'gap'), vw, vh);
+  const placeTop = placeBottom + biomeFont + coordsFont + placeGap;
+  if (titleBottom < placeTop) titleCollisions.push(`${label}: title bottom ${titleBottom.toFixed(0)}px is BELOW the place block's top ${placeTop.toFixed(0)}px`);
+  if (titleFont < 9) titleOk = false;
+  console.log(
+    `   ${label.padEnd(10)}  title bottom ${titleBottom.toFixed(0).padStart(4)}px   place top ${placeTop.toFixed(0).padStart(4)}px   clearance ${(titleBottom - placeTop).toFixed(0).padStart(4)}px`
+  );
+}
+check('the title clears the place name at every viewport, with real margin', titleCollisions.length === 0, titleCollisions.join('; ') || '5 viewports, phone to 1080p, positive clearance at each');
+check('the title text stays legible at every viewport', titleOk, 'font-size >= 9px everywhere');
 
 /* ── 5. the retired rope trail ───────────────────────────────────────────── */
 

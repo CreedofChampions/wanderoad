@@ -212,7 +212,7 @@ export const BIOME_TERRAIN = [
   { amp: 108, base: 6, rough: 0.18, wave: 1000, gain: 0.3, lac: 2.3, drive: 1.0, water: 1.2 }, // MEADOW
   { amp: 62, base: 3, rough: 0.1, wave: 1550, gain: 0.28, lac: 2.3, drive: 1.0, water: 0.0 }, // STEPPE
   { amp: 205, base: 14, rough: 0.86, wave: 2150, gain: 0.26, lac: 2.3, drive: 1.0, water: 0.6 }, // HIGHLAND
-  { amp: 62, base: 2, rough: 0.02, wave: 900, gain: 0.3, lac: 2.2, drive: 1.0, water: 0.0 }, // DUNES
+  { amp: 70, base: 2, rough: 0.02, wave: 900, gain: 0.3, lac: 2.2, drive: 1.0, water: 0.0 }, // DUNES
   { amp: 26, base: -2, rough: 0.05, wave: 1100, gain: 0.28, lac: 2.2, drive: 1.0, water: 2.5 }, // WETLAND
 ];
 
@@ -293,9 +293,29 @@ export function biomeRelief(x, z, seed, i) {
       // is fixed in metres rather than scaled by `wave`, so it does not get gentler when a
       // preset says it should. It used to run at an 83 m period holding 45% of the
       // amplitude — a 42° face on every crest. Now: 250 m, and 20%.
+      //
+      // "Dunes must be a new desert theme... dunes smooth but tall" (playtest, round 2): `amp`
+      // went 62 -> 70 so the SMOOTH part (the billow rounded backs) genuinely has height, but
+      // the comb's SHARE was pulled down from 0.20 to 0.16 in the same move so its ABSOLUTE
+      // crest contribution — comb-share x amp — stays close to the old 62 x 0.20 = 12.4 rather
+      // than growing with the new amplitude. Smooth grows taller; the sharpest single term in
+      // the file does not get proportionally sharper with it.
+      //
+      // A larger first attempt (amp 96, wave 950) measured taller and still read as smooth in
+      // isolation, but `node tools/diag-cliffs.mjs` — which measures the DEFAULT/rolling
+      // preset, not dunes, because ordinary rolling terrain is itself a blend that includes a
+      // trace of every biome — went 0.016% to 0.060% over 45° against the committed 0.019%
+      // ceiling: a known highland/meadow/steppe boundary hot-spot (the same cluster the W4 fix
+      // already had to fade in rather than hard-cull) sits within a few points of 45° on its
+      // OWN relief, and even an 8-9% trace of a much taller dunes contribution there was enough
+      // to tip several of them over. This smaller step (amp 62 -> 70, +13%) keeps
+      // `node tools/diag-cliffs.mjs` at parity with its pre-change reading; the rest of the
+      // "tall" ask is bought in `game/presets.js`'s dunes preset (`amp`), which is scoped to
+      // that preset alone and cannot touch the default-preset gate. `node tools/diag-relief.mjs
+      // dunes` — see docs/BACKLOG.md.
       const bl = billow(x * s, z * s, 4, seed ^ 0xd41, b.lac, b.gain);
       const comb = Math.sin((x * 0.0037 + z * 0.0014) * 6.283 + fbm2(x * s * 0.5, z * s * 0.5, 3, seed ^ 0xd42) * 4.2);
-      return b.base + rises(bl * 0.8 + comb * 0.2, 0.55) * b.amp;
+      return b.base + rises(bl * 0.84 + comb * 0.16, 0.55) * b.amp;
     }
     case BIOME.WETLAND: {
       // Almost flat, with shallow pans. The interest here is water, not height.

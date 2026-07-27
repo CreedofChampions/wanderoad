@@ -26,7 +26,10 @@ import { Mesh, Object3D } from 'three';
 import { PB, pv, pq, pbox, pcyl, proof, pquad, finishPainted, createPaintedMaterial, MAT, LC, tint, mixc } from './painted.js';
 import { Terrain } from '../world/terrain.js';
 import { waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
-import { propsInBox, stationsInBox, fuelCansInBox, PROP_BY_ID, PROP_IDS, CAN_HOVER, CAN_RADIUS, CAN_FRACTION } from '../world/props.js';
+import {
+  propsInBox, stationsInBox, fuelCansInBox, stationTownInBox, stationSpur, PROP_BY_ID, PROP_IDS,
+  CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
+} from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp } from '../core/math.js';
 
 /* ── window ───────────────────────────────────────────────────────────────── */
@@ -1074,8 +1077,10 @@ const BUILDERS = {
  * otherwise show daylight underneath.
  */
 export function buildStation(M, r, skirt) {
-  const AW = 9.5; // apron half-width, along the road
-  const AD = 7.0; // apron half-depth, away from the road
+  // Single source of truth in src/world/props.js — the access spur, the collision hitboxes
+  // and the station's own placement code all read the same two numbers.
+  const AW = STATION_APRON_HALF_WIDTH; // apron half-width, along the road
+  const AD = STATION_APRON_HALF_DEPTH; // apron half-depth, away from the road
   const drop = Math.max(0.35, skirt);
 
   // apron + skirt, one box: the top face is at y=0 and the sides run down into the ground
@@ -1127,6 +1132,127 @@ export function buildStation(M, r, skirt) {
   // air line and a bin, the small true details
   pbox(M, -AW + 1.2, 0.55, 1.2, 0.22, 0.55, 0.22, 0, GREENBOX, MAT.MATTE);
   pcyl(M, [-AW + 1.2, 1.1, 1.2], [-AW + 1.2, 1.35, 1.2], 0.1, 0.08, 6, CHROME, MAT.METAL, false, true);
+}
+
+/* ── the access spur ──────────────────────────────────────────────────────────
+ * A screenshot showed an existing station on a raised forecourt with a barrier/curb-like edge
+ * running its whole perimeter and nothing connecting it to the road — you would have to drive
+ * over that edge to reach the pumps. This is the fix: a short, real, paved driveway from the
+ * edge of the HOST road's own tarmac to the forecourt slab. See world/props.js's stationSpur()
+ * for exactly where its two ends are and why (mouth right at the carriageway edge, apron end
+ * tucked under the forecourt) — pure geometry, computed once, shared with the diagnostic that
+ * proves it connects.
+ *
+ * Built as a flared trapezoid rather than a full lattice junction. Two reasons, not one:
+ *
+ *   1. It already meets the host road at a TRUE right angle by construction — it runs along
+ *      the exact normal every forecourt is already offset on, which is perpendicular to the
+ *      road's own tangent by definition. There is no angle left to square.
+ *   2. Per the operator, "it should also not cancel your street" — wiring a synthetic edge
+ *      into the road lattice (the way a real crossing junction works, buildJunction() in
+ *      render/road.js) would touch the host edge's own continuity to make room for it. This
+ *      never reads a single vertex of the arterial's own ribbon or its RoadField carve, so the
+ *      host road is completely untouched — the documented, sanctioned fallback for exactly
+ *      this reason.
+ *
+ * Heights are the two real numbers either end already has to agree with — the actual ground
+ * probe at the road mouth (literally Terrain.height(), the same number the car drives on) and
+ * the forecourt's own graded pad height — never a third, hand-rolled estimate, so this cannot
+ * reopen the class of bug where the drawn surface and the driven one disagree. A thin batter
+ * skirt on both long edges (the same trick buildStation's own apron `skirt` uses) absorbs
+ * whatever a straight-line height guess misses over the real ground in between.
+ */
+function buildAccessSpur(M, mouthX, mouthZ, hRoad, apronX, apronZ, hApron, hostWidth) {
+  const dx = apronX - mouthX;
+  const dz = apronZ - mouthZ;
+  const len = Math.hypot(dx, dz) || 1;
+  const tx = dx / len, tz = dz / len; // road -> apron
+  const px = -tz, pz = tx; // perpendicular, either sign — used symmetrically below
+
+  const halfW = Math.max(1.6, (hostWidth || 3.2) * 0.5);
+  const mouthHalf = Math.min(halfW * 1.35, halfW + 3.0); // a flared mouth, like a real driveway
+  const apronHalf = 2.7; // a single-vehicle driveway width at the forecourt end
+  // How deep the batter skirt drops — scales with how far the two ends' own heights disagree,
+  // same reasoning as buildStation's own `drop`: on uneven ground a bigger jump needs a
+  // bigger skirt or the low side shows daylight underneath.
+  const skirt = Math.max(0.3, Math.abs(hApron - hRoad) * 0.6 + 0.3);
+
+  const P = (x, z, h, side) => [x + px * side, h, z + pz * side];
+  const mL = P(mouthX, mouthZ, hRoad, -mouthHalf);
+  const mR = P(mouthX, mouthZ, hRoad, mouthHalf);
+  const aL = P(apronX, apronZ, hApron, -apronHalf);
+  const aR = P(apronX, apronZ, hApron, apronHalf);
+
+  // the paved top
+  pquad(M, mL, mR, aR, aL, TARMAC, MAT.MATTE, [0, 1, 0]);
+  // a painted edge line down both sides — the same visual language as the forecourt's own
+  // lead-in stripes and every road's own edge line, so a driveway reads as paved at a glance.
+  const inset = 0.16;
+  const mLi = P(mouthX, mouthZ, hRoad + 0.004, -mouthHalf + inset);
+  const aLi = P(apronX, apronZ, hApron + 0.004, -apronHalf + inset);
+  pquad(M, mL, mLi, aLi, aL, LINE, MAT.MATTE, [0, 1, 0]);
+  const mRi = P(mouthX, mouthZ, hRoad + 0.004, mouthHalf - inset);
+  const aRi = P(apronX, apronZ, hApron + 0.004, apronHalf - inset);
+  pquad(M, mRi, mR, aR, aRi, LINE, MAT.MATTE, [0, 1, 0]);
+
+  // the batter skirt on both long edges
+  const mLd = P(mouthX, mouthZ, hRoad - skirt, -mouthHalf);
+  const aLd = P(apronX, apronZ, hApron - skirt, -apronHalf);
+  pquad(M, mLd, mL, aL, aLd, TARMAC_D, MAT.MATTE, [-px, 0, -pz]);
+  const mRd = P(mouthX, mouthZ, hRoad - skirt, mouthHalf);
+  const aRd = P(apronX, apronZ, hApron - skirt, apronHalf);
+  pquad(M, mR, mRd, aRd, aR, TARMAC_D, MAT.MATTE, [px, 0, pz]);
+}
+
+/* ── collision for the built structures on a forecourt ───────────────────────
+ * Per the operator's screenshot: the car was free to overlap the kiosk, the pump island and
+ * the canopy posts — nothing on a forecourt had a hitbox at all. Local-space (dx, dz) offsets
+ * are read straight off buildStation's own numbers above; if that geometry ever moves, these
+ * should move with it.
+ *
+ * The open apron itself, the canopy's open air, and the access spur stay deliberately clear —
+ * a forecourt (or a driveway) you cannot drive onto is not a station you can visit.
+ *
+ * Same convention as every other building in the catalogue (a barn, a cottage): a real
+ * collider, but not `solid: true`. You scrape and slide off it exactly like every other piece
+ * of roadside architecture, not a tree's dead stop — a fumbled approach to the pumps stays a
+ * bump, never a wall, which is the whole COZY brief.
+ */
+const STATION_HITBOXES = [
+  // the kiosk hut (gHut w=4.0, d=2.8, h=2.4, pitch=0.9), blit at local (0, -AD+2.2), rotated
+  // by pi — a rotation by pi does not change a symmetric footprint's circumscribed radius.
+  { dx: 0, dz: -(STATION_APRON_HALF_DEPTH - 2.2), r: 2.5, h: 3.6 },
+  // the pump island and the two pumps standing on it, as one cylinder
+  { dx: 0, dz: 1.0, r: 1.55, h: 2.0 },
+  // the four canopy posts (CW=5.2, CD=3.4, offset +1.0 in local z)
+  { dx: -5.2, dz: -2.4, r: 0.22, h: 4.3 },
+  { dx: 5.2, dz: -2.4, r: 0.22, h: 4.3 },
+  { dx: -5.2, dz: 4.4, r: 0.22, h: 4.3 },
+  { dx: 5.2, dz: 4.4, r: 0.22, h: 4.3 },
+  // the sign, on its own pole
+  { dx: STATION_APRON_HALF_WIDTH - 1.4, dz: STATION_APRON_HALF_DEPTH - 1.6, r: 0.28, h: 6.4 },
+];
+
+/** Turn placed stations into collision solids, the same shape propSolids() below gives the
+ *  ambient props — see STATION_HITBOXES' own comment for what is and is not included. */
+export function stationSolids(stations) {
+  const out = [];
+  for (const s of stations) {
+    const ca = Math.cos(s.yaw);
+    const sa = Math.sin(s.yaw);
+    const baseY = s.padY ?? s.y;
+    for (const b of STATION_HITBOXES) {
+      out.push({
+        x: s.x + b.dx * ca - b.dz * sa,
+        z: s.z + b.dx * sa + b.dz * ca,
+        y: baseY,
+        r: b.r,
+        h: b.h,
+        kind: 'station',
+      });
+    }
+  }
+  return out;
 }
 
 /* ── the floating fuel can ────────────────────────────────────────────────────
@@ -1391,7 +1517,13 @@ export class Props {
         return;
       }
       case 1:
-        job.props = propsInBox(ox, oz, ox + size, oz + size, this.seed, job.probe);
+        // Ambient scatter plus each nearby station's own small "town" halo (a couple of
+        // telegraph poles and a small structure or two — see stationTownInBox's own comment
+        // in world/props.js) merged into the same list, so it bakes through the identical
+        // BUILDERS[id] dispatch and picks up a collision hitbox for free wherever the
+        // catalogue entry already declares one.
+        job.props = propsInBox(ox, oz, ox + size, oz + size, this.seed, job.probe)
+          .concat(stationTownInBox(ox, oz, ox + size, oz + size, this.seed, job.probe));
         job.phase = 2;
         return;
       case 2:
@@ -1447,6 +1579,14 @@ export class Props {
       blit(M, L, s.x, y, s.z, s.yaw, 1);
       s.padY = y;
       s.tile = key;
+
+      // The access spur: a real, short, paved connection from the edge of the host road's
+      // own tarmac to this forecourt — see buildAccessSpur's own comment for why this shape
+      // and not a full lattice junction. Built straight into the shared tile mesh in world
+      // space (no blit() needed), so it costs nothing extra in draw calls.
+      const spur = stationSpur(s);
+      const hRoad = height(spur.mouthX, spur.mouthZ);
+      buildAccessSpur(M, spur.mouthX, spur.mouthZ, hRoad, spur.apronX, spur.apronZ, y, s.width);
     }
 
     let mesh = null;
@@ -1461,7 +1601,7 @@ export class Props {
     }
 
     if (this.solids) {
-      const list = propSolids(props);
+      const list = propSolids(props).concat(stationSolids(stations));
       if (list.length) this.solids.addChunk(`prop:${key}`, list);
     }
     for (const s of stations) {

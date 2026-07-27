@@ -29,20 +29,67 @@
  * reads as a swoop. Cranes do not swoop.
  */
 
-import { landHeight, waterFn } from '../world/terrain.js';
+import { Terrain, landHeight, waterFn } from '../world/terrain.js';
 import { nearestLandmark } from '../world/landmarks.js';
 import { clamp, clamp01, lerp, smootherstep, TAU } from '../core/math.js';
+import { SUN_AZIMUTH } from '../render/uniforms.js';
 
 /* ── shot lengths ─────────────────────────────────────────────────────────
- * 38 seconds of programme. That is long for a browser game and it is deliberate: it plays
+ * 39.5 seconds of programme. That is long for a browser game and it is deliberate: it plays
  * once, on your first visit, and every key on the board ends it. On later visits only the
  * last shot runs (SHORT below) — a nine-second descent onto your car, which is a nice way to
- * arrive and does not tax somebody who is here to drive. */
-const SHOT_SECONDS = { land: 10.5, water: 9.5, road: 9.5, car: 8.5 };
+ * arrive and does not tax somebody who is here to drive.
+ *
+ * `land` was 10.5 s and covered 193 m of ground, which is 18.5 m/s — 67 km/h, and its fastest
+ * frame was 90 km/h. Every other shot in the piece is pinned at 47 km/h. The opening crane was
+ * therefore the FASTEST thing in a game about not hurrying, and it was the first thing anybody
+ * ever saw. It now covers 124 m in twelve seconds (37 km/h), which is slower than the rest of
+ * the programme rather than twice its speed. */
+const SHOT_SECONDS = { land: 12.0, water: 9.5, road: 9.5, car: 8.5 };
 const HANDOFF = 0.55; // seconds to ease from wherever we are onto the gameplay camera
 
 /** Metres of ground clearance a low glide keeps under itself. */
 const LOW_CLEAR = 6.5;
+
+/* ── waiting for the world ────────────────────────────────────────────────
+ * Terrain streams in asynchronously on a worker pool. A ten-second crane over ground that has
+ * not been meshed yet is the single worst thing this file could do, and it is not hypothetical:
+ * main.js starts the programme as soon as fifteen chunks are live, and the opening shot flies
+ * THREE HUNDRED METRES away from the spawn those fifteen chunks are around.
+ *
+ * So the programme can run in slow motion until the streamer says it is ready. Not a freeze —
+ * a frozen camera reads as a hang, and this is the first thing a player sees — but a quarter
+ * rate, which looks exactly like a patient establishing shot and buys the pool four times as
+ * long to build the ground the shot is about to travel over. HOLD_MAX caps the total lost time
+ * so a machine that never gets ready still sees the whole programme, only later.
+ *
+ * Costs nothing and does nothing unless a `worldReady` predicate is passed in; without one the
+ * programme runs at exactly the rate it always did. */
+const HOLD_RATE = 0.25;
+/* Ten seconds, and it is measured rather than chosen: tools/diag-cinematic.mjs simulates the
+ * real quadtree selection against the real measured cost of the real buildChunk() and finds
+ * the streamer wants 302 nodes around a spawn — thirteen seconds of single-threaded meshing.
+ * A two-worker machine (a four-core laptop, the floor this game targets) drains that queue in
+ * about eight seconds, and main.js lifts the veil after 0.25 s of it. Six was not enough to
+ * cover the gap; ten is, with room. At the quarter rate that is at most thirteen seconds of
+ * wall clock added to a first visit, in slow motion, with every key on the board ending it. */
+const HOLD_MAX = 10.0;
+
+/* ── framing ──────────────────────────────────────────────────────────────
+ * 0.26 rad = 14.9 deg, and it does two jobs with one number.
+ *
+ * The subject sits that far off the lens axis instead of dead centre. In this shot's 52 deg
+ * vertical lens on a 16:9 frame the horizontal half-angle is about 40 deg, so 15 deg out is
+ * a little over a third of the way to the edge — the composition every landscape painter and
+ * every storyboard reaches for, and the pen's own valley is framed the same way.
+ *
+ * And it is offset AWAY FROM THE SUN, which is the half that matters here. The sun sits at
+ * 13.5 deg of elevation, the post chain blooms anything over 1.02, and the sun disc is painted
+ * at 1.9x. A shot that puts it near the lens axis does not look backlit, it looks blown out.
+ * Pushing the subject off-axis pushes the sun the other way by the same angle, so the guarantee
+ * is: the lens axis is never within 15 deg of the sun, on any seed. */
+const FRAME_THIRD = 0.26;
+const SUN_BEARING = (SUN_AZIMUTH * Math.PI) / 180;
 
 /* How far out the closing orbit starts. Declared here because the scout measures the ground on
  * a ring of exactly this radius and the shot then flies it — two places, one number. */
@@ -67,6 +114,88 @@ const leftZ = (h) => -Math.sin(h);
  * Progress along a dolly move: ease in over the first `a` of the shot, hold a constant rate,
  * ease out over the last `a`. Returns 0..1.
  */
+/** Shortest signed angle, in radians. */
+function wrapPi(a) {
+  while (a > Math.PI) a -= TAU;
+  while (a < -Math.PI) a += TAU;
+  return a;
+}
+
+/**
+ * Where to point the lens, given the bearing of the thing the shot is about.
+ * See FRAME_THIRD: the subject lands off-centre, on the side that pushes the low sun toward
+ * the edge of frame rather than into the middle of it.
+ * @returns {{bearing:number, side:number, sunOff:number}} the lens bearing, which way the
+ *   subject was pushed, and how far the sun ends up off the lens axis, in radians.
+ */
+function composeAim(subjectB) {
+  const rel = wrapPi(subjectB - SUN_BEARING); // where the subject is relative to the sun
+  const side = rel >= 0 ? 1 : -1; // ...and therefore which way is further from it
+  const bearing = subjectB + FRAME_THIRD * side;
+  return { bearing, side, sunOff: Math.abs(wrapPi(bearing - SUN_BEARING)) };
+}
+
+/**
+ * How far to slide an aim point sideways so the LENS AXIS — not the aim bearing — is
+ * FRAME_THIRD off the subject for the whole shot.
+ *
+ * Rotating the aim point about the shot's END and then dollying toward it does not do that:
+ * from the far end of the move the same aim point subtends a smaller angle, so the framing
+ * opens up as the shot runs and the sun creeps back toward the middle. Measured on seed 555,
+ * the water shot's axis came within 10.7 deg of the sun at the head of the move while its aim
+ * bearing was a well-behaved 14.9 deg out. Sizing the lateral offset from the FURTHEST the
+ * camera ever is instead makes the guarantee hold at both ends.
+ *
+ * @param {number} along  metres from the camera's furthest position to the aim point
+ * @returns {number} metres of lateral offset, unsigned
+ */
+const aimOffset = (along) => Math.max(along, 1) * Math.tan(FRAME_THIRD);
+
+/**
+ * The ground under a straight path, sampled ONCE at scout time into a curve the shot then
+ * reads for free — this file's fourth rule is that no shot samples the world per frame, and a
+ * single `max` over the whole path is not enough on its own: it is the right number at the one
+ * point where the ridge is and tens of metres too high everywhere else, which is why the crane
+ * used to fly higher than it needed to for nine seconds to clear one bank.
+ *
+ * `spread` also samples a lateral pair at each step, so a bank standing just beside the rail
+ * counts as ground. Cost is (n+1)*(1+2*spread?) landHeight() calls, once, during boot.
+ *
+ * @returns {{max:number, at:(t:number)=>number}} `at` takes 0..1 along a->c.
+ */
+function groundProfile(a, c, ground, n = 48, spread = 0) {
+  const h = new Float64Array(n + 1);
+  const dx = c.x - a.x;
+  const dz = c.z - a.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const lx = -dz / len;
+  const lz = dx / len;
+  let max = -Infinity;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const x = a.x + dx * t;
+    const z = a.z + dz * t;
+    let g = ground(x, z);
+    if (spread > 0) {
+      g = Math.max(g, ground(x + lx * spread, z + lz * spread), ground(x - lx * spread, z - lz * spread));
+    }
+    h[i] = g;
+    if (g > max) max = g;
+  }
+  /* One-cell dilation. The camera is a point but the frame is not, and a spike that falls
+   * between two samples must not become a spike the shot flies through. */
+  const d = Float64Array.from(h);
+  for (let i = 0; i <= n; i++) d[i] = Math.max(h[Math.max(i - 1, 0)], h[i], h[Math.min(i + 1, n)]);
+  return {
+    max,
+    at(t) {
+      const f = clamp01(t) * n;
+      const i = Math.min(Math.floor(f), n - 1);
+      return lerp(d[i], d[i + 1], f - i);
+    },
+  };
+}
+
 function dolly(t, a = 0.2) {
   const total = 1 - a; // a/2 + (1 - 2a) + a/2
   if (t <= 0) return 0;
@@ -93,9 +222,12 @@ export class Cinematic {
    * @param {(x:number,z:number)=>number} [o.groundAt] the game's own cached height sampler
    * @param {Hud} [o.hud]          dimmed while the cinematic owns the screen
    * @param {'full'|'short'|'off'} [o.mode] overrides the URL and what the browser remembers
+   * @param {() => boolean} [o.worldReady] asked every frame until it says yes; while it says
+   *   no the programme runs at HOLD_RATE, for at most HOLD_MAX seconds of lost time. Omit it
+   *   and the programme runs at exactly the rate it always did.
    * @param {Function} [o.onEnd]
    */
-  constructor({ camera, seed, spawn, terrain = null, chase = null, groundAt = null, hud = null, mode = null, onEnd = null }) {
+  constructor({ camera, seed, spawn, terrain = null, chase = null, groundAt = null, hud = null, mode = null, worldReady = null, onEnd = null }) {
     this.camera = camera;
     this.seed = seed >>> 0;
     this.spawn = spawn;
@@ -103,6 +235,7 @@ export class Cinematic {
     this.chase = chase;
     this.groundAt = groundAt;
     this.hud = hud;
+    this.worldReady = typeof worldReady === 'function' ? worldReady : null;
     this.onEnd = onEnd;
 
     this.mode = mode || pickMode();
@@ -112,7 +245,14 @@ export class Cinematic {
     this.shotIndex = -1;
     this.skipped = false;
 
+    /* Diagnostics, read by tools/diag-cinematic.mjs and by nothing in the game. */
+    this.held = 0; // seconds of programme time given back to the streamer
+    this.holdEnded = ''; // 'ready' | 'timeout' | '' if it never waited
+    this.lifted = 0; // worst metres the clearance floor ever had to raise the camera
+    this.faulted = null; // the error that ended the programme early, if one did
+
     this._running = false;
+    this._holding = false;
     this._pose = newPose();
     this._rest = {};
     this._hint = null;
@@ -122,8 +262,27 @@ export class Cinematic {
     /* Scout during boot, not at reveal. It is ~20 ms of pure world queries and the loading
      * bar is already on screen; doing it inside the reveal timeout would drop a frame in the
      * middle of the veil fading out, which is the one moment the player is looking at a
-     * cross-fade. */
-    if (this.mode !== 'off') this._scout();
+     * cross-fade.
+     *
+     * Wrapped, because this runs inside main.js's `boot()` and an exception here would take
+     * the whole boot down with it. There is no version of "the opening cinematic could not
+     * find a mountain" that is allowed to cost somebody their game; an empty shot list makes
+     * begin() a no-op and the player simply starts driving. */
+    if (this.mode !== 'off') {
+      try {
+        this._scout();
+      } catch (err) {
+        this.faulted = err;
+        this.shots = [];
+        this.duration = 0;
+        console.error('[cinematic] scouting failed; starting straight into the game', err?.message ?? err);
+      }
+    }
+  }
+
+  /** True while the programme is running at HOLD_RATE waiting for terrain. */
+  get holding() {
+    return this._holding;
   }
 
   /** True while the cinematic owns the camera. main.js reads this and nothing else. */
@@ -170,7 +329,34 @@ export class Cinematic {
    */
   update(dt, car) {
     if (!this._running) return false;
-    this.t += dt;
+
+    /* ── waiting for the ground to exist ──────────────────────────────────────
+     * See HOLD_RATE. The clock runs slow, it never stops, and it can only be slowed for
+     * HOLD_MAX seconds in total — so the worst case is a programme that takes six seconds
+     * longer, and there is no path here that can leave a player watching a still frame
+     * forever. Skipped shots are never held: `skipped` means the player has already asked
+     * to be somewhere else. */
+    let rate = 1;
+    if (this.worldReady && !this.skipped && this.held < HOLD_MAX) {
+      let ready = true;
+      try {
+        ready = !!this.worldReady();
+      } catch {
+        ready = true; // a predicate that throws is not a reason to hold up the game
+      }
+      if (!ready) {
+        rate = HOLD_RATE;
+        this.held = Math.min(HOLD_MAX, this.held + dt * (1 - HOLD_RATE));
+        this._holding = true;
+      } else if (this._holding) {
+        this._holding = false;
+        this.holdEnded = 'ready';
+      }
+    } else if (this._holding) {
+      this._holding = false;
+      this.holdEnded = 'timeout';
+    }
+    this.t += dt * rate;
 
     // Which shot, and how far into it?
     let t = this.t;
@@ -184,7 +370,20 @@ export class Cinematic {
     const u = clamp01(t / shot.dur);
 
     const p = this._pose;
-    shot.pose(u, car, p, this);
+    /* Every line of every shot below runs inside this. main.js calls requestAnimationFrame
+     * before it calls us, so a throw here would not stop the game — but it WOULD leave the
+     * camera frozen mid-crane and the cinematic "active" until a twelve-second watchdog, and
+     * the player pressing keys at a picture that has stopped moving is the exact shape of the
+     * bug this project has already shipped once. Fault, hand the camera back, drive. */
+    try {
+      shot.pose(u, car, p, this);
+      if (!Number.isFinite(p.px + p.py + p.pz + p.lx + p.ly + p.lz + p.fov)) throw new Error('non-finite pose');
+    } catch (err) {
+      this.faulted = err;
+      console.error('[cinematic] shot "%s" faulted; handing the camera back', shot.name, err?.message ?? err);
+      this._end();
+      return false;
+    }
 
     const cam = this.camera;
     cam.position.set(p.px, p.py, p.pz);
@@ -321,43 +520,122 @@ export class Cinematic {
 
   /* SHOT 1 — the land. A high crane travelling toward the massif, losing height as it goes.
    * A 52° lens rather than the game's 62°: the longer the lens the flatter the landscape
-   * stacks, and stacked ridges are what makes a horizon read as far away. */
+   * stacks, and stacked ridges are what makes a horizon read as far away.
+   *
+   * It is also the shot the valley mist is FOR. Ninety metres up, looking across two and a
+   * half kilometres of low ground at a massif that stands clear above the mist sea, with the
+   * sun fifteen degrees off the lens — that view is the entire reason render's aerial() has a
+   * mist term in it, and it is why this shot is the one that got longer and slower rather
+   * than the one that got another cut. */
   _shotLand(lm, ground, spawnY) {
     const b = Math.atan2(lm.x - this.spawn.x, lm.z - this.spawn.z); // bearing to the mountain
+    const framed = composeAim(b);
+    this.framing = framed; // read by tools/diag-cinematic.mjs
     // Start behind the spawn relative to the mountain, so the whole move is an approach.
-    const a = { x: this.spawn.x - fwdX(b) * 300, z: this.spawn.z - fwdZ(b) * 300 };
-    const c = { x: this.spawn.x - fwdX(b) * 120, z: this.spawn.z - fwdZ(b) * 120 };
-    // Slide a little sideways too, so the parallax on the near ridges is not purely radial.
-    a.x += leftX(b) * 60;
-    a.z += leftZ(b) * 60;
-    const gmax = maxGroundAlong(a, c, ground, 18);
-    const y0 = Math.max(gmax, spawnY) + 86;
-    const y1 = Math.max(gmax, spawnY) + 48;
+    const a = { x: this.spawn.x - fwdX(b) * 270, z: this.spawn.z - fwdZ(b) * 270 };
+    const c = { x: this.spawn.x - fwdX(b) * 160, z: this.spawn.z - fwdZ(b) * 160 };
+    /* Slide sideways too, so the parallax on the near ridges is not purely radial — a purely
+     * radial approach makes a 3D landscape read as a zoom on a photograph. The slide goes the
+     * OPPOSITE way to the framing offset, so the camera and the eyeline counter each other:
+     * the massif drifts across the frame while the world slides under it, which is a crane,
+     * and both of them moving the same way is a pan. */
+    a.x -= leftX(b) * 45 * framed.side;
+    a.z -= leftZ(b) * 45 * framed.side;
+    /* 48 samples of the CARVED surface with a 40 m lateral spread, once, instead of 18 raw ones
+     * down the centreline: the curve is what the pose reads, so a single bank no longer holds
+     * the whole crane up, and an embankment is no longer invisible to it. */
+    const prof = groundProfile(a, c, this._carved([a, c]), 48, 40);
+    const y0 = Math.max(prof.at(0), spawnY) + 92;
+    const y1 = Math.max(prof.at(1), spawnY) + 56;
 
     // Look at the mountain, a little below the summit so it sits high in frame.
     const lmY = ground(lm.x, lm.z);
     const aimD = Math.min(lm.d, 2600);
-    const aim = { x: this.spawn.x + fwdX(b) * aimD, z: this.spawn.z + fwdZ(b) * aimD };
+    const lat = aimOffset(aimD + 270) * framed.side;
+    const aim = {
+      x: this.spawn.x + fwdX(b) * aimD + leftX(b) * lat,
+      z: this.spawn.z + fwdZ(b) * aimD + leftZ(b) * lat,
+    };
     const aimY = lerp(Math.max(spawnY, ground(aim.x, aim.z)), lmY, 0.45);
 
     return {
       name: 'land',
       dur: SHOT_SECONDS.land,
-      pose: (u, car, out) => {
-        const d = dolly(u, 0.26);
+      sunOff: framed.sunOff,
+      pose: (u, car, out, self) => {
+        const d = dolly(u, 0.28);
         out.px = lerp(a.x, c.x, d);
         out.pz = lerp(a.z, c.z, d);
         out.py = lerp(y0, y1, d);
         // A very slow pan across the summit: 90 m of drift at ~1.8 km is under 3°, spread
-        // over ten seconds. You should not be able to say the camera is panning, only that
-        // the shot is alive.
-        const pan = (1 - d) * 90;
+        // over twelve seconds. You should not be able to say the camera is panning, only that
+        // the shot is alive. It settles ONTO the composed frame rather than starting there.
+        const pan = (1 - d) * 90 * framed.side;
         out.lx = aim.x + leftX(b) * pan;
         out.lz = aim.z + leftZ(b) * pan;
         out.ly = aimY;
-        out.fov = 52;
+        /* Two and a half degrees of push over twelve seconds. Below the threshold at which
+         * anybody can name it as a zoom, and above the threshold at which a static frame
+         * starts to feel like a photograph rather than a shot. */
+        out.fov = lerp(53, 50.5, smootherstep(0, 1, u));
+        self._floor(out, prof, d, 34);
       },
     };
+  }
+
+  /**
+   * The clearance net. A shot that hands its scouted ground profile to this can never be flown
+   * into the ground, whatever the seed does — and it costs one array lookup per frame, not a
+   * terrain query, because the profile was measured once during boot.
+   *
+   * It only ever RAISES, it is never used by the closing shot (which has to land on the chase
+   * camera's rest pose to the millimetre), and how far it ever had to reach is recorded in
+   * `this.lifted` — so a shot that is quietly relying on it shows up as a number rather than
+   * as a shot that merely happens to work on the one seed somebody looked at.
+   */
+  /**
+   * A CARVED ground sampler over a small box — the surface the renderer actually draws, roads,
+   * cuttings and embankments included.
+   *
+   * landHeight() is the raw land BEFORE the road network is cut into it, and every clearance
+   * in this file used to be measured against it. On seed 555 that was worth 9.5 metres of
+   * camera underground: the water shot flies across a lake whose bed landHeight() reports at
+   * -7 m, and the road that crosses it is a CAUSEWAY standing at +7 to +17.7 m. The shot
+   * cleared the lake bed by eight metres, which put it nine and a half metres inside an
+   * embankment nobody had asked about. Raw land is not the ruler; the drawn surface is.
+   *
+   * A Terrain over a 200 m box costs 0.5 ms to build and 8 µs a sample, against 4.8 µs for
+   * landHeight — so the whole correction is about two milliseconds of a twenty millisecond
+   * scout, paid once during boot, and nothing at all per frame.
+   */
+  _carved(pts, pad = 60) {
+    let x0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let z1 = -Infinity;
+    for (const p of pts) {
+      x0 = Math.min(x0, p.x);
+      x1 = Math.max(x1, p.x);
+      z0 = Math.min(z0, p.z);
+      z1 = Math.max(z1, p.z);
+    }
+    try {
+      const t = new Terrain(this.seed, x0 - pad, z0 - pad, x1 + pad, z1 + pad);
+      return (x, z) => t.height(x, z);
+    } catch (err) {
+      // Raw land is a worse ruler, but it is a ruler; a shot is better than no shot.
+      console.error('[cinematic] carved sampler unavailable, falling back to raw land', err?.message ?? err);
+      return (x, z) => landHeight(x, z, this.seed);
+    }
+  }
+
+  _floor(out, prof, d, clear) {
+    const need = prof.at(d) + clear;
+    if (out.py < need) {
+      const lift = need - out.py;
+      if (lift > this.lifted) this.lifted = lift;
+      out.py = need;
+    }
   }
 
   /* SHOT 2 — the water. A low glide in off the lake toward the shore, rising off the surface
@@ -370,20 +648,37 @@ export class Cinematic {
     // and a low shot over a flat plane stops being a glide and starts being a speedboat.
     const a = { x: wet.x - fwdX(b) * 85, z: wet.z - fwdZ(b) * 85 };
     const c = { x: wet.x + fwdX(b) * 40, z: wet.z + fwdZ(b) * 40 };
-    const gmax = maxGroundAlong(a, c, ground, 14);
-    const base = Math.max(wet.y, gmax);
-    const y0 = base + 12.5;
-    const y1 = base + LOW_CLEAR + 1.5;
+    /* 25 m of lateral spread on the CARVED surface: this shot flies ten metres off the water,
+     * the thing that can kill it is a bank standing just beside the line rather than on it, and
+     * over a lake that bank is usually a road causeway that raw land cannot see at all.
+     *
+     * The two ends are floored independently rather than both against the path's single worst
+     * point — otherwise one causeway at the far end lifts the entire glide out of the water,
+     * which is the shot. Anything in between is caught by _floor per frame, for free. */
+    const prof = groundProfile(a, c, this._carved([a, c, wet]), 40, 25);
+    const y0 = Math.max(wet.y, prof.at(0)) + 12.5;
+    const y1 = Math.max(wet.y, prof.at(1)) + LOW_CLEAR + 1.5;
 
+    /* Same framing rule as the crane: the shore lands off-centre, on the side that keeps the
+     * low sun out of the middle of a shot whose whole subject is a specular water plane. A
+     * sun disc reflected up the lens axis off flat water is the one thing in this palette
+     * that can genuinely blow the frame out. */
+    const framed = composeAim(b);
     const aimD = 190;
-    const aim = { x: c.x + fwdX(b) * aimD, z: c.z + fwdZ(b) * aimD };
+    // 125 m of dolly plus 190 m of stand-off: size the slide from the far end of the move.
+    const lat = aimOffset(aimD + Math.hypot(c.x - a.x, c.z - a.z)) * framed.side;
+    const aim = {
+      x: c.x + fwdX(b) * aimD + leftX(b) * lat,
+      z: c.z + fwdZ(b) * aimD + leftZ(b) * lat,
+    };
     const aimY0 = wet.y + 2.0;
     const aimY1 = Math.max(wet.y, ground(aim.x, aim.z)) + 26;
 
     return {
       name: 'water',
       dur: SHOT_SECONDS.water,
-      pose: (u, car, out) => {
+      sunOff: framed.sunOff,
+      pose: (u, car, out, self) => {
         const d = dolly(u, 0.3);
         out.px = lerp(a.x, c.x, d);
         out.pz = lerp(a.z, c.z, d);
@@ -394,6 +689,7 @@ export class Cinematic {
         // move in the piece that changes what the shot is ABOUT while it runs.
         out.ly = lerp(aimY0, aimY1, smootherstep(0, 1, d));
         out.fov = 58;
+        self._floor(out, prof, d, LOW_CLEAR);
       },
     };
   }
@@ -407,15 +703,21 @@ export class Cinematic {
     // and a half seconds, which is 145 km/h — the fastest thing in a game about not hurrying.
     const a = { x: this.spawn.x - fwdX(b) * 115 + leftX(b) * 75, z: this.spawn.z - fwdZ(b) * 115 + leftZ(b) * 75 };
     const c = { x: this.spawn.x + leftX(b) * 30, z: this.spawn.z + leftZ(b) * 30 };
-    const gmax = maxGroundAlong(a, c, ground, 16);
-    const y0 = gmax + 26;
-    const y1 = gmax + LOW_CLEAR + 4;
-    const aim = { x: this.spawn.x + fwdX(b) * 700, z: this.spawn.z + fwdZ(b) * 700 };
+    const prof = groundProfile(a, c, this._carved([a, c]), 40, 25);
+    const y0 = Math.max(prof.at(0), spawnY) + 26;
+    const y1 = Math.max(prof.at(1), spawnY) + LOW_CLEAR + 4;
+    const framed = composeAim(b);
+    const lat = aimOffset(700 + Math.hypot(c.x - a.x, c.z - a.z)) * framed.side;
+    const aim = {
+      x: this.spawn.x + fwdX(b) * 700 + leftX(b) * lat,
+      z: this.spawn.z + fwdZ(b) * 700 + leftZ(b) * lat,
+    };
     const aimY = Math.max(spawnY, ground(aim.x, aim.z)) + 24;
     return {
       name: 'rise',
       dur: SHOT_SECONDS.water,
-      pose: (u, car, out) => {
+      sunOff: framed.sunOff,
+      pose: (u, car, out, self) => {
         const d = dolly(u, 0.3);
         out.px = lerp(a.x, c.x, d);
         out.pz = lerp(a.z, c.z, d);
@@ -424,6 +726,7 @@ export class Cinematic {
         out.lz = aim.z;
         out.ly = aimY;
         out.fov = 55;
+        self._floor(out, prof, d, LOW_CLEAR);
       },
     };
   }
@@ -672,16 +975,10 @@ function findWater(sx, sz, seed, ground) {
   return null;
 }
 
-/** Highest ground on the straight line a-c, measured once so no shot has to sample per frame. */
-function maxGroundAlong(a, c, ground, n) {
-  let g = -Infinity;
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const h = ground(lerp(a.x, c.x, t), lerp(a.z, c.z, t));
-    if (h > g) g = h;
-  }
-  return g;
-}
+/* maxGroundAlong() lived here and returned ONE number for a whole path. groundProfile() above
+ * replaced it: same measurement, same "sample the world once, never per frame" rule, but it
+ * keeps the shape of the ground instead of collapsing it to its worst point — which is both a
+ * lower, better-looking crane and a floor the shot can actually be held above. */
 
 /** Highest ground on a circle — the widest sweep of the closing orbit. Same idea. */
 function maxGroundRing(cx, cz, r, ground, n) {

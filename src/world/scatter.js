@@ -36,18 +36,34 @@
  */
 
 import { Terrain } from './terrain.js';
-import { BIOME_SCATTER, BIOME_COUNT, blendScalar, waterLevelAt } from './biomes.js';
+import { BIOME, BIOME_SCATTER, BIOME_COUNT, blendScalar, waterLevelAt } from './biomes.js';
 import { nodeSize } from './chunk.js';
 import { TAU, DEG, hash3i, rng, smoothstep, clamp01 } from '../core/math.js';
 import { fbm2, warpedFbm2, noise2 } from '../core/noise.js';
 
 /**
- * Beyond this LOD level a node is at least 512 m across and its props are a couple of
+ * Beyond this LOD level a node is at least 1024 m across and its props are a couple of
  * pixels tall. Generating them costs a Terrain build and several hundred height samples for
  * something the eye resolves as noise on the hillside, which the terrain shader already
  * draws for free.
+ *
+ * edited by AI: was 2 (existence boundary ~870 m — nodeSize(3) * the streamer's own
+ * SPLIT_FACTOR 1.7). Operator report: "trees pop in just in front of you." Measured with
+ * `tools/diag-treepop.mjs` (a real drive, the real Streamer selection algorithm, real
+ * `buildChunk`/`scatterChunk` timings against a simulated worker pool, the real `Flora`):
+ * once the world's initial disk is filled and the worker queue is empty (steady state, not
+ * the cold-start burst), trees were STILL attaching as close as 220-260 m ahead of the car —
+ * about 10 s from arrival at the project's own 95 km/h cruise figure — because a level-2 node
+ * only enters existence once the car is within roughly nodeSize(3) * 1.7 of its LEVEL-3
+ * PARENT's edge, and the trees nearest that parent's own near edge can be much closer than
+ * the node's own characteristic distance. Raised to 3: the existence boundary moves out to
+ * roughly nodeSize(4) * 1.7 ≈ 1740 m, comfortably past `render/trees.js`'s own DEFAULT_CULL
+ * (1400 m — which this boundary was silently undercutting the whole time, since 870 < 1400).
+ * The other half of the fix is the grow-in in `render/trees.js`, which is what actually makes
+ * a still-possible close attach gentle rather than a hard pop; see its comment for the
+ * measured before/after.
  */
-export const SCATTER_MAX_LEVEL = 2;
+export const SCATTER_MAX_LEVEL = 3;
 
 /**
  * Flowers and ground cover are knee-high and only exist on the finest nodes. Level 0 is
@@ -552,7 +568,14 @@ export function scatterChunk({ cx, cz, level, seed }) {
 
   // ── trees ──────────────────────────────────────────────────────────────────
   eachSite('trees', terr, seed, ox, oz, size, w, s, (site, rnd) => {
-    const kinds = BIOME_SCATTER[pickBiome(w, rnd())].kinds;
+    // Cross-biome species blending (pickBiome drawing from the FULL weight vector) is right
+    // at an ordinary border — a meadow fading into steppe should grow a genuine mix of
+    // broadleaf and acacia. The highlands are different: they are this world's snow biome
+    // (BIOME_TINT[HIGHLAND].snow in core/palette.js is the only nonzero one), and a broadleaf
+    // canopy standing in snow reads as a mistake, not a border. Playtest: "only pine trees in
+    // snow biomes." Once highland is the DOMINANT biome at a site, draw its species only —
+    // the blend still happens in the approach, where highland has not yet won.
+    const kinds = BIOME_SCATTER[site.dominant === BIOME.HIGHLAND ? BIOME.HIGHLAND : pickBiome(w, rnd())].kinds;
     out.trees.push({
       x: site.x,
       y: site.y,

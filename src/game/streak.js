@@ -2,7 +2,7 @@
  *
  * The only scoring in the game, and it is deliberately the gentlest possible one: stay on
  * the road, and the longer you stay the more each kilometre is worth. Go faster and it is
- * worth more still. Put two wheels in the grass and it quietly resets.
+ * worth more still. Put a wheel in the grass and it quietly resets.
  *
  * This is a cozy game, so the rules matter less than the tone:
  *   - Nothing flashes. Nothing counts down. There is no failure state, only a reset.
@@ -115,12 +115,21 @@ export class Streak {
 
   /**
    * @param {number} dt seconds
-   * @param {object} car    the Vehicle — needs .speed and .onGround
-   * @param {object} surf   the Terrain surface sample — needs .onRoad
+   * @param {object} car    the Vehicle — needs .speed, .onGround, .onRoadMin
+   * @param {object} surf   the Terrain surface sample at the car's centre — needs .onRoad
    */
   update(dt, car, surf) {
     const speed = Math.abs(car.speed || 0);
-    const on = (surf ? surf.onRoad : 0) >= ON_ROAD && car.onGround !== false;
+    /* surf.onRoad is ONE sample at the car's centre, and a road (6-8.6 m, see TIERS in
+     * world/roads.js) is much wider than the car's track (~1.6-1.7 m) — so it stays "on road"
+     * long after a wheel has crossed the verge. car.onRoadMin is the worst of the four
+     * suspension probes and is vehicle.js's actual on/off-road STATE (see the note by
+     * `this.onRoadMin` there); AND-ing it in means one wheel off is enough to break the
+     * streak, the way a driver would judge it. `?? 1` is for callers that hand in a bare
+     * {speed, onGround} car with no wheel data (tools/bench-streak.mjs's older fixtures, and
+     * the synthetic `{ onRoad: 0 }` surf main.js feeds in on a hard impact) — they still work
+     * exactly as before. */
+    const on = (surf ? surf.onRoad : 0) >= ON_ROAD && (car.onRoadMin ?? 1) >= ON_ROAD && car.onGround !== false;
     this.onRoad = on;
 
     if (!on) {

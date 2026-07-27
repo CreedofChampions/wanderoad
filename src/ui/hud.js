@@ -33,6 +33,14 @@
  *     without leaving the road
  * One column, one glance, and it never overlaps the speedo or the place name at any width.
  *
+ * Two more additions ride the same bar and the same left column, both reusing machinery this
+ * file already had rather than claiming a new HUD region: FLEET UNLOCK ICONS (fleetX() below)
+ * — one small badge per car in src/game/garage.js's FLEET, on the milestone dots' own log
+ * scale, so the whole unlock ladder is visible at once rather than just the single next rung
+ * the bar text already names — and a quiet GAME TITLE sitting in the headroom above the place
+ * name, the one stretch of screen edge nothing else claims (see musicPanel's own note in
+ * style.css for the full map of which corner belongs to what).
+ *
  * NOTHING HERE IS EVER SET TO AN EMPTY STRING. An element with no text has no box, and a box
  * with no size fails every honest visibility check there is (see tools/browser-test.mjs's
  * VISIBLE helper: display, visibility, opacity AND a bounding rect over 1 px). Every slot
@@ -45,7 +53,7 @@
  */
 
 import { fmtScore, fmtDistance } from '../game/streak.js';
-import { nextUnlock, fmtUnlock, FLEET_BY_ID } from '../game/garage.js';
+import { nextUnlock, fmtUnlock, FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
 import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
 
@@ -94,6 +102,16 @@ function milestoneX(km) {
   return clamp01((Math.log10(km) - lo) / (hi - lo)) * 100;
 }
 
+/* Where a car's unlock icon sits along the SAME bar, on the SAME log scale as the milestone
+ * dots above — a car earned at 20 km and a milestone passed at 20 km land at the same x, so
+ * the two overlays read as one continuous distance axis rather than a pair of unrelated ones.
+ * The one exception is the Estate, which unlocks at 0 m — you are driving it from the first
+ * frame. log10(0) is undefined, so it is pinned to the left edge by definition rather than
+ * folded into a curve that has nothing to say about zero. */
+function fleetX(unlockAtM) {
+  return unlockAtM <= 0 ? 0 : milestoneX(unlockAtM / 1000);
+}
+
 export class Hud {
   constructor() {
     this.root = document.getElementById('hud');
@@ -131,6 +149,22 @@ export class Hud {
       this.barTrack.appendChild(d);
       return { km, el: d };
     });
+    /* Fleet unlock icons — one per car in src/game/garage.js's FLEET, so the WHOLE ladder
+     * (which cars are already open, which is next, which are still ahead) reads at a glance
+     * without opening the garage. Sits proud of the track via a `bottom` offset in the CSS,
+     * not centred on it like the milestones above, so the two dot families never compete for
+     * the same handful of pixels. A plain div holding one letter, never an <svg>: this file is
+     * built and driven by a stub DOM in tools/diag-hud.mjs (see this file's own header — "the
+     * whole block can be driven by a stub DOM in node") and that stub has no createElementNS.
+     * An inline icon would work in a real browser and throw in the one tool meant to catch a
+     * regression before it ships. */
+    this.fleetEls = FLEET.map((car) => {
+      const d = el('div', '.carIcon', car.label[0]);
+      d.dataset.id = car.id;
+      d.style.left = `${fleetX(car.unlockAt).toFixed(2)}%`;
+      this.barTrack.appendChild(d);
+      return { car, el: d };
+    });
     this.bar.appendChild(this.barNext);
     this.bar.appendChild(this.barTrack);
     this.root.appendChild(this.bar);
@@ -151,6 +185,18 @@ export class Hud {
     this.streakEl.appendChild(figure);
     this.streakEl.appendChild(cap);
     this.root.appendChild(this.streakEl);
+
+    /* The game's own name. There is otherwise no branding anywhere once the loading veil is
+     * gone — the veil's "Wanderoad" card is a boot-time-only thing, never seen again once the
+     * game itself is on screen. Every screen edge is already claimed (see musicPanel's own
+     * note in style.css for the full map), so this rides quietly in the one column with
+     * headroom to spare: bottom-left has nothing between the music tab up in the corner and
+     * the biome/coords block down at the very edge. No animation is written for it here — it
+     * gets its "fade in on first load" for free from #hud's own existing cinematic dim-then-
+     * lift (see setCinematic below), the same way every other instrument on this screen
+     * already arrives, and then it just sits there, quiet, forever after. */
+    this.title = el('div', 'gameTitle', 'Cozy Drive');
+    this.root.appendChild(this.title);
 
     this._blip = 0;
     this._toastT = 0;
@@ -287,6 +333,16 @@ export class Hud {
       const current = !passed && !milestoneCurrentSet;
       m.el.classList.toggle('current', current);
       if (current) milestoneCurrentSet = true;
+    }
+
+    /* ── fleet unlock icons ──────────────────────────────────────────────────
+     * "Locked" is isUnlocked() actually checked against this frame's `best` — the identical
+     * value `nu` was just computed from a few lines up — never inferred from an icon's own
+     * position on the ladder. A car can only ever look unlocked here because garage.js itself
+     * already agrees it is (show the checked state, not the commanded one). */
+    for (const f of this.fleetEls) {
+      f.el.classList.toggle('locked', !isUnlocked(f.car, best));
+      f.el.classList.toggle('current', !!nu && nu.car.id === f.car.id);
     }
 
     /* Earning a car. nextUnlock() moving on is the signal, but it also moves when cheat mode

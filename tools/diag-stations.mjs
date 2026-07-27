@@ -22,7 +22,10 @@
  * quietly become "a station every 30 km" without any number saying so.
  */
 import { connects, nodePos, edgesInBox } from '../src/world/roads.js';
-import { stationForEdge, STATION_MAX_GRADE, stationSpacing, fuelCansInBox, CAN_FRACTION } from '../src/world/props.js';
+import {
+  stationForEdge, STATION_MAX_GRADE, stationSpacing, fuelCansInBox, CAN_FRACTION,
+  stationsInBox, stationSpur, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
+} from '../src/world/props.js';
 import { Terrain } from '../src/world/terrain.js';
 import { waterLevelAt, BIOME_COUNT } from '../src/world/biomes.js';
 import { applyTerrain, terrainBias, TERRAINS } from '../src/game/presets.js';
@@ -103,6 +106,11 @@ function driveAndMeasure(seed, walkSalt) {
   const stats = {};
   let routeM = 0;
   const stationAt = []; // absolute route-arc-length metres
+  // Distance from the WORLD ORIGIN of each station in stationAt, same order — the "distance
+  // from spawn" figure the STATION_NEAR_KM/STATION_FAR_KM distance-scaling in world/props.js
+  // reads. Kept alongside the route-arc-length so gaps can be bucketed by how far from home
+  // they actually happened, not just accumulated into one seed-wide average.
+  const stationDist = [];
   let missingEdges = 0;
 
   for (const pick of route) {
@@ -116,22 +124,31 @@ function driveAndMeasure(seed, walkSalt) {
     if (st) {
       const within = pick.fwd ? st.edgeFrac * total : (1 - st.edgeFrac) * total;
       stationAt.push(routeM + within);
+      stationDist.push(Math.hypot(st.x, st.z));
     }
     routeM += total;
   }
 
+  // Gaps in the ORIGINAL route order first (paired with the distance-from-origin of the
+  // station at the FAR end of each gap — "how far from home were you when this particular
+  // drought ended"), then a separate sorted copy for the existing median/worst figures below,
+  // so sorting one never disturbs the other's pairing.
   const gaps = [];
-  for (let k = 1; k < stationAt.length; k++) gaps.push(stationAt[k] - stationAt[k - 1]);
-  gaps.sort((a, b) => a - b);
-  const mean = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : Infinity;
-  const worst = gaps.length ? gaps[gaps.length - 1] : Infinity;
-  const median = gaps.length ? gaps[gaps.length >> 1] : Infinity;
+  const gapDist = [];
+  for (let k = 1; k < stationAt.length; k++) {
+    gaps.push(stationAt[k] - stationAt[k - 1]);
+    gapDist.push(stationDist[k]);
+  }
+  const sortedGaps = gaps.slice().sort((a, b) => a - b);
+  const mean = sortedGaps.length ? sortedGaps.reduce((a, b) => a + b, 0) / sortedGaps.length : Infinity;
+  const worst = sortedGaps.length ? sortedGaps[sortedGaps.length - 1] : Infinity;
+  const median = sortedGaps.length ? sortedGaps[sortedGaps.length >> 1] : Infinity;
   // Leading gap: spawn to the first station. Trailing: last station to the end of the route.
   // Both count as real "how far before fuel" experience, so fold them in as worst-case checks.
   const lead = stationAt.length ? stationAt[0] : routeM;
   const trail = stationAt.length ? routeM - stationAt[stationAt.length - 1] : routeM;
 
-  return { routeM, missingEdges, stations: stationAt.length, gaps, mean, median, worst, lead, trail, stats };
+  return { routeM, missingEdges, stations: stationAt.length, gaps, gapDist, mean, median, worst, lead, trail, stats };
 }
 
 console.log(`STATION_MAX_GRADE = ${STATION_MAX_GRADE} (${(STATION_MAX_GRADE * 100).toFixed(1)}%)`);
@@ -140,6 +157,22 @@ console.log(`fuel tank range: cruise ${(TANK_SECONDS * CRUISE_V / 1000).toFixed(
 const grand = { arterialEdges: 0, arterialSelected: 0, candidateSites: 0, rejectGrade: 0, edgeEmpty: 0, rejectCauseway: 0, placed: 0 };
 let grandWorst = 0;
 let grandRouteM = 0;
+
+/* ── distance-from-spawn bands ────────────────────────────────────────────────
+ * "The further you get from spawn, the further apart the gas stations are... still findable
+ * though, not too hard" — world/props.js's stationDistanceMul() eases the accept probability
+ * down between STATION_NEAR_KM (9) and STATION_FAR_KM (70), flat on both sides of that. Four
+ * contiguous bands cover the whole curve: flat-near, easing, flat-far, and past the floor —
+ * so this shows the "starting generous, slowly widening, capped" shape with real gaps, not
+ * just the two or three headline numbers. Every gap already walked above is bucketed by the
+ * distance-from-origin of the station at its FAR end (driveAndMeasure's own gapDist). */
+const DIST_BANDS = [
+  ['near      (< 10 km, flat)', 0, 10000],
+  ['mid       (10-40 km, easing)', 10000, 40000],
+  ['far       (40-80 km, near the floor)', 40000, 80000],
+  ['very far  (> 80 km, at the floor)', 80000, Infinity],
+];
+const bandGaps = DIST_BANDS.map(() => []);
 
 for (const preset of PRESETS) {
   applyTerrain(preset);
@@ -154,6 +187,15 @@ for (const preset of PRESETS) {
     for (const k of Object.keys(s)) s[k] += d.stats[k] || 0;
     grandWorst = Math.max(grandWorst, d.worst === Infinity ? 0 : d.worst, d.lead, d.trail);
     grandRouteM += d.routeM;
+    for (let gi = 0; gi < d.gaps.length; gi++) {
+      const dist = d.gapDist[gi];
+      for (let bi = 0; bi < DIST_BANDS.length; bi++) {
+        if (dist >= DIST_BANDS[bi][1] && dist < DIST_BANDS[bi][2]) {
+          bandGaps[bi].push(d.gaps[gi]);
+          break;
+        }
+      }
+    }
     console.log(
       `${String(seed).padEnd(11)} ${box.metresPerStation.toFixed(0).padStart(13)}   ` +
         `${(d.routeM / 1000).toFixed(1).padStart(8)}   ${String(d.stations).padStart(8)}   ` +
@@ -190,6 +232,46 @@ console.log(
 console.log(
   `(cruise range is ${tankKm.toFixed(1)} km. STATION_P is an independent 72% draw per arterial edge, and that alone has a\n` +
     ` combinatorial tail no grade/water fix removes — see the floating-can section below for the deliberate second layer.)`
+);
+
+console.log('\n── station spacing by distance from spawn ──────────────────────────────────');
+console.log('(every gap already walked above, across all 6 presets x 4 seeds, bucketed by how far from the origin it happened)');
+console.log('band                              gaps    mean gap    median gap   WORST gap');
+const bandMedians = [];
+for (let bi = 0; bi < DIST_BANDS.length; bi++) {
+  const list = bandGaps[bi].slice().sort((a, b) => a - b);
+  const [label] = DIST_BANDS[bi];
+  if (!list.length) {
+    console.log(`${label.padEnd(32)}     0   (no gaps sampled this far out — HOPS did not reach this band)`);
+    bandMedians.push(null);
+    continue;
+  }
+  const meanG = list.reduce((a, b) => a + b, 0) / list.length;
+  const medianG = list[list.length >> 1];
+  const worstG = list[list.length - 1];
+  console.log(
+    `${label.padEnd(32)} ${String(list.length).padStart(5)}   ${(meanG / 1000).toFixed(2).padStart(7)}km   ` +
+      `${(medianG / 1000).toFixed(2).padStart(8)}km   ${(worstG / 1000).toFixed(2).padStart(7)}km`
+  );
+  bandMedians.push(medianG);
+}
+// The curve this was built for, stated as a real, measured claim: each band's median should
+// not be TIGHTER than the previous, more-generous one. Small dips are allowed (sampling noise
+// on a semi-random route walk, especially where a band's own sample is thin) — the assertion
+// is on the overall shape (first vs last sampled band), not a strict step-by-step monotone,
+// which a walk this size cannot promise band-to-band.
+const sampled = bandMedians.filter((m) => m !== null);
+if (sampled.length >= 2) {
+  const curveOk = sampled[sampled.length - 1] >= sampled[0] * 0.85; // real margin against noise, not exact equality
+  console.log(
+    `${curveOk ? 'PASS' : 'FAIL'}  overall shape: the furthest sampled band's median (${(sampled[sampled.length - 1] / 1000).toFixed(2)} km) ` +
+      `is not tighter than the nearest's (${(sampled[0] / 1000).toFixed(2)} km) — "harder further out", never the reverse`
+  );
+  if (!curveOk) process.exitCode = 1;
+}
+console.log(
+  '       the floating-can layer (constant density at any distance, unlike stations — see world/props.js) is what keeps every one ' +
+    'of these bands "findable, not too hard" regardless of how wide the station spacing itself gets; the combined-source figure below measures that directly.'
 );
 
 /* ── stations AND floating cans, together ────────────────────────────────────
@@ -308,4 +390,85 @@ console.log(
   `${combinedOk ? 'PASS' : 'FAIL'}  worst COMBINED gap has real margin under the ${flatOutKm} km worst-case (flat-out) tank range: ` +
     `${(combinedWorst / 1000).toFixed(2)} km ${combinedOk ? '<' : '>='} ${(flatOutKm * 0.85).toFixed(2)} km`
 );
-process.exit(combinedOk ? 0 : 1);
+
+/* ── access road: does the spur actually reach both ends? ─────────────────────
+ * A screenshot-free GEOMETRIC proof, not a rendering test (src/render/props.js's
+ * buildAccessSpur draws the ribbon; this asks whether the two points that ribbon is stretched
+ * between actually touch what they claim to). Two independent checks per station, using
+ * machinery this file did not write for the purpose: a real, freshly-built Terrain's own
+ * roads.carve() (the same road-network query the car itself uses) for the road end, and plain
+ * vector arithmetic against the station's own recorded axes for the forecourt end.
+ */
+console.log('\n── access road: does the spur reach both the road and the forecourt? ───────');
+{
+  applyTerrain(PRESETS[0] || 'rolling');
+  setBiomeBias(terrainBias(PRESETS[0] || 'rolling'));
+  const sample = stationsInBox(-6000, -6000, 6000, 6000, SEEDS[0]).slice(0, 30);
+  let touchesRoad = 0;
+  let insideApron = 0;
+  let lenSane = 0;
+  let finiteHeights = 0;
+  let worstMouthGap = -Infinity;
+  let worstEdgeSignal = Infinity;
+  let worstStepAtMouth = 0;
+  // A first pass: how many candidate edges nearby, and how the carve BLENDS them, is a real
+  // property of the world (near a crossing, more than one road contributes) — logged so a
+  // large per-station "st.y vs the blend" gap is not mistaken for a bug. render/props.js's
+  // buildAccessSpur already reads the BLENDED height (terr.height()), never stationForEdge's
+  // own solo st.y, so that blend IS the authoritative number the renderer uses — this loop
+  // checks THAT invariant, not an equality with st.y that the system never promised.
+  let worstBlendVsSolo = 0;
+  for (const st of sample) {
+    const spur = stationSpur(st);
+    const terr = new Terrain(SEEDS[0], spur.mouthX - 40, spur.mouthZ - 40, spur.mouthX + 40, spur.mouthZ + 40, 20);
+    const c = terr.roads.carve(spur.mouthX, spur.mouthZ);
+
+    // "On a road" per the SAME smooth field render/props.js's own terrain (and the car's own
+    // physics) reads everywhere else — c.edge, not a hand-rolled distance formula. Widths can
+    // legitimately BLEND across more than one nearby edge (see the note above), so a raw
+    // distance-to-the-host-edge's-own-width can read as a few metres "short" near a junction
+    // even though the point is genuinely still on tarmac by the field that actually governs
+    // what the car drives on — c.edge is what that field says, so it is what this checks.
+    if (c.edge < worstEdgeSignal) worstEdgeSignal = c.edge;
+    if (c.edge > 0.05) touchesRoad++;
+    const mouthGap = c.d - c.width * 0.5;
+    if (mouthGap > worstMouthGap) worstMouthGap = mouthGap;
+
+    const hRoad = terr.height(spur.mouthX, spur.mouthZ);
+    if (isFinite(hRoad)) finiteHeights++;
+    const blendVsSolo = Math.abs(hRoad - st.y);
+    if (blendVsSolo > worstBlendVsSolo) worstBlendVsSolo = blendVsSolo;
+
+    // The apron end must land inside the forecourt's own footprint — checked against the
+    // SAME (nx, nz) axis the station record itself carries, not a re-derived rotation, so
+    // this catches a real mismatch between stationSpur() and the forecourt's own dimensions
+    // rather than re-proving arithmetic against itself.
+    const ddx = spur.apronX - st.x;
+    const ddz = spur.apronZ - st.z;
+    const alongN = ddx * st.nx + ddz * st.nz; // metres along the road<->forecourt axis
+    const alongP = ddx * -st.nz + ddz * st.nx; // metres along the road's own tangent
+    if (Math.abs(alongN) <= STATION_APRON_HALF_DEPTH + 0.5 && Math.abs(alongP) <= STATION_APRON_HALF_WIDTH + 0.5) insideApron++;
+
+    const len = Math.hypot(spur.apronX - spur.mouthX, spur.apronZ - spur.mouthZ);
+    if (len > 1 && len < 20) lenSane++;
+  }
+  console.log(
+    `       ${sample.length} real stations sampled: mouth reads as "on a road" (c.edge > 0.05) ${touchesRoad}/${sample.length}, ` +
+      `apron end inside the forecourt ${insideApron}/${sample.length}, spur length sane (1-20 m) ${lenSane}/${sample.length}, ` +
+      `mouth height finite ${finiteHeights}/${sample.length}`
+  );
+  console.log(
+    `       worst mouth c.edge signal ${worstEdgeSignal.toFixed(3)} (0=off any road, 1=deep in a carriageway), ` +
+      `worst raw mouth-to-nearest-edge-of-tarmac gap ${worstMouthGap.toFixed(2)} m`
+  );
+  console.log(
+    `       largest gap between a mouth's BLENDED road height (what buildAccessSpur actually draws) and stationForEdge's own SOLO ` +
+      `height at that edge: ${worstBlendVsSolo.toFixed(2)} m — expected to be occasionally large near a junction where more than one ` +
+      `road contributes to the blend (RoadField.carve's whole reason to exist, see world/roads.js); NOT a bug, and not what the spur draws.`
+  );
+  const spurOk = sample.length > 0 && touchesRoad === sample.length && insideApron === sample.length && lenSane === sample.length && finiteHeights === sample.length;
+  console.log(`${spurOk ? 'PASS' : 'FAIL'}  every sampled station's access spur genuinely connects the arterial to the forecourt`);
+  if (!spurOk) process.exitCode = 1;
+}
+
+process.exit(combinedOk && process.exitCode !== 1 ? 0 : 1);

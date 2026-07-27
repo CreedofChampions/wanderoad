@@ -20,11 +20,20 @@
  *      connection must not launch a ghost across the valley.
  *   5. Snap, never lerp, past 12 m of error. A long smooth slide to the correct place
  *      reads as a bug; a teleport reads as a hiccup, which is what it is.
+ *   6. Notice a nearby peer's fuel-share pulse. Proximity sharing (game/fuel.js) has no
+ *      server-side channel of its own — it rides bit 2 of the `flags` integer every tick
+ *      already carries — so THIS is the natural place to catch it: one buffer per peer
+ *      already exists here, and detecting a bit's RISING edge needs exactly that. See
+ *      ingest()'s own note and drainIncomingShares() below.
  */
 
 import { Object3D } from 'three';
 import { angleDelta, clamp, hermite } from '../core/math.js';
 import { U } from '../render/uniforms.js';
+// SHARE_FLAG/SHARE_RADIUS/SHARE_FRACTION are protocol details game/fuel.js owns (it defines
+// what "sharing" means and is the one place both the giver's wiring in main.js and this
+// receiving side read them from — see fuel.js's own header note on proximity sharing).
+import { SHARE_FLAG, SHARE_RADIUS, SHARE_FRACTION } from '../game/fuel.js';
 
 /** Render this far behind the server clock. Enough for a dropped 1 Hz tick to still land. */
 const DELAY_MS = 250;
@@ -60,6 +69,10 @@ export class Remotes {
 
     /** id -> ghost record */
     this.peers = new Map();
+
+    /** Fuel shared toward the LOCAL player, summed since the last drainIncomingShares() call
+     *  — a fraction of a tank. See ingest()'s SHARE_FLAG rising-edge check below. */
+    this._incomingShare = 0;
 
     /* Client clock -> server clock. Every response carries the server's `now`; the offset
      * is what makes it comparable with our own clock. It is smoothed because a single slow
@@ -131,6 +144,28 @@ export class Remotes {
       // a respawn between samples would otherwise fire it into the sky.
       const y = num(p.y);
       const vy = prev ? clamp((y - prev.y) / ((t - prev.t) / 1000), -12, 12) : 0;
+      const flags = p.flags | 0;
+
+      /* A nearby peer just gave fuel: SHARE_FLAG rising from 0 to set on THIS peer, right
+       * now, is the whole signal — see game/fuel.js's header note on why a bit is all the
+       * wire has for this. Rising edge, not "is set", so a pulse held across several
+       * snapshots (SHARE_PULSE_S can span multiple ticks at the faster rates) is counted
+       * once, on arrival, not once per snapshot it happens to still be up for.
+       *
+       * Gated on the SENDER's own reported position, checked against ours right now: a give
+       * that lands after the two cars have since driven apart should not be redeemable at a
+       * distance. `rec.pose` (the interpolated, rendered position) is not used here — this
+       * has to react to the raw wire report the instant it arrives, not wait a render frame
+       * for the interpolator to catch up. */
+      if ((flags & SHARE_FLAG) && !(rec.lastFlags & SHARE_FLAG)) {
+        const cam = U.uCamPos.value;
+        const dx = num(p.x) - cam.x;
+        const dz = num(p.z) - cam.z;
+        if (Math.hypot(dx, dz) <= SHARE_RADIUS) {
+          this._incomingShare += SHARE_FRACTION;
+        }
+      }
+      rec.lastFlags = flags;
 
       buf.push({
         t,
@@ -139,7 +174,7 @@ export class Remotes {
         vx: num(p.vx), vy, vz: num(p.vz),
         yawRate: num(p.yawRate),
         steer: num(p.steer), throttle: num(p.throttle), brake: num(p.brake),
-        flags: p.flags | 0,
+        flags,
       });
       if (buf.length > MAX_SNAPSHOTS) buf.shift();
       // The interpolation curve just changed shape; update() re-measures the offset once.
@@ -237,6 +272,16 @@ export class Remotes {
     return best;
   }
 
+  /** Fuel shared toward us by a nearby real player since the last call — a fraction of a
+   *  tank, 0 if none. Pull-based, mirroring render/props.js's drainCollectedFuel(): always
+   *  safe to call every frame, never accumulates state the caller has to remember to clear.
+   *  game/fuel.js's Fuel.update() calls this via its own `incomingShares` option. */
+  drainIncomingShares() {
+    const amt = this._incomingShare;
+    this._incomingShare = 0;
+    return amt;
+  }
+
   dispose() {
     for (const [id, rec] of this.peers) this._despawn(id, rec);
     this.peers.clear();
@@ -285,6 +330,9 @@ export class Remotes {
       // Decaying position/heading offset that hides the step when a snapshot lands.
       ex: 0, ey: 0, ez: 0, eyaw: 0,
       lastSeen: 0, // overwritten by the caller in ingest(), in server time
+      // Last snapshot's raw flags — how ingest() tells a fuel-share RISING edge (0 -> set)
+      // apart from a flag that has simply stayed set across several snapshots.
+      lastFlags: 0,
     };
     this.peers.set(p.id, rec);
     return rec;

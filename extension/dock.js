@@ -13,6 +13,16 @@
  *
  * The panel is a resizable flex column pinned to one edge; the page is given a margin equal
  * to its width, so the video simply has less room rather than being covered.
+ *
+ * NO SEARCH BOX AND NO VIDEO FRAME HERE, deliberately. The 50/50 "the video sits inside the
+ * game" layout lives in extension/panel.html — the Side Panel, the shipping default, the one
+ * surface where the game is already the whole content and a video half is therefore something
+ * the game HOSTS. This file is the opposite case by definition: it only ever runs ON
+ * youtube.com, where the video and the search box the player wants are already right there on
+ * the page, three centimetres away. Adding our own copy of both inside a dock that is sitting
+ * on top of the real ones would be a second search box competing with YouTube's own, in a
+ * surface whose entire licence to exist is that it adds one panel and changes nothing. It
+ * would also be the only thing in this extension that reads like altering the Service.
  */
 
 const ID = 'wanderoad-dock';
@@ -30,6 +40,13 @@ function build() {
   const dock = document.createElement('aside');
   dock.id = ID;
   dock.dataset.side = state.side;
+  /* `car=estate`, not the old `feel=cruiser`: the car and its feel merged into one choice
+   * (src/game/garage.js FLEET) after this dock was first wired up, and `?feel=` is now kept
+   * only so old links still resolve to something — it no longer selects the driving physics,
+   * only a car does. `estate` is the calm, forgiving starter car FEELS.cruiser used to point
+   * at, named explicitly so this stays correct even if the fleet is ever reordered (an absent
+   * `car=` falls back to the fleet's first entry, which is `estate` today but is not a
+   * contract). `terrain=meadow` is untouched by that change and still the right calm land. */
   dock.innerHTML = `
     <div class="wr-bar">
       <span class="wr-title">Wanderoad</span>
@@ -37,7 +54,7 @@ function build() {
       <button class="wr-close" title="Close">&#215;</button>
     </div>
     <iframe class="wr-frame" title="Wanderoad"
-            src="${chrome.runtime.getURL('game/index.html')}?offline&feel=cruiser&terrain=meadow"
+            src="${chrome.runtime.getURL('game/index.html')}?offline&car=estate&terrain=meadow"
             allow="gamepad *; autoplay"></iframe>
     <div class="wr-grip" title="Drag to resize"></div>`;
   document.body.appendChild(dock);
@@ -119,6 +136,13 @@ function placeButton() {
   const anchor =
     document.querySelector('#subscribe-button') ||
     document.querySelector('ytd-subscribe-button-renderer') ||
+    // Third tier: if YouTube ever restructures the id and the custom element away, the
+    // accessible name has stayed "…Subscribe…" (and "Unsubscribe" still contains that
+    // substring, so this matches in either subscription state) across every redesign this
+    // has been checked against. A different signal — semantic, not structural — so a
+    // redesign that breaks the two above does not also break this one. English UI only; a
+    // missed match here still just means the button does not appear, same as any other miss.
+    document.querySelector('[aria-label*="subscribe" i]') ||
     null;
   const row = anchor ? anchor.parentElement : null;
   if (!row) return;

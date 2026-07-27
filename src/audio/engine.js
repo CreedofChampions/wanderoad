@@ -256,6 +256,28 @@ export class EngineAudio {
     o.stop(t + 0.34);
   }
 
+  /** A short, soft note for the moment autopilot takes the wheel — confirmation, not an alarm,
+   *  so it settles DOWN in pitch rather than rising the way chime() does for a milestone. Fires
+   *  once per activation only: the one call site is Autopilot.toggle() in car/autopilot.js,
+   *  guarded there so it never fires on the way off and never fires from inside update()'s
+   *  per-frame path. */
+  ping() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(587.33, t); // D5
+    o.frequency.exponentialRampToValueAtTime(493.88, t + 0.5); // ...down to B4 — letting go of the wheel
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.1, t + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+    o.connect(g).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.65);
+  }
+
   /** A soft two-note rise. Used once per streak milestone and never otherwise. */
   chime() {
     const ctx = this.ctx;

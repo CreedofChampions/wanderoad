@@ -9,19 +9,40 @@
  *
  * So the water rescues you. The rules it has to obey, in order:
  *
- *   1. IT MUST NEVER FIGHT YOU. Wading along a shoreline, splashing through a puddle,
- *      crossing a ford, parking with two wheels in the shallows — none of that may trigger
- *      it. The gate is DEPTH, not wetness: 0.6 m is water over the axles, which is not
- *      somewhere you have deliberately parked. It is also gated on being OFF the road, so a
- *      causeway with a metre of lake either side can never trip it.
+ *   1. IT MUST NEVER FIGHT YOU. Driving a lakeside road, crossing a ford, clipping a
+ *      shoreline, paddling at the water's edge — none of that may trigger it. Two gates do
+ *      that work, and only two: you have to be OFF the carriageway, and the water has to be
+ *      water rather than wash (CONTACT below).
  *   2. IT MUST NOT BE A PUNISHMENT. No damage, no timer, no fail screen. You get the same
  *      PLACE the R key gives you — the nearest road — and the streak breaks on its own
  *      because you left the carriageway a while ago. It does not re-aim you the way R does:
  *      R is something you pressed, this is not, so the way you were pointing survives it.
  *      _place() has the measurements behind that.
- *   3. IT MUST NOT BE A SNATCH. A second under, then a beat where the car settles and one
- *      line of text, then the move. Being yanked out mid-slide the instant a threshold trips
- *      reads as a bug even when it is the right thing to do.
+ *   3. IT MUST NOT BE A SNATCH. There is still a beat: a short moment in the water, the car
+ *      settling, one line of text, then the move. But it is now a beat and not a wallow.
+ *
+ * ── 2026-07-27: "Water = respawn (R) on contact not float under" ──────────────
+ * The operator's words. The old gate was 0.6 m — water over the axles — held for a second,
+ * then a second of settling: 1.98 s of floating about before anything happened, which is what
+ * "float under" describes. Two things changed and it is worth being precise about which one
+ * actually did the work:
+ *
+ *   - The DEPTH gate came down from 0.6 m (over the axles) to 0.25 m (water up over the tread
+ *     and onto the rim; the tyres are 0.34 m in radius, see car/tuning.js wheelRadius). On the
+ *     shipped seed's lake this barely matters — the bank falls at ~35°, so the car goes from
+ *     dry to 0.88 m in two metres and crosses 0.25 m and 0.6 m within a frame or two of each
+ *     other. It matters on the gentle shelving shores elsewhere in the world, which is where
+ *     the wallow was worst.
+ *   - The TIMERS are what you feel: 1.0 s + 1.0 s became 0.25 s + 0.35 s. Contact to back on
+ *     the tarmac is ~0.6 s instead of ~2.0 s.
+ *
+ * WHY NOT LITERALLY d > 0. Because "any wetness at all" fires on the beach. Measured on the
+ * shipped seed at (668, -439) — 59% dunes, i.e. sand — the wash at the water's edge is 0.14 m
+ * deep and never exceeds 0.18 m over a minute of driving about in it. Pulling the car off a
+ * beach for standing in the surf is the "it must never fight you" rule broken, and the
+ * operator asked for the same set of false positives to stay at zero in the same breath as
+ * asking for this. 0.25 m clears that wash with margin and is still less than half the old
+ * gate. It is "your wheels are in the water", not "you are under the water".
  *
  * No DOM, no three.js, no timers of its own: feed it the car and the surface record the
  * frame already computed. tools/bench-rescue.mjs drives it against the real world.
@@ -29,12 +50,15 @@
 
 import { waterLevelAt } from '../world/biomes.js';
 
-/** Metres of water over the ground before you count as in it rather than near it. */
-const DEEP = 0.6;
-/** Seconds under before the rescue arms. The brief said "about a second". */
-const HOLD = 1.0;
-/** Seconds between arming and being placed, spent bleeding the car to a stop. */
-const LIFT = 1.0;
+/** Metres of water over the ground before your wheels are in it rather than splashing through
+ *  it. See the 2026-07-27 note above for why this is 0.25 and not 0. */
+const CONTACT = 0.25;
+/** Seconds in the water before the rescue arms. Short enough that a clipped shoreline at
+ *  60 km/h (four metres of water) still passes straight through it without arming. */
+const HOLD = 0.25;
+/** Seconds between arming and being placed, spent bleeding the car to a stop. A beat, so the
+ *  move reads as the car being lifted out rather than the game glitching. */
+const LIFT = 0.35;
 /** Seconds after a rescue during which it cannot arm again, so a lakeside road cannot loop. */
 const COOLDOWN = 3.0;
 /** Seconds since the previous rescue under which the next one stops being polite about your
@@ -42,7 +66,11 @@ const COOLDOWN = 3.0;
 const REAIM_AFTER = 12.0;
 /** Road membership above which we keep our hands off entirely. Matches streak.js's ON_ROAD. */
 const ON_ROAD = 0.45;
-/** Time constant for the settle. 0.28 s is "the car comes to rest", not "the car stops dead". */
+/** Time constant for the settle. 0.28 s is "the car comes to rest", not "the car stops dead".
+ *  Deliberately NOT shortened alongside LIFT: over the new 0.35 s window it bleeds the car to
+ *  about 29% of its speed rather than the old ~3%, which looks like slowing down in water. Made
+ *  proportionally sharper it would look like hitting a wall, and it is cosmetic either way —
+ *  vehicle.js's placeAt() zeroes the velocity outright at the end of it. */
 const CALM = 0.28;
 
 /**
@@ -71,11 +99,11 @@ export class Rescue {
    * @param {boolean} [opts.keepHeading]  leave the driver's heading alone on the way out.
    *                                 Only ever false so a bench can measure the old snap.
    */
-  constructor({ recover, say = null, deep = DEEP, hold = HOLD, lift = LIFT, cooldown = COOLDOWN,
+  constructor({ recover, say = null, contact = CONTACT, hold = HOLD, lift = LIFT, cooldown = COOLDOWN,
                 keepHeading = true } = {}) {
     this.recover = recover;
     this.say = say;
-    this.deep = deep;
+    this.contact = contact;
     this.hold = hold;
     this.lift = lift;
     this.cooldown = cooldown;
@@ -171,17 +199,23 @@ export class Rescue {
     const d = waterDepth(surf);
     this.depth = d;
     this.since += dt;
-    const under = d > this.deep && (surf ? surf.onRoad : 0) < ON_ROAD;
+    /* BOTH gates, and the road one is the load-bearing half. A road in this world can run nine
+     * metres from deep water, and `surf.y` is the FINAL ground height with the road carve
+     * already in it — so a causeway reads as dry however much lake is either side of it, and a
+     * driver who is legitimately ON the carriageway is never touched no matter what the water
+     * beside them is doing. Lowering the depth gate does not weaken that at all; it is a
+     * separate test and it is still first past the post. */
+    const inWater = d > this.contact && (surf ? surf.onRoad : 0) < ON_ROAD;
 
     if (this.state === 'dry') {
-      // The timer runs on being under, not on having been under: come up for air and it
-      // starts again from nothing. That is the whole of rule 1.
-      if (under) {
+      // The timer runs on being IN it, not on having been in it: come back out and it starts
+      // again from nothing. That is what lets a ford or a clipped shoreline through.
+      if (inWater) {
         this.t += dt;
         if (this.t >= this.hold) {
           this.state = 'lifting';
           this.t = 0;
-          if (this.say) this.say('the water has you — drifting back to the road', 2.6);
+          if (this.say) this.say('the water has you — back to the road', 2.4);
         }
       } else {
         this.t = 0;
@@ -190,9 +224,16 @@ export class Rescue {
     }
 
     if (this.state === 'lifting') {
-      /* If they got themselves out — climbed the bank, or pressed R while we were counting —
-       * then stop, immediately. Finishing a rescue nobody needs is the fighting rule again. */
-      if (d <= 0) {
+      /* If they got themselves out — climbed the bank, made it back onto the carriageway, or
+       * pressed R while we were counting — then stop, immediately. Finishing a rescue nobody
+       * needs is the fighting rule again.
+       *
+       * This is the SAME condition that armed it, negated, rather than the old `d <= 0`. With
+       * a 0.35 s lift there is no room to insist the car be bone dry before we let it go: a
+       * driver clawing back up the bank is at wash depth for most of that window and taking
+       * them anyway would be exactly the snatch rule 3 forbids. It cannot stick, either — if
+       * they slide back in, arming again costs 0.25 s. */
+      if (!inWater) {
         this.reset();
         return false;
       }

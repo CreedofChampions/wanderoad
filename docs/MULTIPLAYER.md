@@ -53,8 +53,12 @@ other's cars driving through scenery that does not exist on your screen.
 - Their car appears at about 6 km — the server hands out peers from a 3×3 grid of 2048 m
   interest cells, 6144 m across, so nobody pops in on top of you.
 - The HUD's top-right list shows who is near and how far.
+- Their ghost is now the RIGHT silhouette for the car they are actually driving (gt/sports/
+  hyper), not always the first one in the fleet — see the "wrong car" fix below.
 - Remote cars are **ghosts**. They never collide with you, with each other or with the
   world. This is deliberate and permanent; see the rule at the top of `src/net/remotes.js`.
+- **Press F when a real player is close (within 25 m)** to give them a fifth of your tank —
+  a real transfer, not a free top-up on either side; see "Fuel, together" below.
 - Positions arrive between 0.25 Hz (alone) and 2 Hz (within 800 m) and are interpolated a
   quarter-second in the past, so a ghost is smooth but is never quite live.
 - Stop sending for 8 seconds — close the tab, lose signal — and you disappear from everyone.
@@ -62,6 +66,27 @@ other's cars driving through scenery that does not exist on your screen.
 The HUD's connection dot says `online` when a real backend is answering and `solo` when the
 game fell back to its in-memory local backend. **Solo means nobody will ever appear.** If
 you expected company, that dot is the first thing to look at.
+
+### Fuel, together
+
+Two real players near each other can share fuel. Get within 25 m of someone real (a ghost
+that is really their car, not one of the passing-driver mercies below) and press **F**: it
+moves a fifth of your own tank to them, over the real network — your tank drops, theirs
+rises, by the same amount. If you have too little to spare, or nobody real is close enough,
+it quietly does nothing rather than pretending to.
+
+The passing-driver mercy — "someone shares a can" when you run dry and stop — is a different
+thing: an impersonal rescue, not tied to any real nearby player, and it now has a bottom. You
+get **3, for ever** (the count is saved with your driver, like your best streak). The 4th
+time you run dry and stop, nobody comes past — you are put back at the game's own starting
+spot instead, tank refilled to half, with a calm line about it. Teaming up with a real
+passenger (the F key above) is unlimited and does not touch this count, which is the whole
+point: past your third free mercy, finding a real station or a real friend is what keeps a
+long drive going.
+
+`node tools/net-test-fuel-share.mjs` is the proof — the SHARE_FLAG bit over the real backend,
+a real give/receive with the real `Fuel` and `Remotes` classes, and the 3-strikes count
+surviving a fresh instance on the same driver.
 
 ---
 
@@ -148,6 +173,7 @@ OK — 4cce47fe6e93 and 13d0e1446135 saw each other over https://crumbtown.org/w
 | Invisible at 6 km | Interest cells are real, and cars do not appear out of nowhere. |
 | Each in the other's peer list | The actual claim. Both directions, because a one-way peer list is a plausible server bug. |
 | Positions and names intact | A server echoing your own car back would pass a weaker test. |
+| Cars intact, not just tier 0 | The wrong-car playtest bug: `car.tier` used to be a string sent onto an integer wire column, so every ghost anyone ever saw was the same car regardless of what its driver chose — see the note above `buildGhostFromFleet` in `src/main.js`. This check used to send `tier: 0` for both seats, which made the bug invisible; it now drives two real, different fleet cars. |
 | Rate rose to 2 Hz | The server independently agrees they are close — it is not just returning rows. |
 | `bye` removes you | The peer list can go down as well as up, so it is not a table that only ever grows. |
 
@@ -180,8 +206,10 @@ problem from a driving one.
 |---|---|
 | `src/net/identity.js` | who you are; `createIdentity(seat)` and the `?seat=` fork |
 | `src/net/transport.js` | one `send()`, one endpoint, backend fallback chain |
-| `src/net/remotes.js` | ghosts: buffering, interpolation, dead reckoning |
+| `src/net/remotes.js` | ghosts: buffering, interpolation, dead reckoning, and catching a nearby peer's fuel-share pulse |
 | `src/net/invite.js` | the Garage's "Drive together" panel |
 | `src/net/save.js` | the map save, over the same endpoint |
+| `src/game/fuel.js` | the tank, the passing-driver mercy and its 3-strikes cap, proximity sharing's SHARE_FLAG/SHARE_RADIUS/SHARE_FRACTION |
 | `server/drive.php` | the entire protocol, one file |
-| `tools/net-test.mjs` | this page's proof |
+| `tools/net-test.mjs` | this page's proof, including car identity |
+| `tools/net-test-fuel-share.mjs` | proximity sharing and the mercy cap, proof |

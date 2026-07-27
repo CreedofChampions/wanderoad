@@ -556,6 +556,41 @@ function waterOk(rule, y, wy) {
  * building a Terrain. It reads the edge's canonical elevation to find the flat spot, which
  * `edgeProfile` makes deterministic.
  */
+/* ── distance from spawn widens the gaps, gently, with a floor ───────────────────────────
+ * Operator: "the further you get from spawn, the further apart the gas stations are. They
+ * should still be findable though, not too hard." Flat (today's spacing, unchanged) out to
+ * STATION_NEAR_KM — comfortably past a full tank's own cruise range, so nobody near home ever
+ * notices anything changed — then EASES the accept probability down to a floor by
+ * STATION_FAR_KM and goes no further past it: a hard cap on sparseness, not an unbounded
+ * drift into "genuinely unfindable".
+ *
+ * The floating-can layer (CAN_SLOT_P, below) is deliberately NOT scaled by this. Cans already
+ * exist specifically to backstop STATION_P's own combinatorial tail (see the file comment on
+ * fuelCansInBox) and stay a constant safety net at any distance — that division of labour is
+ * what lets "harder to find" widen honestly for stations without ever crossing into "actually
+ * stranded" (diag-stations.mjs's combined-source section measures this directly).
+ *
+ * Distance is read off the EDGE's own bounding-box centre rather than the real spawn point,
+ * because stationForEdge has to stay a pure function of the edge alone (no ground probe, no
+ * knowledge of where findSpawn happened to land this session) — and findSpawn always lands
+ * within a few km of the world origin by construction, so "far from the origin" and "far from
+ * spawn" are the same statement in practice.
+ */
+const STATION_NEAR_KM = 9; // flat out to here — about a cruise tank's own range
+const STATION_FAR_KM = 70; // eased down to the floor by here, and no further past it
+const STATION_FAR_MUL = 0.4; // floor: stations roughly 2.5x rarer far out than close to home
+
+/** 1.0 near spawn, smoothstep-eased down to STATION_FAR_MUL by STATION_FAR_KM, flat at both
+ *  ends — no kink a driver could ever feel at the near boundary. */
+function stationDistanceMul(distM) {
+  const km = distM / 1000;
+  if (km <= STATION_NEAR_KM) return 1;
+  if (km >= STATION_FAR_KM) return STATION_FAR_MUL;
+  const t = (km - STATION_NEAR_KM) / (STATION_FAR_KM - STATION_NEAR_KM);
+  const s = t * t * (3 - 2 * t);
+  return 1 - s * (1 - STATION_FAR_MUL);
+}
+
 const STATION_P = [0.72, 0.1];
 /** Candidate positions along an edge, as fractions of its length — kept off both ends, which
  *  sit inside a junction's pinned ramp and are not representative of the road's own grade.
@@ -570,6 +605,13 @@ export const STATION_MAX_GRADE = 0.11;
 export const STATION_OFFSET = 15.5;
 /** Within this of the pumps, stopped, and you are refuelling. */
 export const STATION_RADIUS = 11;
+/** Forecourt half-extents, ALONG the road and AWAY from it. The single source of truth for
+ *  the apron slab (src/render/props.js buildStation, which used to hardcode these as local
+ *  AW/AD) and for anything else that needs to know where its edge is — the access spur, the
+ *  collision hitboxes on the kiosk/pumps/canopy, and the little town cluster all read these
+ *  rather than each guessing the forecourt's own size a second way. */
+export const STATION_APRON_HALF_WIDTH = 9.5;
+export const STATION_APRON_HALF_DEPTH = 7.0;
 
 let _land = null;
 let _water = null;
@@ -602,7 +644,10 @@ function stationForEdge(e, seed, stats = null) {
     if (stats) stats[k] = (stats[k] || 0) + 1;
   };
   const ids = edgeIds(e);
-  const p = STATION_P[ids.tier] ?? 0;
+  // Distance from the world origin — see stationDistanceMul's own comment above for why the
+  // edge's bounding-box centre is the right proxy for "distance from spawn" here.
+  const distM = Math.hypot((e.minX + e.maxX) * 0.5, (e.minZ + e.maxZ) * 0.5);
+  const p = (STATION_P[ids.tier] ?? 0) * stationDistanceMul(distM);
   tally(ids.tier === 0 ? 'arterialEdges' : 'laneEdges');
   const rnd = rng(hash3i(ids.i * 4 + ids.dir * 2 + ids.tier, ids.j, 0x5a, seed ^ SALT_STATION));
   if (rnd() >= p) return null;
@@ -678,6 +723,14 @@ function stationForEdge(e, seed, stats = null) {
     y: best.y,
     roadX: best.x,
     roadZ: best.z,
+    // The unit normal FROM the road TO the station — the same (rx, rz) the offset above was
+    // built from, kept on the record so anything downstream (the access spur, the town
+    // cluster) can walk back toward the road without re-deriving it from yaw a second,
+    // independent way. And the host edge's own width at the connection point, so the spur
+    // knows exactly where the carriageway's own edge is.
+    nx: rx,
+    nz: rz,
+    width: e.width,
     // Faces the road across the apron.
     yaw: Math.atan2(-rx, -rz),
     along: Math.atan2(best.tx, best.tz),
@@ -707,6 +760,43 @@ export function stationsInBox(x0, z0, x1, z1, seed, stats = null) {
 }
 
 export { stationForEdge };
+
+/**
+ * The two ends of a station's own access spur — a real, short driveway from the edge of the
+ * HOST road's own carriageway to the forecourt, built because a screenshot showed a station
+ * sitting on a raised apron with a kerb-like edge and nothing connecting it to the road you
+ * would have to drive over that edge to reach it.
+ *
+ *   mouth — right at the edge of the host road's own tarmac (half its width out from the
+ *           centreline), so the spur butts up against the arterial's EXISTING geometry
+ *           without overlapping or displacing a single vertex of it. Per the operator: "it
+ *           should also not cancel your street" — this never touches the host edge's own
+ *           lattice entry, its polyline, or its tangent, so that edge's continuity is
+ *           completely untouched. A true lattice junction (buildJunction() in
+ *           render/road.js, reused for the ROAD-crossing case earlier this round) was
+ *           considered and rejected for this: wiring a synthetic edge into the road lattice
+ *           risks exactly the class of bug this project has already been bitten by once
+ *           (drawn geometry disagreeing with the terrain the car drives on) for a feature
+ *           that does not need the lattice's own machinery — this IS the documented fallback,
+ *           a clean T-spur that leaves the host edge alone.
+ *   apron — tucked 0.4 m inside the forecourt's own near edge (STATION_APRON_HALF_DEPTH back
+ *           from the station centre, along the same normal the forecourt itself is offset
+ *           on), so the two meet with no hairline gap.
+ *
+ * Pure geometry, no ground probe: it is a function of the station record alone (which is
+ * itself a pure function of the edge — see stationForEdge). Only render/props.js adds real
+ * heights to these two points, because only it has a ground probe to hand; a diagnostic tool
+ * can still call this directly to PROVE the spur reaches both ends geometrically, which is
+ * the reason this is its own exported function rather than inlined into the renderer.
+ */
+export function stationSpur(st) {
+  const halfW = (st.width ?? 0) * 0.5;
+  const mouthX = st.roadX + st.nx * halfW;
+  const mouthZ = st.roadZ + st.nz * halfW;
+  const apronX = st.x - st.nx * (STATION_APRON_HALF_DEPTH - 0.4);
+  const apronZ = st.z - st.nz * (STATION_APRON_HALF_DEPTH - 0.4);
+  return { mouthX, mouthZ, apronX, apronZ };
+}
 
 /**
  * The nearest station to a point, or null. Used by the fuel gauge to tell you which way to
@@ -900,4 +990,115 @@ export function canSpacing(seed, halfSpan = 12000) {
     height: () => 0,
   }).length;
   return { roadMetres, cans: n, metresPerCan: n ? roadMetres / n : Infinity };
+}
+
+/* ── the little town around a station ─────────────────────────────────────────
+ * Operator: "I think we should build a town around the gas station, a very small one with
+ * electrical poles and other hints that there's something there in that direction. So that
+ * they're easier to spot and differentiate [from ordinary roadside scatter]..."
+ *
+ * A handful of the EXISTING catalogue kinds — never a new geometry family, this is "using the
+ * existing prop system" taken literally — placed at FIXED offsets from the forecourt rather
+ * than drawn from the road's own arc-length slots the way propsInBox works: this is one
+ * landmark's own halo, findable relative to the STATION, not a dice roll along the road.
+ *
+ * Two tall telegraph poles (visible well before the kiosk roofline is — that is the whole
+ * point, "hints that there's something there in that direction") and two small structures (a
+ * shed, a phone box) so it reads as a hamlet rather than one lone building. Every candidate
+ * still goes through the SAME footprint/water/slope/road-clearance discipline propsInBox
+ * itself uses (reusing its own private helpers below) — a station sited on a dry spit beside
+ * a marsh must not grow a pole standing in the lake next to it.
+ */
+const TOWN_SALT = 0x544f574e; // 'TOWN'
+/** [kind id, local dx, local dz], in STATION-LOCAL space (+z toward the road — the same local
+ *  frame buildStation itself uses). Every offset has |dx| > STATION_APRON_HALF_WIDTH, so none
+ *  of these can ever land on the apron rectangle or the access spur regardless of dz. */
+const TOWN_KIT = [
+  ['telegraph_pole', -(STATION_APRON_HALF_WIDTH + 9), 3],
+  ['telegraph_pole', STATION_APRON_HALF_WIDTH + 13, -4],
+  ['shed', -(STATION_APRON_HALF_WIDTH + 7), -6],
+  ['phone_box', STATION_APRON_HALF_WIDTH + 6, 5],
+];
+/** Furthest a town candidate can sit from the forecourt centre, and the query-box expansion —
+ *  the widest TOWN_KIT offset above (STATION_APRON_HALF_WIDTH + 13 ~= 22.5) plus a margin. */
+const TOWN_MAX_OFFSET = 46;
+
+/**
+ * A station's own small landmark cluster, whose footprint lands inside the box. Same call
+ * shape as propsInBox/fuelCansInBox (a ground probe the caller owns) plus its own edges query
+ * for road clearance. Output records are shaped EXACTLY like propsInBox's own, so the
+ * renderer bakes them through the identical BUILDERS[id] dispatch and they pick up a
+ * collision hitbox for free wherever the catalogue entry already declares one (a telegraph
+ * pole, a shed) — no separate rendering or collision path needed for this cluster at all.
+ *
+ * @param {object} probe same shape propsInBox takes: `.site(x,z)` and `.height(x,z)`.
+ * @param {object} [stats] optional rejection tally, same convention as propsInBox.
+ */
+export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
+  const site = probe.site;
+  const height = probe.height || ((x, z) => probe.site(x, z).y);
+  const out = [];
+  const tally = (k) => {
+    if (stats) stats[k] = (stats[k] || 0) + 1;
+  };
+  const stations = stationsInBox(
+    x0 - TOWN_MAX_OFFSET, z0 - TOWN_MAX_OFFSET, x1 + TOWN_MAX_OFFSET, z1 + TOWN_MAX_OFFSET, seed
+  );
+  if (!stations.length) return out;
+  const edges = edgesInBox(x0 - TOWN_MAX_OFFSET, z0 - TOWN_MAX_OFFSET, x1 + TOWN_MAX_OFFSET, z1 + TOWN_MAX_OFFSET, seed, 20);
+
+  for (const st of stations) {
+    const ca = Math.cos(st.yaw);
+    const sa = Math.sin(st.yaw);
+    // One stream per station, drawn from in a fixed order (yaw jitter, then scale, then hue,
+    // per candidate) — same discipline propsInBox documents for its own per-slot stream.
+    const rnd = rng(hash3i(Math.round(st.x), Math.round(st.z), TOWN_SALT, seed));
+    for (let i = 0; i < TOWN_KIT.length; i++) {
+      const [id, ldx, ldz] = TOWN_KIT[i];
+      const kind = PROP_BY_ID[id];
+      if (!kind) continue;
+      tally('candidates');
+      const x = st.x + ldx * ca - ldz * sa;
+      const z = st.z + ldx * sa + ldz * ca;
+      if (x < x0 || x >= x1 || z < z0 || z >= z1) {
+        tally('outsideBox');
+        continue;
+      }
+      const foot = kind.foot;
+      if (!clearOfRoads(edges, x, z, VERGE_CLEAR + foot)) {
+        tally('rejectRoad');
+        continue;
+      }
+      const here = site(x, z);
+      if (!waterOk(kind.wet, here.y, here.wy)) {
+        tally('rejectWater');
+        continue;
+      }
+      const probeR = Math.max(foot * 1.15, 0.6);
+      const g = footprintGround(height, here.y, x, z, probeR);
+      if (g.hi - g.lo > maxDrop(kind, probeR)) {
+        tally('rejectSlope');
+        continue;
+      }
+      // 'road'-faced kit pieces (the shed, the phone box) present toward the station itself,
+      // the same "face the thing you are offset from" rule propsInBox uses; a pole does not
+      // care (gPole is radially near-symmetric) but gets a deterministic yaw anyway.
+      const yawLocal = Math.atan2(-ldx, -ldz);
+      tally('placed');
+      out.push({
+        id: kind.id,
+        group: kind.group,
+        y: g.lo - 0.04 - foot * 0.03,
+        x,
+        z,
+        yaw: st.yaw + yawLocal + (rnd() - 0.5) * 0.1,
+        scale: 0.95 + rnd() * 0.14,
+        hue: rnd(),
+        dominant: here.dominant,
+        edgeKey: `town:${st.key}`,
+        slot: i,
+      });
+    }
+  }
+  return out;
 }

@@ -36,7 +36,7 @@ import {
 import { vertHead, fragHead, GL_HASH, GL_NOISE, GL_SHADOW, GL_LIGHT, glCloudField, DEPTH_FS } from '../core/glsl.js';
 import { C, biomeTintArrays } from '../core/palette.js';
 import { U, sharedUniforms } from './uniforms.js';
-import { TAU, clamp, lerp, hash2i, rng } from '../core/math.js';
+import { TAU, clamp, lerp, hash2i, rng, smoothstep } from '../core/math.js';
 import { noise2 } from '../core/noise.js';
 import { scatterChunk, scatterBudget, SCATTER_MAX_LEVEL } from '../world/scatter.js';
 import { Flowers } from './flowers.js';
@@ -503,16 +503,23 @@ vec4 windSample(vec2 p){
 float windProfile(float z){ return log((max(z,0.015) + 0.06) / 0.06) * 0.19523; }
 `;
 
-/** The per-biome foliage tint, as a GLSL constant array. Same table the ground reads. */
+/** The per-biome foliage tint, as a GLSL constant array. Same table the ground reads.
+ *  `B_SNOW` rides along on the same per-biome index: `biomeTintArrays().scal`'s third
+ *  component (the same "snow" scalar render/terrainMaterial.js and render/grass.js already
+ *  blend by), so a tree/bush picks up the identical per-biome snow amount the ground under it
+ *  uses — currently 1.0 on Cobalt Highlands only, 0.0 everywhere else. */
 function glslFoliageTints() {
   const t = biomeTintArrays();
   const parts = [];
+  const snowParts = [];
   for (let i = 0; i < t.count; i++) {
     parts.push(`vec3(${t.foliage[i * 3].toFixed(4)},${t.foliage[i * 3 + 1].toFixed(4)},${t.foliage[i * 3 + 2].toFixed(4)})`);
+    snowParts.push(t.scal[i * 4 + 2].toFixed(4)); // scal packs [hazeMul, dryness, snow, wet]
   }
   return /* glsl */ `
 const int NFOL = ${t.count};
 const vec3 B_FOLIAGE[${t.count}] = vec3[${t.count}](${parts.join(',')});
+const float B_SNOW[${t.count}] = float[${t.count}](${snowParts.join(',')});
 `;
 }
 
@@ -524,7 +531,7 @@ in vec3 nrm; in vec3 clm; in float flx; in float hue;
 in vec4 iPos;              // xyz = root, w = scale
 in vec4 iVar;              // rot, hueShift, phase, biome
 out vec3 vW; out vec3 vN; out float vHue; out float vLeaf; out float vDist;
-out float vY; out float vAO; out vec3 vTint;
+out float vY; out float vAO; out vec3 vTint; out float vSnow;
 void main(){
   // The sun shadow map covers a bounded square around the car, so a tree two kilometres
   // away cannot cast into it — yet without this every instance in the world would still be
@@ -581,6 +588,7 @@ void main(){
   // Cheap vertical AO: the inside of a canopy and the foot of a trunk never see the sky.
   vAO = mix(0.62, 1.0, smoothstep(0.0, 0.55, vY));
   vTint = B_FOLIAGE[clamp(int(iVar.w + 0.5), 0, NFOL-1)];
+  vSnow = B_SNOW[clamp(int(iVar.w + 0.5), 0, NFOL-1)];
   vec4 mv = viewMatrix * vec4(wp, 1.0);
   vDist = -mv.z;
   gl_Position = projectionMatrix * mv;
@@ -588,7 +596,7 @@ void main(){
 
 const TREE_FS = /* glsl */ `
 in vec3 vW; in vec3 vN; in float vHue; in float vLeaf; in float vDist;
-in float vY; in float vAO; in vec3 vTint;
+in float vY; in float vAO; in vec3 vTint; in float vSnow;
 out vec4 outColor;
 void main(){
   vec3 N = normalize(vN);
@@ -606,6 +614,19 @@ void main(){
     // Biome foliage tint: the same table the ground blends, so a highland pine and the
     // hillside it stands on go cold together.
     lit *= vTint; mid *= vTint; shd *= vTint;
+    // Snow-dusted foliage. "Green bushes/trees should be covered in snow too in snow biome"
+    // (playtest, round 2) — the SAME altitude ramp (120-240 m) and the SAME three colours
+    // render/terrainMaterial.js and render/grass.js already blend toward for the ground and
+    // the sward, reused rather than a second snow system: a snowy hillside's pines and bushes
+    // now match the ground they stand in instead of reading as a disconnected white overlay.
+    // N.y biases coverage toward upward-facing surfaces — the top of a canopy or a bush
+    // catches the dusting, the underside stays green, the way real snow actually settles.
+    float snowUp = clamp(N.y*0.5 + 0.5, 0.0, 1.0);
+    float snowAlt = smoothstep(120.0, 240.0, vW.y);
+    float snowC = vSnow * snowAlt * mix(0.3, 1.0, snowUp);
+    lit = mix(lit, vec3(0.95,0.96,0.99), snowC*0.88);
+    mid = mix(mid, vec3(0.80,0.85,0.94), snowC*0.80);
+    shd = mix(shd, vec3(0.58,0.66,0.82), snowC*0.60);
     trans = 1.05; rim = 0.52;
   } else {
     float bark = pn2(vec2(atan(N.z,N.x)*3.4, vW.y*3.1))*0.5+0.5;
@@ -686,6 +707,29 @@ const BUILD_BUDGET = 2.6;
 const MAX_CHUNKS = 512;
 
 /**
+ * edited by AI: the pop-in fix's other half (see the SCATTER_MAX_LEVEL comment in
+ * world/scatter.js for the measured before). Widening the existence radius narrows how often
+ * a tree attaches close in, but `tools/diag-treepop.mjs` shows it can still happen — a level-2
+ * node's own near edge can sit much closer to the car than the node's characteristic
+ * distance, and a hard, instant, full-size instance is what makes ANY such attach read as a
+ * "pop" rather than "always having been there." So every attach now grows in from a seedling
+ * over `GROW_SECS`, anchored at its own root (the mesh's local origin is already the trunk
+ * base — see `addTube`/`makeTree` — so scaling `iPos.w`, the existing per-instance SCALE
+ * channel, shrinks the whole tree toward its own foot rather than toward the world origin).
+ * Zero shader changes: `TREE_VS` already reads `sc = iPos.w` and multiplies every local vertex
+ * by it, so a small starting scale is a small tree in the correct place, not a degenerate one
+ * — `H = uTreeH*sc` and the two divisions that use it are already guarded with `max(H, …)`.
+ * `tools/diag-treepop.mjs`'s closest measured steady-state attach (227.9 m, ~10.5 s out at a
+ * 95 km/h cruise) now grows from a sapling to full size over the two seconds before the car
+ * would otherwise have seen it appear instantly — measured with `tools/diag-treegrow.mjs`.
+ */
+const GROW_SECS = 1.5;
+/** Starting fraction of full size. Not exactly 0: keeps the shader's H-based divisions well
+ *  away from their guards rather than merely inside them. */
+const GROW_START = 0.05;
+const growEase = (t) => smoothstep(0, 1, t);
+
+/**
  * Every tree and bush in the world, as a handful of instanced draws.
  *
  * One InstancedMesh per (species, LOD). Instances are packed into a dense array per batch
@@ -730,6 +774,13 @@ export class Flora {
     this.stats = { chunks: 0, instances: 0, batches: 0, attached: 0, buildMs: 0, backlog: 0 };
     this._cam = new Vector3();
     this._hasCam = false;
+
+    /* edited by AI: grow-in clock and the list of blocks currently mid-grow. A plain
+     * self-owned clock rather than reading a shared uTime — it only has to be monotonic
+     * across this instance's own update() calls, in a diagnostic harness exactly as much as
+     * in the browser. See GROW_SECS above. */
+    this._t = 0;
+    this._growing = [];
 
     scene.add(this.group);
   }
@@ -785,12 +836,14 @@ export class Flora {
    * @param {THREE.Vector3} camPos
    */
   update(dt, camPos) {
+    this._t += dt;
     if (camPos) {
       this._cam.copy(camPos);
       this._hasCam = true;
     }
     this._drain(dt);
     this._cullPass();
+    this._growPass();
     this._flush();
     if (this.flowers) this.flowers.update(camPos);
   }
@@ -940,8 +993,15 @@ export class Flora {
       this._reserve(b, b.count + n);
       b.iPos.set(g.pos, b.count * 4);
       b.iVar.set(g.vari, b.count * 4);
-      const block = { batch: b, start: b.count, len: n, g };
+      const block = { batch: b, start: b.count, len: n, g, alive: true };
       b.blocks.push(block);
+      // edited by AI: land every instance at GROW_START of its target scale and register the
+      // block to grow — see the GROW_SECS comment above `class Flora`. `b.iPos.set(g.pos, …)`
+      // just wrote the FULL target scale into the w component of each instance; only that is
+      // knocked down here, x/y/z (the root position) are already correct and untouched, so the
+      // tree grows in place rather than sliding in from somewhere.
+      for (let k = 0; k < n; k++) b.iPos[(block.start + k) * 4 + 3] = g.pos[k * 4 + 3] * GROW_START;
+      this._growing.push({ block, t0: this._t });
       b.count += n;
       b.dirty = true;
       blocks.push(block);
@@ -952,6 +1012,7 @@ export class Flora {
   _detach(entry) {
     if (!entry.blocks) return;
     for (const block of entry.blocks) {
+      block.alive = false; // edited by AI: tells _growPass() to drop it, not write into whatever now occupies its old slot
       const b = block.batch;
       const i = b.blocks.indexOf(block);
       if (i < 0) continue;
@@ -1000,6 +1061,33 @@ export class Flora {
     const n = Math.min(cold.length, this.chunks.size - MAX_CHUNKS);
     for (let i = 0; i < n; i++) this.chunks.delete(cold[i].key);
     this.stats.chunks = this.chunks.size;
+  }
+
+  /**
+   * edited by AI: advance every block that is still growing in (see GROW_SECS/`_attach()`
+   * above). Cheap on purpose — only blocks attached in the last GROW_SECS are ever in this
+   * list, so on a steady cruise it is a handful of instances for a couple of seconds at a
+   * time, never the whole live set. Bypasses the `dirty`/`_flush()` bookkeeping deliberately:
+   * a growing block's INSTANCE COUNT and bounding sphere do not change, only the scale
+   * component already inside the buffer, so only `needsUpdate` needs to be re-armed.
+   */
+  _growPass() {
+    if (!this._growing.length) return;
+    const now = this._t;
+    let w = 0;
+    for (let i = 0; i < this._growing.length; i++) {
+      const rec = this._growing[i];
+      const block = rec.block;
+      if (!block.alive) continue; // detached mid-grow (e.g. a sharp U-turn) — just drop it
+      const t = clamp((now - rec.t0) / GROW_SECS, 0, 1);
+      const scale = GROW_START + (1 - GROW_START) * growEase(t);
+      const b = block.batch;
+      const g = block.g;
+      for (let k = 0; k < block.len; k++) b.iPos[(block.start + k) * 4 + 3] = g.pos[k * 4 + 3] * scale;
+      b.aPos.needsUpdate = true;
+      if (t < 1) this._growing[w++] = rec; // still growing — keep it in the list
+    }
+    this._growing.length = w;
   }
 
   _flush() {

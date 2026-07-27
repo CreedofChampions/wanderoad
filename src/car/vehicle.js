@@ -26,8 +26,10 @@ import {
   SUSPENSION,
   PRESETS,
   ASSIST,
+  REVERSE,
 } from './tuning.js';
 import { clamp, clamp01, lerp, angleDelta, damp, hash2i } from '../core/math.js';
+import { BIOME } from '../world/biomes.js';
 
 /** Deterministic [-1,1] from a position — the bump field for loose surfaces. */
 const noiseAt = (x, z) => (hash2i(Math.round(x), Math.round(z), 0x5eed) / 4294967296) * 2 - 1;
@@ -88,6 +90,37 @@ const TIP = {
   scrapeK: 3.4, // 1/s of velocity bleed while scraping
 };
 
+/* Sand bogging, dunes only. Ordinary off-road (grass, gravel shoulder, highland scree) is
+ * already "somewhat slower" — see the flat, onRoad-driven crr/offCap treatment below, which
+ * this ADDS to rather than replaces. Loose DUNE sand is meant to be a different, much harsher
+ * thing: the operator's own report was specific — sand "makes impossible drive offroad 10+
+ * meters (slow/stuck)" for anything but the Rally.
+ *
+ * Modelled as a bog that builds with distance actually travelled off the made surface while
+ * the ground is dune-dominant, not as a fixed penalty the instant a tyre leaves the
+ * carriageway — a single wheel clipping the verge at the edge of a dune field should not feel
+ * identical to a hundred metres of open sand. It drains just as physically: the moment the
+ * worst wheel is back on a made surface the debt clears in a couple of seconds, so this can
+ * never trap a player who has already found their way back to the road — R still works too.
+ *
+ * garage.js documents the Rally as "the only one that is genuinely happy off the tarmac" via
+ * `feel.offRoad` (1.35 on the Rally, undefined -> 1 on the rest of the fleet), which was
+ * declared and never read anywhere outside garage.js — the exact "numbers declared and never
+ * applied" failure this project has already been bitten by twice. Wired here, narrowly: it
+ * stretches the distance the Rally can cover before the bog reaches full severity, rather than
+ * exempting it outright — a rally car outlasting the others by the margin its own brief
+ * already claims, not a magic immunity flag. TYRE.offRoadMul is set by garage.js's
+ * applyCarFeel(); code paths that never call it (bench-car.mjs's stub tier, most diag/bench
+ * scripts) simply get the default of 1, i.e. the un-stretched distance. */
+const SAND = {
+  duneWeight: 0.5, // biome blend before dune sand counts as THE sand, not a light dusting
+  bogDist: 7, // metres of off-road travel through dune sand to reach full severity
+  recoverPerSec: 1 / 1.6, // fraction of bogDist cleared per second once back on a made surface
+  crrBogged: 0.5, // rolling-resistance coefficient at full severity — deep loose sand
+  capBogged: 2.3, // m/s off-road speed ceiling at full severity (~8.3 km/h, a crawl, not a wall)
+  vDragBogged: 700, // N per m/s at full severity — bleeds off a fast ENTRY speed; see the rr comment
+};
+
 /** Lateral force factor for a slip angle, |f| = 1 at the peak slip angle. */
 function lateralCurve(alpha, peak) {
   const u = Math.abs(alpha) / peak;
@@ -134,6 +167,10 @@ export class Vehicle {
     this.gear = 1;
     this.rpm = GEARBOX.idleRpm;
     this.reverse = false;
+    // Was the brake pedal OFF as of the last step? Reverse only ever arms on the rising edge
+    // of a FRESH press made while already slow — see the reverse-engage comment in _step() for
+    // why a continuous hold must not count. Starts true: the pedal is up at rest.
+    this._brakeWasOff = true;
 
     // internal
     this._shiftTimer = 0;
@@ -144,8 +181,12 @@ export class Vehicle {
     this._airTime = 0;
     this._loadLong = 0;
     this._loadLat = 0;
-    this._rollV = 0;
-    this._pitchV = 0;
+    // The DISPLAYED ground-following roll/pitch — rate-limited copies of groundRoll/
+    // groundPitch, see the "what the renderer reads" comment at the end of _step(). These
+    // two fields were declared and never read (bench-car.mjs/diag-body.mjs both stayed
+    // green with them permanently at 0) — repurposed rather than left dead a third time.
+    this._smRoll = 0;
+    this._smPitch = 0;
     this._csState = 0;
     this._hbRelease = 1;
     this._acc = 0;
@@ -180,14 +221,25 @@ export class Vehicle {
     this.gripScale = 1;
     this.rough = 0;
     /* Off-road, judged at the four contact patches rather than at the badge on the bonnet.
-     * `onRoad` is the average — it is what the drag, the bump and the speed ceiling read, so
-     * two wheels on the verge costs you half of each. `onRoadMin` is the worst wheel, and it
-     * is what the STATE reads: one wheel off means you are off, which is what a driver feels
-     * and what the tyre note should say. */
+     * `onRoad` is the average — the rolling resistance and the speed ceiling deliberately
+     * still read that one, because those are honestly proportional to how much of the car's
+     * own footprint is on grippy ground (see the offCap comment below: "half a car on the
+     * tarmac is still half a car on the tarmac"). `onRoadMin` is the worst wheel, and it is
+     * the actual on/off-road STATE — one wheel off the tarmac means you are off, which is what
+     * a driver feels. It always drove the tyre note; it now also gates the loose-surface grip
+     * loss and the tripping risk, which used to read the average and were correspondingly
+     * numb to a single wheel over the verge (three good wheels diluted a fourth one sitting
+     * flat in the grass down to onRoad 0.75 — nowhere near either trigger).
+     *
+     * `game/streak.js` reads `onRoadMin` too now, AND-ed with its own centre-point terrain
+     * sample (main.js still takes that separately) — a wheel-only excursion breaks the streak
+     * the same way it trips the grip loss and tripping risk above. */
     this.onRoad = 1;
     this.onRoadMin = 1;
     this.offRoad = 0; // 0..1, how far off the made surface the worst wheel is
     this.wheelsOffRoad = 0;
+    this.sandBog = 0; // 0..1, dunes-specific bog severity — see the SAND block above
+    this._sandBogDist = 0; // metres travelled off-road through dune sand; feeds sandBog
     /* Attitude of the ground under the wheels, in the renderer's sign convention (see
      * _probeWheels). `roll` and `pitch` already include these — do not add them again. */
     this.groundPitch = 0;
@@ -246,8 +298,16 @@ export class Vehicle {
     this.rolled = false;
     this._righting = false;
     this._rollTimer = 0;
+    // A teleport (R, a fresh spawn) is a clean start, not a continuation of however bogged
+    // the car was a second ago — matches R's existing job of always being a way out.
+    this._sandBogDist = 0;
+    this.sandBog = 0;
     this._probeWheels();
     this._prevGroundRoll = this.groundRoll;
+    // A freshly placed car settles to the real ground attitude immediately — the rate limit
+    // in _step() is for CHANGES while driving, not for the initial drop.
+    this._smRoll = this.groundRoll;
+    this._smPitch = this.groundPitch;
     this.roll = this.groundRoll;
     this.pitch = this.groundPitch;
   }
@@ -444,8 +504,8 @@ export class Vehicle {
     // feels different in each biome, which is the point of having biomes. This one stays a
     // centre sample deliberately: grip is a biome lookup, and a second biome sample per
     // wheel costs more than the whole rest of the step. What a wheel on the verge costs you
-    // is applied further down, through the loose-surface block, which now reads the
-    // four-wheel average — putting it in both places would charge for it twice.
+    // is applied further down, through the loose-surface block, which now reads the WORST
+    // wheel — putting it in both places would charge for it twice.
     this.gripScale = surf ? surf.grip : 1;
     /* Where the WHEELS are. Everything downstream that used to ask the terrain about the
      * point under the driver's seat now asks the four contact patches instead: the car is
@@ -454,9 +514,38 @@ export class Vehicle {
      * which is what it should cost. */
     this._probeWheels();
     const onRoad = this.onRoad;
-    // The tyre note is the cheapest off-road cue there is, so it goes on the WORST wheel:
-    // one wheel on the grass and you can hear it.
-    this.surfaceKind = this.onRoadMin > OFF_ROAD_AT ? (surf ? surf.surfaceKind : 'ground') : 'ground';
+    // The worst wheel, not the average: one wheel genuinely off the paved surface reads as
+    // off on its own, undiluted by three others that are fine. Everything that has to answer
+    // "is the car off the road" — the tyre note, the loose-surface grip loss and the tripping
+    // risk below — gates on this, not on `onRoad`.
+    const onRoadMin = this.onRoadMin;
+    this.surfaceKind = onRoadMin > OFF_ROAD_AT ? (surf ? surf.surfaceKind : 'ground') : 'ground';
+
+    /* ── dunes: sand that actually bogs you down ───────────────────────────
+     * See the SAND block near the top of this file for the design reasoning. Gated on
+     * `onRoadMin`, the same "is the car off the road at all" signal the loose-surface and
+     * tripping blocks below now use, not the four-wheel `onRoad` average — a wheel genuinely
+     * off the tarmac and into open sand is what this is about, not a straddled edge line.
+     * `surf.w` is the SAME centre biome sample `gripScale` already read a few lines up; test
+     * stubs that hand back a surface() with no biome weights (bench-car.mjs's FLAT world, most
+     * diag/bench scripts) simply never gate this on, the same fallback the rest of this
+     * terrain-optional file already uses for a missing field. */
+    const duneW = surf && surf.w ? surf.w[BIOME.DUNES] : 0;
+    if (onRoadMin < OFF_ROAD_AT && duneW >= SAND.duneWeight) {
+      this._sandBogDist += vMag * dt;
+    } else {
+      this._sandBogDist = Math.max(0, this._sandBogDist - SAND.bogDist * SAND.recoverPerSec * dt);
+    }
+    // garage.js: 1.35 on the Rally via TYRE.offRoadMul, 1 (undefined -> the `|| 1` fallback)
+    // on the rest of the fleet. Divides the whole ramp, not just its distance — dividing only
+    // the distance (`dist / (bogDist * offRoadMul)`) would still walk the Rally to sandBog 1
+    // eventually, just later, which measured as "also fully stuck by 25 m, a few metres after
+    // everyone else" (tools/diag-sandbog.mjs) and reads as delaying the inevitable rather than
+    // the fleet's own "genuinely happy off the tarmac". Dividing the ramp instead caps the
+    // Rally's severity CEILING below fully bogged (1/1.35 ≈ 0.74) for any excursion, however
+    // long — measurably still slowed, never stuck the way the rest of the fleet gets stuck.
+    const offRoadMul = TYRE.offRoadMul || 1;
+    this.sandBog = clamp01(clamp01(this._sandBogDist / SAND.bogDist) / offRoadMul);
 
     /* ── the slope ──────────────────────────────────────────────────────
      * The first playable build had none of this, and the result was a car that drove up
@@ -487,7 +576,50 @@ export class Vehicle {
     this.gripScale *= 1 - 0.85 * steep;
 
     const rideY = groundY + SUSPENSION.restLength;
-    const gap = this.y - rideY;
+    /* Ground collision for the ROLLED body, folded into `rideY` itself rather than bolted on
+     * afterwards — see below for why that matters. The ordinary suspension above only ever
+     * targeted `groundY + restLength`, which is right while the car stands on its wheels —
+     * but model.js's chassis rotates the shell about the CONTACT PLANE, not the CG (`y = 0
+     * is the contact patch` — see model.js's own header), and the shell itself sits entirely
+     * ABOVE that plane, floor to roof. Nothing here ever stopped `_tip` swinging that shell
+     * past vertical: at tip 180° the roof (locally ~roofMul × cgHeight above the plane) lands
+     * roofMul × cgHeight BELOW it instead, which is the car sinking through the terrain by
+     * about its own height — exactly "it should roll on the ground" instead.
+     *
+     * Uses `this._tip` alone (one step stale, the same lag `contact` below already accepts),
+     * not the full `this.roll` — `groundRoll` is the ground the wheels are ACTUALLY on, so
+     * the body tilting to match it is correct by construction and must stay free to do so on
+     * an ordinary bank; it is only the EXTRA rotation away from that plane, `_tip`, that can
+     * ever put part of the shell underground. Reuses `groundY`, already sampled above — no
+     * second terrain query. Treats the shell as a box of half-width `halfTOut` (the track,
+     * the same figure the tip solver's own torque equation already pivots about) and height
+     * `BODY.roofMul * cgHeight`, and finds the lowest corner of that box once rotated by
+     * `_tip` — the standard rotated-rectangle minimum, <= 0 and exactly 0 at tip 0.
+     *
+     * THE FIRST VERSION OF THIS clamped `this.y` in a separate step AFTER the block below,
+     * against a floor still anchored to the flat `rideY`. It looked right in isolation and
+     * broke rollover recovery badly: lifting `this.y` to clear the roof left it sitting well
+     * above `rideY` from the NEXT step's point of view, which is exactly what `airborne`
+     * below tests for — so a resting rollover read as permanently airborne, which zeroes
+     * `contact`, which routes the tip solver into its airborne branch (no damping, no
+     * righting torque) every single step. Measured: a 72 km/h flip that used to settle in
+     * 3.07 s took 9.23 s and 346.9° of roll — it kept tumbling because the game genuinely
+     * believed it was still in the air. Folding the lift into `rideY` itself fixes that at
+     * the source: a car resting on its roof is exactly as "on the ground" as one resting on
+     * its wheels, just at a different height, and `airborne` needs to agree. */
+    const tipNow = this._tip;
+    const sinTip = Math.abs(Math.sin(tipNow));
+    const cosTip = Math.cos(tipNow);
+    // 0.6x track, not 0.5x (half-track, what the tip solver's own torque equation above
+    // uses): the drawn shell overhangs the wheels — measured against model.js's own hull
+    // table, 0.92-1.03 m of half-width against 0.80-0.84 m of half-track, a fairly constant
+    // ~12-19% margin across all three tiers. This is a collision half-width, not a pivot
+    // distance, so it is allowed to differ from halfT below on purpose.
+    const halfTOut = this.track * 0.6;
+    const roofOut = BODY.roofMul * this.spec.cgHeight;
+    const bodyLow = -halfTOut * sinTip - roofOut * Math.max(0, -cosTip); // <= 0, 0 when tip=0
+    const rideYTip = rideY - bodyLow; // rises as the body rotates away from flat
+    const gap = this.y - rideYTip;
     const airborne = gap > 0.06;
     this.onGround = !airborne;
 
@@ -506,7 +638,7 @@ export class Vehicle {
       this.vy -= g * dt;
     } else {
       this._airTime = 0;
-      const compression = clamp(rideY - this.y, -SUSPENSION.travel, SUSPENSION.travel);
+      const compression = clamp(rideYTip - this.y, -SUSPENSION.travel, SUSPENSION.travel);
       const springA = (SUSPENSION.stiffness * 4 * compression) / this.mass;
       const dampA = (SUSPENSION.damping * 4 * -this.vy) / this.mass;
       this.vy += (springA + dampA - g) * dt;
@@ -514,8 +646,8 @@ export class Vehicle {
       if (this.vy > 2) this.vy = 2;
     }
     this.y += this.vy * dt;
-    if (this.y < rideY - SUSPENSION.travel) {
-      this.y = rideY - SUSPENSION.travel;
+    if (this.y < rideYTip - SUSPENSION.travel) {
+      this.y = rideYTip - SUSPENSION.travel;
       if (this.vy < 0) this.vy = 0;
     }
 
@@ -635,14 +767,62 @@ export class Vehicle {
      * Two fixes. The auto-pilot's own input never engages reverse — a chauffeur that decides
      * to reverse is not a chauffeur. And throttle clears reverse whenever the car is nearly
      * stationary, whichever way it happens to be creeping. */
-    if (!input.auto && Math.abs(vLong) < 0.6 && this.brake > 0.35 && this.throttle < 0.05) {
+    /* THE STOP THAT BECAME A REVERSE: gating this on the CURRENT brake+speed state alone means
+     * an ordinary hard stop — brake pressed once at speed and held, exactly what "stop at a red
+     * light" or a panic stop both look like — reads as "reverse" the instant `vLong` decays
+     * under 0.6 m/s, because the same held pedal that did the stopping is still past 0.35 and
+     * the throttle was never touched. Measured (tools/diag-c2-repro.mjs, the browser suite's own
+     * C2 scenario replayed headless): a 111 km/h dead-straight stop reached 0.2 km/h at ~3.5 s,
+     * then this fired and pushed the car BACKWARDS for the remaining ~2.5 s of a continued
+     * brake hold, ending at 4.8 km/h instead of stopped — failing the very check ("the brakes
+     * stop the car promptly") that a hard stop should trivially pass, and for the worse reason
+     * that the brake block above is skipped entirely once `this.reverse` is true, so the car
+     * never even got to finish braking normally.
+     *
+     * `this._brakeWasOff` fixes it by requiring the PRESS itself, not just the pedal position,
+     * to be fresh: reverse only arms on the step the pedal crosses from released into held while
+     * the car is already slow. A held-through-the-stop brake never sees that edge (the pedal
+     * was already past 0.35 seconds after the press began, long before `vLong` caught up), so an
+     * ordinary stop just stops and stays stopped, no matter how long the pedal is held — which
+     * is what every other setback in this game already reads as (gentle, not a snap into motion
+     * nobody asked for). The real feature is untouched: stop, let off the brake (even briefly),
+     * press it again — the natural motion for "and now I want to back up" — and it reverses
+     * exactly as before.
+     *
+     * `_brakeWasOff` is latched with hysteresis, not read straight off `this.brake < 0.05`
+     * every frame: the pedal itself is ramped (PEDAL.brakeUp), so a fresh press spends several
+     * steps crossing the dead zone between "released" (< 0.05) and "held" (> 0.35) below, and a
+     * flag that re-read the instant position every frame would flip to "not off" the moment it
+     * left 0.05 — BEFORE it ever reached the 0.35 the engage check actually waits for — which
+     * would silently break the real feature too, not just leave C2 fixed by accident. Only the
+     * two ends of the ramp move it: dropping under 0.05 arms it, crossing above 0.35 consumes
+     * it, and it holds its value through everything in between. */
+    if (!input.auto && Math.abs(vLong) < 0.6 && this.brake > 0.35 && this.throttle < 0.05 && this._brakeWasOff) {
       this.reverse = true;
     } else if (this.throttle > 0.15 && vLong > -3) {
       this.reverse = false;
     }
+    if (this.brake < 0.05) this._brakeWasOff = true;
+    else if (this.brake > 0.35) this._brakeWasOff = false;
     if (this.reverse) {
       // In reverse the brake IS the accelerator, and reverse is deliberately slow.
-      driveForce = -Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
+      let rev = Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
+      /* THE BUG THIS ONCE WAS: reverse engaged (the flag went true) but the car barely
+       * moved — "just go in reverse gear" rather than actually reversing. Measured with a
+       * scripted hold-S trace: engine braking alone is ~1666 N at idle rpm in a low gear,
+       * comfortably more than the ~1300 N this push tops out at, so the car oscillated
+       * around 0 m/s forever, net force flipping sign every step as `Math.sign(vLong)` in
+       * the engine-braking and rolling-resistance terms flipped with it. The standard brake
+       * caliper force (further down) would have piled on top of that too, at up to ~15x this
+       * push, the moment reverse speed ever cleared 0.2 m/s. Reversing needs its OWN honest
+       * top-speed governor instead — see REVERSE below — with the mechanisms built for
+       * "the driver has lifted off" (engine braking) and "the driver is braking" (the pedal
+       * block) both told the driver is doing neither: they are accelerating, backwards. */
+      const revSpeed = -vLong; // positive once actually moving backwards
+      if (revSpeed > REVERSE.maxSpeed - REVERSE.taperBand) {
+        rev *= clamp01((REVERSE.maxSpeed - revSpeed) / REVERSE.taperBand);
+      }
+      driveForce = -rev;
     }
 
     const driveLoad = S.drive === 'awd' ? W : loadRear;
@@ -672,7 +852,12 @@ export class Vehicle {
 
     /* ── brakes ────────────────────────────────────────────────────────── */
     let brakeForce = 0;
-    if (this.brake > 0.001 && vMag > 0.2) {
+    // Skipped while reversing: `this.brake` is the reverse throttle there (see the reverse
+    // block above), not a request to stop. This block does not know the difference — it
+    // always opposes whatever `vLong` is doing, which once the car is actually moving
+    // backward means opposing the reverse motion itself, at up to ~15x the reverse push. See
+    // the "THE BUG THIS ONCE WAS" comment above for the measured trace.
+    if (!this.reverse && this.brake > 0.001 && vMag > 0.2) {
       const split = lerp(BRAKE.splitFront, BRAKE.splitFrontDive, clamp01(-this._loadLong));
       let torque = BRAKE.torque * this.brake * A.brakeMul;
       // ABS modulates rather than clamps: 18 Hz, releasing 30% of line pressure.
@@ -717,7 +902,9 @@ export class Vehicle {
      * with the near side on the grass reads 0.5 here, which lifts the ceiling to something
      * that never bites — correct, because half a car on the tarmac is still half a car on
      * the tarmac. It is the min, not the average, that says you are off-road. */
-    const offCap = lerp(12.2, 200, clamp01(onRoad * 1.4)); // 44 km/h off the carriageway
+    let offCap = lerp(12.2, 200, clamp01(onRoad * 1.4)); // 44 km/h off the carriageway
+    // Dunes: a bogged car does not merely have a lower ceiling, it barely moves. See SAND.
+    if (this.sandBog > 0) offCap = lerp(offCap, SAND.capBogged, this.sandBog);
     if (contact && vLong > offCap && driveForce > 0) driveForce = 0;
 
     const fxTotal = (driveForce + brakeForce) * contact;
@@ -740,8 +927,26 @@ export class Vehicle {
      * ever". Rolling resistance on grass and sand is genuinely several times tarmac's, so
      * this is honest physics pushed to the top of its honest range — plus a hard ceiling,
      * because the point of the game is to stay on the road. */
-    const crr = lerp(0.145, 0.014, clamp01(onRoad));
-    const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + lerp(9.5, 1.4, clamp01(onRoad)) * vLong;
+    let crr = lerp(0.145, 0.014, clamp01(onRoad));
+    // Dunes: piled sand in front of the wheels, not just a looser surface. See SAND above.
+    // Deliberately small next to vDrag below — a constant force alone cannot bleed off a fast
+    // ENTRY speed within a few metres, it can only stop the car from creeping once it is
+    // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
+    // drive at speed" part.
+    if (this.sandBog > 0) crr = lerp(crr, SAND.crrBogged, this.sandBog);
+    let vDrag = lerp(9.5, 1.4, clamp01(onRoad));
+    /* The speed-proportional half of off-road resistance is what a car arriving off the
+     * tarmac at speed actually decelerates against — the constant term above is too small at
+     * 19 m/s to matter (a few tenths of a m/s²) and only bites once the car is already slow.
+     * Measured directly (tools/diag-sandbog.mjs): at the ordinary off-road coefficient (9.5)
+     * a car entering dune sand at 70 km/h was STILL doing 63 km/h ten metres later — no
+     * different from an ordinary verge, and nothing like "impossible to drive". Scaling this
+     * coefficient by severity instead of (or as well as) `crr` is what makes the resistance
+     * GROW with speed, so a fast entry gets punished hard while a genuine crawl under gentle
+     * throttle still settles at a real, non-zero speed (never a hard wall) once drive force
+     * and drag reach equilibrium. */
+    if (this.sandBog > 0) vDrag = lerp(vDrag, SAND.vDragBogged, this.sandBog);
+    const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + vDrag * vLong;
     // Closed throttle drives the engine through the transmission; the retarding force
     // scales with gear and rpm exactly as the drive force does.
     /* Engine braking, and the shape of it matters more than the size.
@@ -754,8 +959,15 @@ export class Vehicle {
      * and it made the auto-pilot look broken.
      *
      * A real engine stops braking almost as soon as the throttle cracks open. This vanishes
-     * by a quarter throttle, which is what lets a light foot hold a speed. */
-    const closed = Math.max(0, 1 - this.throttle * 4);
+     * by a quarter throttle, which is what lets a light foot hold a speed.
+     *
+     * While reversing, `this.brake` IS the throttle (see the reverse block above) — reading
+     * `this.throttle` here instead, which is genuinely 0 whenever the driver is holding the
+     * reverse pedal, is what made engine braking fight the reverse push at full strength
+     * regardless of how hard that pedal was held. Easing off the reverse pedal brings engine
+     * braking back in proportionally, the same as easing off the throttle does going forward. */
+    const effectiveThrottle = this.reverse ? this.brake : this.throttle;
+    const closed = Math.max(0, 1 - effectiveThrottle * 4);
     const engBrake =
       this._shiftTimer > 0
         ? 0
@@ -764,9 +976,14 @@ export class Vehicle {
     /* Loose surface. Off the carriageway the car should feel like it is on gravel — bumpy,
      * reluctant to turn, and unwilling to build speed. The bump is a real vertical impulse
      * from a hash of the position, so it is deterministic and it shakes the camera and the
-     * suspension the way a rough surface would. */
-    if (contact && onRoad < 0.6) {
-      const loose = 1 - onRoad;
+     * suspension the way a rough surface would.
+     *
+     * Gated on the WORST wheel, not the four-wheel average. The average diluted a single
+     * wheel sitting flat in the grass (onRoad 0) against three still on tarmac down to 0.75 —
+     * nowhere near the 0.6 line below, so a wheel could hang off the verge all day and cost
+     * nothing. A driver does not average their tyres; the one that is off is off. */
+    if (contact && onRoadMin < 0.6) {
+      const loose = 1 - onRoadMin;
       const wob =
         noiseAt(this.x * 0.31, this.z * 0.31) * 0.6 + noiseAt(this.x * 1.13 + 11.7, this.z * 1.13 - 4.2) * 0.4;
       this.vy += wob * loose * Math.min(vMag, 24) * 0.055 * dt * 60;
@@ -795,8 +1012,8 @@ export class Vehicle {
      * force that only appears in the roll solver would be the third dead tunable this file
      * has had. `forces.trip` reports it. */
     let fyTrip = 0;
-    if (contact > 0 && onRoad < 0.75 && Math.abs(vLat) > TIP.digFrom) {
-      const loose = clamp01((0.75 - onRoad) / 0.75);
+    if (contact > 0 && onRoadMin < 0.75 && Math.abs(vLat) > TIP.digFrom) {
+      const loose = clamp01((0.75 - onRoadMin) / 0.75);
       const over = Math.abs(vLat) - TIP.digFrom;
       /* Sliding into ground that is RISING under the leading wheels is a different event
        * from sliding across a flat field: the soil is not being pushed aside, it is in the
@@ -884,7 +1101,15 @@ export class Vehicle {
     // around on numerical noise. But only on ground flat enough that gravity is not asking
     // it to roll — otherwise this quietly becomes a handbrake and the car sits on a 20°
     // slope forever, which is not a thing cars do.
-    if (vMag < 0.25 && this.throttle < 0.02 && Math.abs(slopeLong) < 0.55) {
+    //
+    // THE THIRD PLACE the reverse bug was hiding: `effectiveThrottle`, not `this.throttle` —
+    // while reversing, `this.throttle` is genuinely 0 (the driver's foot is on the brake,
+    // which is the accelerator in reverse), so this fired on every single step at walking
+    // pace and multiplied vLong by 0.9 a step, a 90%-a-frame bleed that a modest ~1300 N
+    // reverse push cannot outrun. Measured: reverse settled at a permanent 0.06 m/s (0.2
+    // km/h) — technically moving, in no sense "driving backwards" — until this line also
+    // read the reverse pedal as what it is.
+    if (vMag < 0.25 && effectiveThrottle < 0.02 && Math.abs(slopeLong) < 0.55) {
       vLong *= 0.9;
       vLat *= 0.9;
       this.yawRate *= 0.85;
@@ -1065,12 +1290,45 @@ export class Vehicle {
     this._gRatePrev = gEff;
     this._prevGroundRoll = this.groundRoll;
 
-    /* What the renderer reads. The ground is in here at full weight — main.js used to add
-     * 60% of it on top of these, with the pitch sign the wrong way round, and that is the
-     * whole of the "car points into the hill" complaint. visualRollMul is applied to the
-     * spring lean only, because exaggerating a rollover would put the car through the floor. */
-    this.roll = this.groundRoll + this._lean * BODY.visualRollMul + this._tip;
-    this.pitch = this.groundPitch + this._dive;
+    /* What the renderer reads. main.js used to add 60% of the ground term on top of these,
+     * with the pitch sign the wrong way round, and that was the whole of the "car points
+     * into the hill" complaint — fixed two sessions ago. visualRollMul is applied to the
+     * spring lean only, because exaggerating a rollover would put the car through the floor.
+     *
+     * THE GROUND-FOLLOWING TERM IS RATE-LIMITED HERE, not taken raw. Measured directly
+     * (`_scratch-probe3.mjs`, driving a real road and sweeping the lateral offset): a car
+     * that stays fully on the made surface never reads more than 7° of ground roll anywhere
+     * along 400 sampled points on a real road, but drift even 1.3 m past the tarmac edge —
+     * an ordinary wide line through a bend, not a crash — and it can land on the road's own
+     * embankment shoulder, which is routinely 20-35° within a couple of metres of the edge by
+     * design (terrain.js's BATTER; the shoulder has to be that steep or the fills would be
+     * absurdly wide). Averaging one wheel there against three still on flat tarmac used to
+     * reach the body as up to ~35° of roll, instantly, in a single 8 ms step, because nothing
+     * stood between the raw wheel-probe reading and `this.roll` — no per-wheel suspension
+     * compliance, no time constant, "arrives instantly" taken completely literally. That is
+     * the "tilts like a motorbike" complaint on ground that is not a bug, just adjacent to
+     * ground that is steep on purpose, with no suspension travel standing in the way the way
+     * a real car's would.
+     *
+     * A rate cap fixes the SNAP without adding lag to a genuine hill: BODY.groundFollowRate
+     * is set from the same "a bank taken at speed is about 3 rad/s" figure TIP.bankRate is
+     * already built on below, comfortably above the ~0.4 rad/s (worst measured, diag-body.mjs
+     * section 3) a real climbing road ever actually asks for, and far below the >70 rad/s an
+     * unfiltered verge clip demands in one physics step. It is a RATE LIMIT, not a low-pass:
+     * it still reaches the true value exactly once the target holds still, just not in zero
+     * time — so it fixes the snap without reintroducing the old "car points into the hill"
+     * lag complaint that "arrives instantly" was written to kill in the first place.
+     *
+     * Only the DISPLAYED attitude is smoothed. `this.groundRoll`/`this.groundPitch`
+     * themselves are left raw and instantaneous on purpose — the tip solver's own bank-rate
+     * detection (`_gRate` above) and the tripping force both key off the real, un-smoothed
+     * ground truth, so a genuine bank still triggers a rollover exactly as fast as it always
+     * did; only what reaches the renderer changes. */
+    const rollStep = BODY.groundFollowRate * dt;
+    this._smRoll += clamp(this.groundRoll - this._smRoll, -rollStep, rollStep);
+    this._smPitch += clamp(this.groundPitch - this._smPitch, -rollStep, rollStep);
+    this.roll = this._smRoll + this._lean * BODY.visualRollMul + this._tip;
+    this.pitch = this._smPitch + this._dive;
 
     /* ── the limit cue ─────────────────────────────────────────────────── */
     // A browser game has no force feedback, so "how close am I?" has to live in the render

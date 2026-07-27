@@ -140,7 +140,16 @@ export const TERRAINS = {
   dunes: {
     label: 'Dunes',
     blurb: 'Rose and ochre sand sea. Loose grip, long crests, the road half-buried.',
-    amp: 0.9,
+    /* Playtest, round 2: "dunes must be a new desert theme... dunes smooth but tall", not
+     * another hilly preset with a sand texture. `amp` raised from the old 0.9 — this preset's
+     * own bias already pushes HIGHLAND weight down to 0.2, so the boundary hot-spot that
+     * capped how far `BIOME_TERRAIN[DUNES].amp` itself could move (see biomes.js) is far
+     * weaker here, and this multiplier is scoped to this preset alone: it cannot touch
+     * `diag-cliffs.mjs`'s default-preset gate, which never calls applyTerrain. 0.98 keeps
+     * `node tools/diag-relief.mjs dunes`'s own cliffs% comfortably under alpine's ("the most
+     * dramatic and the least forgiving") — taller without becoming the jaggedest preset in
+     * the game, which is not what "smooth" asked for. */
+    amp: 0.98,
     wave: 1.1,
     peak: 0.8,
     bias: [0.3, 0.9, 0.2, 3.5, 0.2],

@@ -17,6 +17,71 @@ import { mountInvite } from '../net/invite.js';
 
 const ESC = ['Escape', 'KeyM'];
 
+/* ── the controls, as they actually are ──────────────────────────────────────
+ * "Controls need to be visible in the Garage" — the operator. This is the only place in the
+ * running game that says what the keys do, so it has to be RIGHT, and every line below was
+ * read out of the code that handles the key rather than out of a document:
+ *
+ *   src/car/input.js KEYMAP        steering, throttle, brake, handbrake, fine, attack, and
+ *                                  the tapped() actions main.js consumes
+ *   src/main.js frame()            camera C, reverse B, next car V, horn H, radio N,
+ *                                  auto-drive G, reset R/T, give fuel F, assists 1-4
+ *   src/ui/musicPanel.js           the music window on J
+ *   this file, ESC above           Escape / M
+ *
+ * TWO BINDINGS IN KEYMAP ARE NOT LISTED, ON PURPOSE. `shiftUp: ['KeyE','ShiftRight']` and
+ * `shiftDown: ['KeyQ']` exist in input.js's map but NOTHING reads them — `tapped('shiftUp')`
+ * and `tapped('shiftDown')` appear nowhere in src/ or tools/, and vehicle.js's gearbox shifts
+ * itself (see its up/down logic around `this.gear++`). Printing them here would be telling the
+ * player about a control that does nothing, which is worse than not mentioning gears at all.
+ *
+ * input.js also exports a KEY_HELP array. It is imported by nobody, and it is out of date —
+ * no F, no J, no Ctrl, and it credits Shift generally rather than the left one. It is not the
+ * source of truth and it is not used here; consolidating the two means editing input.js, which
+ * is not this pass's file. Flagged rather than silently duplicated.
+ *
+ * Shape: [group heading, [[keycaps], what it does]]. */
+const CONTROLS = [
+  [
+    'Driving',
+    [
+      [['W', '↑'], 'throttle'],
+      [['S', '↓'], 'brake'],
+      [['A', 'D'], 'steer — or ← →'],
+      [['Space'], 'handbrake'],
+      [['B'], 'reverse'],
+      [['Shift'], 'gentle — eases the throttle and the steering for cruising'],
+      [['Ctrl'], 'keen — sharper steering, for when you mean it'],
+      [['1', '2', '3', '4'], 'assists: cruise · sport · off · hardcore'],
+    ],
+  ],
+  [
+    'Everything else',
+    [
+      [['R'], 'put me back on the road (T does it too)'],
+      [['C'], 'change camera'],
+      [['V'], 'next car'],
+      [['G'], 'auto-drive — sit back and watch'],
+      [['N'], 'radio station'],
+      [['J'], 'music window'],
+      [['H'], 'horn'],
+      [['F'], 'give fuel to a driver beside you'],
+      [['Esc', 'M'], 'this Garage'],
+    ],
+  ],
+  [
+    'Not the keyboard',
+    [
+      // input.js poll(): axes[0] steering with a radial deadzone, buttons[7] throttle,
+      // buttons[6] brake, buttons[0] handbrake. Devices are combined by magnitude and the game
+      // never auto-switches between them, so a plugged-in pad never steals the keyboard.
+      [['Gamepad'], 'left stick steers · triggers are throttle and brake · A is the handbrake'],
+      // input.js attachTouch(), wired to the canvas in main.js.
+      [['Touch'], 'left half of the screen steers · right half is throttle above, brake below'],
+    ],
+  ],
+];
+
 export class Menu {
   /**
    * @param {object} hooks
@@ -44,6 +109,18 @@ export class Menu {
 
         <h3>Land <small>reloads the world</small></h3>
         <div class="row" data-group="terrain"></div>
+
+        <h3>Controls <small>a gamepad or a touchscreen works too</small></h3>
+        ${CONTROLS.map(
+          ([heading, rows]) => `
+        <p class="keysHead">${heading}</p>
+        <dl class="keys">${rows
+          .map(
+            ([keys, what]) =>
+              `<div><dt>${keys.map((k) => `<kbd>${k}</kbd>`).join('')}</dt><dd>${what}</dd></div>`,
+          )
+          .join('')}</dl>`,
+        ).join('')}
 
         <div class="foot">
           <button data-act="auto">Auto-drive</button>

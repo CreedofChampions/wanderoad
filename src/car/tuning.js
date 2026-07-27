@@ -242,6 +242,18 @@ export const BRAKE = {
   handbrakeYawCap: (130 * Math.PI) / 180,
 };
 
+/* ── reverse ────────────────────────────────────────────────────────────── */
+/* Reverse is driven by the brake pedal (see vehicle.js), and needs its own honest top-speed
+ * governor rather than leaning on engine braking to accidentally hold it back — measured:
+ * without one, unclamped reverse settles near 32 m/s (rolling resistance and drag are the
+ * only things technically opposing it), which is not "deliberately slow" by any reading. A
+ * taper over the last `taperBand` m/s, the exact technique the forward `vMax` governor in
+ * vehicle.js already uses, so reverse tops out the same honest way forward top speed does. */
+export const REVERSE = {
+  maxSpeed: 8, // m/s, ~29 km/h — a real reverse gear, not a sprint
+  taperBand: 3, // m/s over which the force eases out approaching maxSpeed
+};
+
 /* ── gearbox ────────────────────────────────────────────────────────────── */
 export const GEARBOX = {
   shiftTimeAuto: 0.14,
@@ -300,6 +312,22 @@ export const BODY = {
   loadTauPitch: 0.12,
   loadTauRoll: 0.15,
   rollStiffFront: 0.55,
+  /* How fast the DISPLAYED ground-following roll/pitch is allowed to move, rad/s — see the
+   * "what the renderer reads" comment in vehicle.js for the measurement this comes from.
+   * 3.0 matches the "a bank taken at speed is about 3 rad/s" figure TIP.bankRate is already
+   * built on elsewhere in this file: comfortably above the ~0.4 rad/s a real climbing road
+   * asks for, and far below the ~70 rad/s a raw wheel-probe snap onto a road's own
+   * embankment shoulder demands in a single 8 ms step. A rate limit, not a low-pass: it
+   * still reaches the true value exactly, just not instantly. */
+  groundFollowRate: 3.0,
+  /* Roof height above the ground-contact plane, as a multiple of the tier's own cgHeight —
+   * used only to keep a rolled body from sinking through the terrain (see the rollover
+   * ground-collision comment in vehicle.js). Not a duplicate of model.js's hull dimensions:
+   * cross-checked against them (roof 1.16–1.36 m across the three tiers, cgHeight 0.38–0.45
+   * m, a consistent 2.95–3.05x) and rounded up for margin so it is never too SHORT a
+   * roof — a little generous just means the car settles a few cm proud of the ground when
+   * upside down, which is invisible; too short is the clipping bug this exists to fix. */
+  roofMul: 3.1,
 };
 
 /* ── airborne ───────────────────────────────────────────────────────────

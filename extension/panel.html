@@ -3,26 +3,219 @@
   <head>
     <meta charset="utf-8" />
     <title>Wanderoad</title>
+    <!-- The game is the HOST surface here and the video is the guest inside it — the operator's
+         ask, and the inversion of the in-page dock (extension/dock.js), where the game is the
+         guest on someone else's page. This panel is ours end to end, so nothing here is
+         "altering the Service": we are not inside YouTube's page, we are embedding a standard
+         public embed inside our own, exactly the way any third-party site does.
+
+         Manifest V3 forbids remotely hosted CODE, so the GAME is still bundled (game/index.html
+         below is a local file, never fetched). An <iframe> pointing at youtube.com's own embed
+         endpoint is not remotely hosted code in that sense — it is a document in its own
+         origin, sandboxed from us by the browser, and it is the same move src/ui/musicPanel.js
+         already makes inside the game itself. That pattern is reused here rather than a second
+         one invented.
+
+         NOTHING IS READ. This panel never sees what is playing, never calls a YouTube API,
+         never scrapes a result list. The search box below builds a URL out of the text the
+         player typed and nothing else — see extension/panel.js. -->
     <style>
+      :root {
+        --ink: #2b3242;
+        --cream: #f6ecd8;
+        --teal: #4e7f79;
+      }
       html,
       body {
         margin: 0;
         height: 100%;
         background: #0e1219;
         overflow: hidden;
+        font: 14px/1.5 'Iowan Old Style', Palatino, Georgia, serif;
+        color: var(--cream);
       }
-      iframe {
+
+      /* ── the 50/50 ──────────────────────────────────────────────────────
+       * Two halves, each `flex: 1 1 0` with `min-height/min-width: 0`, so they are exactly
+       * half the panel each whatever is inside them (without the min-*: 0 an iframe's
+       * intrinsic size wins and the split drifts). The GAME half is first, because the game
+       * is the host: it gets the top of a tall panel and the left of a wide one.
+       *
+       * A Chrome side panel is tall and narrow by default, so the default split is a COLUMN.
+       * Drag it wide enough to be landscape and it becomes a ROW — still 50/50, just split the
+       * other way, which is the only sensible thing to do with a 16:9 video in a wide panel. */
+      #split {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+      @media (min-aspect-ratio: 1/1) {
+        #split {
+          flex-direction: row;
+        }
+      }
+      .half {
+        flex: 1 1 0;
+        min-height: 0;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+      }
+      .half iframe {
         border: 0;
         width: 100%;
-        height: 100%;
+        flex: 1 1 0;
+        min-height: 0;
         display: block;
+      }
+
+      /* ── the watch half ─────────────────────────────────────────────── */
+      #watch {
+        background: #11151d;
+        border-top: 1px solid rgba(246, 236, 216, 0.14);
+      }
+      @media (min-aspect-ratio: 1/1) {
+        #watch {
+          border-top: 0;
+          border-left: 1px solid rgba(246, 236, 216, 0.14);
+        }
+      }
+      #bar {
+        display: flex;
+        gap: 0.35rem;
+        align-items: center;
+        padding: 0.4rem 0.5rem;
+        flex: none;
+        background: rgba(20, 26, 38, 0.9);
+      }
+      #q {
+        flex: 1 1 auto;
+        min-width: 0;
+        font: inherit;
+        font-size: 0.85rem;
+        color: var(--cream);
+        background: rgba(246, 236, 216, 0.08);
+        border: 1px solid rgba(246, 236, 216, 0.2);
+        border-radius: 999px;
+        padding: 0.34rem 0.8rem;
+        outline: none;
+      }
+      #q::placeholder {
+        color: rgba(246, 236, 216, 0.45);
+      }
+      #q:focus {
+        border-color: var(--teal);
+        background: rgba(246, 236, 216, 0.13);
+      }
+      #bar button {
+        flex: none;
+        font: inherit;
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        color: var(--cream);
+        background: rgba(78, 127, 121, 0.55);
+        border: 1px solid rgba(246, 236, 216, 0.18);
+        border-radius: 999px;
+        padding: 0.34rem 0.75rem;
+        cursor: pointer;
+      }
+      #bar button:hover {
+        background: var(--teal);
+      }
+      #bar button.ghost {
+        background: rgba(246, 236, 216, 0.07);
+      }
+      #bar button.ghost:hover {
+        background: rgba(246, 236, 216, 0.16);
+      }
+
+      /* The stage starts as a calm placeholder and only becomes an iframe once the player
+       * asks for something — so an install that never uses the search box never sends a
+       * single request to youtube.com. Same lazy-load reasoning as src/ui/musicPanel.js. */
+      #stage {
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.9rem;
+        text-align: center;
+      }
+      #stage p {
+        margin: 0;
+        max-width: 22rem;
+        font-size: 0.86rem;
+        line-height: 1.7;
+        opacity: 0.62;
+      }
+      #stage.playing {
+        padding: 0;
+        display: block;
+      }
+      #stage.playing p {
+        display: none;
+      }
+      #stage iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        display: block;
+      }
+
+      /* Folding the watch half away gives the game the whole panel. `display: none` under a
+       * class this file owns outright — never the `hidden` attribute, which a stylesheet rule
+       * can and once did beat (see the scar comment on #menu[hidden] in src/ui/style.css). */
+      #split.solo #watch {
+        display: none;
+      }
+      #split.solo #fold::after {
+        content: 'watch';
+      }
+      #fold::after {
+        content: 'hide';
       }
     </style>
   </head>
   <body>
-    <!-- The game is bundled inside the extension, not fetched. Manifest V3 forbids remotely
-         hosted code, and a local copy also means it works with no connection at all. It
-         starts in solo mode; multiplayer is something the player turns on. -->
-    <iframe src="game/index.html?offline&feel=cruiser&terrain=meadow" allow="gamepad *; autoplay"></iframe>
+    <div id="split">
+      <!-- The game half. Bundled inside the extension, not fetched: Manifest V3 forbids
+           remotely hosted code, and a local copy also means it works with no connection at
+           all. It starts in solo mode; multiplayer is something the player turns on.
+
+           `car=estate`, not the old `feel=cruiser`: car and feel merged into one choice
+           (src/game/garage.js FLEET) after this panel was first wired up, so `?feel=` no
+           longer selects the driving physics, only `?car=` does. `estate` is the same calm,
+           forgiving starter car the old cruiser preset pointed at, named explicitly rather
+           than relied on as an implicit default. -->
+      <div class="half" id="drive">
+        <iframe
+          title="Wanderoad"
+          src="game/index.html?offline&car=estate&terrain=meadow"
+          allow="gamepad *; autoplay"
+        ></iframe>
+      </div>
+
+      <div class="half" id="watch">
+        <form id="bar" autocomplete="off">
+          <input
+            id="q"
+            type="search"
+            placeholder="paste a link, or search for something to watch"
+            aria-label="paste a video link, or search"
+          />
+          <button type="submit" id="go">watch</button>
+          <button type="button" class="ghost" id="fold" aria-label="fold the video away"></button>
+        </form>
+        <div id="stage">
+          <p id="hint">
+            Half the panel is yours to watch in. Paste a video or playlist link and it plays
+            right here, beside the road. Type words instead and the search opens in a tab —
+            pick something, copy its link, drop it back in the box.
+          </p>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="panel.js"></script>
   </body>
 </html>

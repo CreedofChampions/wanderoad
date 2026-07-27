@@ -149,6 +149,11 @@ export function applyCarFeel(car) {
   /* Each car's brakes. This was declared in the fleet and then never applied — the Patrol's
    * "strongest brakes in the fleet" and the Estate's forgiving ones were the same brakes. */
   BRAKE.torque = BRAKE.baseTorque * (f.brakeMul || 1);
+  /* The Rally's `offRoad: 1.35` was the same story a second time — declared above ("the only
+   * one that is genuinely happy off the tarmac") and read nowhere. car/vehicle.js's dunes
+   * sand-bog severity now divides by this, so the Rally takes proportionally longer to bog
+   * down than the rest of the fleet instead of the number sitting there doing nothing. */
+  TYRE.offRoadMul = f.offRoad || 1;
   return f;
 }
 

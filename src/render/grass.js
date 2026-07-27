@@ -850,6 +850,11 @@ export class Grass {
   /* ── per-frame ───────────────────────────────────────────────────────────── */
 
   /**
+   * `camX`/`camZ`/`camY` are the RING ANCHOR — main.js passes the car's position, on purpose
+   * (see the file banner's point 4: "the rings re-centre on the car"), so the sward around
+   * the car stays resident no matter where the camera itself roams. `_draw()` no longer takes
+   * them: visibility reads the true camera straight out of the shared `U` block instead — see
+   * its own comment for why that split matters.
    * @param {number} camX
    * @param {number} camZ
    * @param {number} camY
@@ -865,7 +870,7 @@ export class Grass {
     this.stats.buildMs = performance.now() - t0;
     this.stats.built += built;
 
-    this._draw(camX, camZ, camY);
+    this._draw();
   }
 
   /** One `Terrain` for every ring, rebuilt only when the car leaves the box it covers. */
@@ -1205,8 +1210,36 @@ export class Grass {
     chunk.dirty = false;
   }
 
-  /** Distance bands, cone cull and the per-chunk instance count. No allocation. */
-  _draw(camX, camZ, camY) {
+  /**
+   * Distance bands, cone cull and the per-chunk instance count. No allocation.
+   *
+   * edited by AI: reads the TRUE camera position/direction (`U.uCamPos`/`U.uCull`, already
+   * refreshed by main.js earlier in the same frame — see `U.uCamPos.value.copy(camera.position)`
+   * ahead of every `grass.update()` call) instead of the car position `update()` receives.
+   * Operator report: "cinematic cam shows grass popping out of existence behind car."
+   *
+   * Root cause, confirmed by reading main.js's own frame loop: `grass.update(car.x, car.z,
+   * car.y, dt)` is called with the CAR's position (the one caller in this file that is NOT
+   * `camera.position` — flora/water/clouds/wind all get the real camera). That is fine for
+   * ring RESIDENCY (`_recentre`/`_ensureRegion` stay keyed to the car on purpose, see the
+   * file banner's point 4 — the sward under and around the car must stay built regardless of
+   * where the camera roams), but this function used the SAME car-relative point for VISIBILITY
+   * too: the cone-cull test compares a chunk's offset from the point passed in against
+   * `uCull.xy`, which is always the true camera's forward direction. The sport camera sits
+   * within about 6-7 m of the car and pointed much the same way, so the two rarely disagree.
+   * `src/car/camera.js`'s DRIFT orbit (auto-drive only) swings the rig up to roughly 20 m out
+   * and up to ~45 deg off the car's own heading while looking back across it — at that point
+   * a chunk can be squarely inside the true camera's view and still fail a test measured from
+   * 20 m and 45 deg away, so an already-built, already-resident chunk gets `mesh.visible =
+   * false` for a frame or several as the orbit sweeps — which is exactly "grass popping out of
+   * existence", since nothing about the chunk's own data changed. Traced with
+   * `tools/diag-grasscine.mjs`, which reproduces the real DRIFT orbit's position/angle
+   * envelope; see its output for the before/after ring-residency trace. Distance bands move to
+   * the true camera too, for the same reason the shader's own per-blade density already uses
+   * it — consistency, not just the cull.
+   */
+  _draw() {
+    const trueCam = U.uCamPos.value;
     const cull = U.uCull.value;
     let drawn = 0;
     for (const ring of this._rings) {
@@ -1223,9 +1256,9 @@ export class Grass {
           mesh.visible = false;
           continue;
         }
-        const dx = c.wx - camX;
-        const dy = c.wy - camY;
-        const dz = c.wz - camZ;
+        const dx = c.wx - trueCam.x;
+        const dy = c.wy - trueCam.y;
+        const dz = c.wz - trueCam.z;
         const dd = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (dd - cs * 0.75 > R.far) {
           mesh.visible = false;

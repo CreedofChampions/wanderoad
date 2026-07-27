@@ -5,7 +5,7 @@
  */
 import { cpSync, rmSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
 const dist = resolve(root, 'dist');
@@ -29,9 +29,20 @@ if (manifest.version !== pkg.version) {
 const zip = resolve(root, `wanderoad-extension-${manifest.version}.zip`);
 rmSync(zip, { force: true });
 try {
+  // `join(extDir, '*')` — NOT a `${extDir}\*` template literal. Inside a JS template literal
+  // `\*` is an unrecognized escape and the backslash is silently dropped, collapsing the path
+  // to `...extension*`: a glob matching the `extension` FOLDER itself (there being no other
+  // sibling starting with that prefix), not its contents. Compress-Archive then zips the
+  // folder as a single nested entry, so manifest.json lands at `extension\manifest.json`
+  // inside the zip instead of at the zip root — which the Chrome Web Store upload requires
+  // and which "unzip, then Load unpacked on the top folder" also silently gets wrong. This
+  // ran without ever throwing, "packed …zip" printed either way — the bug was invisible
+  // unless someone opened the archive. `join()` inserts a real path separator character at
+  // runtime, so it is not subject to source-level escape parsing.
+  const glob = join(resolve(root, 'extension'), '*');
   execFileSync(
     'powershell',
-    ['-NoProfile', '-Command', `Compress-Archive -Path '${resolve(root, 'extension')}\*' -DestinationPath '${zip}' -Force`],
+    ['-NoProfile', '-Command', `Compress-Archive -Path '${glob}' -DestinationPath '${zip}' -Force`],
     { stdio: 'inherit' }
   );
   console.log('packed', zip);

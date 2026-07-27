@@ -1673,10 +1673,27 @@ export class RoadField {
     let widthSum = 0;
     let cover = 0;
     let edgeMax = 0;
-    let bd = Infinity;
+    // Identity of whichever edge currently holds `cover` (the largest single weight seen) —
+    // tier/tangent are directions, not heights, so unlike y/width they are picked from ONE
+    // edge rather than blended; see the note where `cover` is updated below.
     let bt = 0,
       btx = 1,
       btz = 0;
+    /* `out.d` is the TRUE nearest edge, tracked unconditionally below (every edge that clears
+     * `reach`, before the weight gate can `continue` past it) rather than blended, or handed
+     * to whichever edge currently holds `cover`, the way tier/tangent are just below.
+     * Distance-to-road is not a quantity a junction should average or hand to the higher-
+     * weighted edge: a point standing dead centre on edge A (its own `ed` is 0) with a wider
+     * edge B merely nearby would report several metres out instead of 0, and groundFromCarve
+     * (terrain.js) reads `d` against `y`/`width` to size its batter falloff — inflating it
+     * there under-commits to the road you are actually standing on and over-blends toward the
+     * raw land beside it. On a lakeside cutting that read as wet while standing still on dry
+     * tarmac (tools/bench-rescue.mjs's lakeside-road check). This also doubles as the fallback
+     * for out.tier/tx/tz below when nothing has any blend weight at all (wSum stays 0). */
+    let bdAny = Infinity;
+    let btAny = 0,
+      btxAny = 1,
+      btzAny = 0;
     /* The raw land here, evaluated at most ONCE and only if some edge actually needs it.
      * It used to be sampled inside the per-edge loop, so a point near a junction paid for
      * the same biome-and-relief evaluation three times — and it is the single most expensive
@@ -1724,22 +1741,13 @@ export class RoadField {
       }
       if (ed > reach) continue;
 
-      /* Nearest-edge bookkeeping (bd/bt/btx/btz — groundFromCarve reads bd straight off `out.d`
-       * for the batter shoulder) has to happen for every edge that clears `reach`, BEFORE the
-       * weight threshold below can `continue` past it. It used to sit after that continue, so
-       * the edge that is geometrically closest — and is exactly what a point on its shoulder,
-       * away from every OTHER road, wants for its batter — could drop out of the running the
-       * moment its own blend weight dipped under 0.0005, and `d` would jump to whatever edge
-       * was next, tens of metres further out. Measured over the alpine preset that was worth
-       * an 18 m step in Terrain.height() 2 cm away, dwarfing the width/edge cliffs this
-       * function was already rewritten to remove. A weight near zero barely moves wSum/ySum
-       * either way, so gating the BLEND on it is fine; gating WHICH EDGE IS NEAREST on it is
-       * not — those are different questions and only one of them cares about the threshold. */
-      if (ed < bd) {
-        bd = ed;
-        bt = e.tier;
-        btx = etx;
-        btz = etz;
+      // Loose fallback: every edge that clears the coarse box, regardless of its own weight —
+      // see the comment on bdAny above.
+      if (ed < bdAny) {
+        bdAny = ed;
+        btAny = e.tier;
+        btxAny = etx;
+        btzAny = etz;
       }
 
       /* Shoulder width scales with the height difference this edge is asking for, so an
@@ -1749,12 +1757,31 @@ export class RoadField {
        * identically zero for ed <= half whatever the shoulder works out to — so the weight
        * is exactly 1 and the land sample that only feeds the shoulder is not needed. That is
        * not an approximation, it is the same number by a shorter route, and it is the whole
-       * population of points the road ribbon asks about. */
+       * population of points the road ribbon asks about.
+       *
+       * drop is NOT capped here — see terrain.js's own BATTER/groundFromCarve, which uses this
+       * identical formula on this identical drop, uncapped, on purpose ("capping the width
+       * while the height keeps growing is how you build a wall"). This copy used to cap it at
+       * MAX_EARTHWORK + 4, sized for a different question (how far a ROAD's own profile can
+       * sit from the land directly under it) than the one `drop` actually answers here (how far
+       * THIS query point's land sits from the road) — the two disagree by exactly the query
+       * point's own local relief, which is unbounded by that clamp. The result: a point could
+       * read mask/cover near zero here (outside the capped shoulder) while groundFromCarve,
+       * five lines later, blended a third of the way to a road 40 m away anyway, because ITS
+       * shoulder was never capped. That gap between "roads.js says negligible" and "terrain.js
+       * still blends" is where a smoothly-fading tail turns into the one or two dark, near-
+       * vertical strips the operator's screenshots showed — mask crossing terrain.js's 0.001
+       * cutoff at a totally different distance than where the uncapped falloff is actually
+       * small. Matching the two removes the gap; `Math.min(..., reach)` below is a safety
+       * ceiling only, tied to the box this edge already qualified against, never tighter than
+       * what real measurement needed (drop maxed out at 29 m over a 2.4 km square around the
+       * default spawn, seed 20260726 — the same sample diag-cliffs.mjs walks; the ceiling only
+       * bites past ~41–44 m, well clear of that). */
       let w = 1;
       if (ed > half) {
         if (landH !== landH) landH = this._land(x, z);
         const drop = Math.abs(ey - landH);
-        const shoulder = half + 3.0 + Math.min(drop, MAX_EARTHWORK + 4) * 1.6;
+        const shoulder = Math.min(half + 3.0 + drop * 1.6, reach);
         w = 1 - smoothstep(half, shoulder, ed);
         if (w <= 0.0005) continue;
       }
@@ -1767,17 +1794,25 @@ export class RoadField {
       // from one to the other — that flip is exactly where every 0.5 m cliff under a road
       // measured out to.
       widthSum += w * e.width;
-      cover = Math.max(cover, w);
+      // tier/tangent are a direction and a tier number, not heights — blending two crossing
+      // roads' tangents would point neither along the actual carriageway, so these are picked
+      // from whichever single edge currently holds the largest weight rather than averaged.
+      if (w > cover) {
+        cover = w;
+        bt = e.tier;
+        btx = etx;
+        btz = etz;
+      }
       // "Am I on SOME carriageway" is a max over edges, not a property of whichever is
       // nearest — max of continuous functions is continuous, nearest-edge selection is not.
       const edgeHere = 1 - smoothstep(half - 0.4, half + 0.35, ed);
       if (edgeHere > edgeMax) edgeMax = edgeHere;
     }
 
-    out.d = bd;
-    out.tier = bt;
-    out.tx = btx;
-    out.tz = btz;
+    out.d = bdAny;
+    out.tier = wSum > 1e-6 ? bt : btAny;
+    out.tx = wSum > 1e-6 ? btx : btxAny;
+    out.tz = wSum > 1e-6 ? btz : btzAny;
     out.width = wSum > 1e-6 ? widthSum / wSum : 0;
     out.mask = cover;
     out.edge = edgeMax;

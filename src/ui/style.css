@@ -721,3 +721,123 @@ canvas {
   box-shadow: 0 0 8px rgba(200, 80, 63, 0.7);
   transition: none;
 }
+
+/* ── game title ───────────────────────────────────────────────────────────
+ * A quiet wordmark, not a splash — see the comment beside its construction in hud.js for why
+ * this exact spot: bottom-left has open headroom between the music tab up in the corner and
+ * the biome/coords block down at the very edge, the one stretch of screen nothing else claims.
+ * It needs no opacity/transition rule of its own here: it is a normal child of #hud and simply
+ * inherits that element's existing cinematic dim-then-lift (Hud.setCinematic in hud.js), so it
+ * fades in with everything else the first time the HUD appears and then just sits there, quiet,
+ * forever after — the same "fade in on first load" every other instrument on this screen
+ * already gets, at the cost of zero new transition/animation rules. The bottom clamp's minimum
+ * (6rem) alone clears #place's tallest measured extent (4.86rem, at 1400/1024/1920-wide
+ * viewports, biome font and offset both pinned to their own max clamp) with margin at every
+ * viewport tools/diag-hud.mjs resolves geometry at, mobile included. */
+#gameTitle {
+  position: absolute;
+  left: clamp(1rem, 4vw, 3rem);
+  bottom: clamp(6rem, 11vh, 7rem);
+  font-size: clamp(0.78rem, 1.8vw, 1rem);
+  letter-spacing: 0.14em;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+/* ── fleet unlock icons ──────────────────────────────────────────────────
+ * One small badge per car in src/game/garage.js's FLEET, riding the unlock bar's own track at
+ * the car's own unlock distance (fleetX() in hud.js, sharing milestoneX()'s log scale so the
+ * two overlays agree on where a given distance sits). `bottom: 10px` lifts every icon clear of
+ * the track (max 8px tall, `.live`) and the milestone dots centred on it, so the two families
+ * never compete for the same pixels. Colour language matches the milestone dots directly above
+ * on purpose, so the bar reads as one axis rather than two: dim cream = still ahead, warm gold
+ * = the one this run is working towards right now, blue = already earned — the exact same three
+ * meanings `.milestone` above already uses for upcoming / current / passed. */
+#unlockBar .carIcon {
+  position: absolute;
+  left: 0;
+  bottom: 10px;
+  transform: translateX(-50%);
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 7.5px;
+  font-weight: 600;
+  color: var(--ink);
+  background: rgba(140, 190, 230, 0.9);
+  border: 1px solid rgba(180, 214, 236, 0.9);
+  transition: background 0.6s ease, border-color 0.6s ease, box-shadow 0.6s ease, color 0.6s ease;
+}
+#unlockBar .carIcon.locked {
+  background: rgba(246, 236, 216, 0.14);
+  border-color: rgba(246, 236, 216, 0.3);
+  color: rgba(246, 236, 216, 0.55);
+}
+#unlockBar .carIcon.current {
+  background: var(--warm);
+  border-color: var(--warm);
+  color: var(--ink);
+  box-shadow: 0 0 7px rgba(232, 201, 138, 0.8);
+}
+
+/* ── garage: the control list ─────────────────────────────────────────────
+ * "Controls need to be visible in the Garage" — the operator. Appended, never woven into the
+ * garage block above, so this is additive: nothing here re-declares an existing rule.
+ *
+ * NOTHING IN HERE MAY HIDE ANYTHING. That is not a style preference, it is the scar on
+ * #menu[hidden] a few hundred lines up — this game once shipped unplayable because an author
+ * `display` rule beat a `hidden` attribute. So there is deliberately no display:none, no
+ * visibility, no opacity:0, no zero height and no zero font-size anywhere below: the list is
+ * plain flow content inside .sheet and it is on screen whenever the garage is.
+ *
+ * Two columns when there is room, one when there is not, so it never becomes a wall of text
+ * on a phone or in the extension's side panel. .sheet already scrolls (max-height 88vh,
+ * overflow auto), so a long list lengthens the sheet rather than spilling out of it. */
+#menu .keysHead {
+  margin: 0.85rem 0 0.35rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+#menu .keys {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 0.3rem 1.4rem;
+}
+#menu .keys > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.12rem 0;
+}
+#menu .keys dt {
+  flex: 0 0 6.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.22rem;
+}
+#menu .keys dd {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  opacity: 0.82;
+}
+/* A keycap, not a button: no pointer, no hover, nothing to click. `#menu button` above styles
+ * the real controls and this must not read as one of them. */
+#menu .keys kbd {
+  font: inherit;
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  background: rgba(58, 67, 86, 0.09);
+  border: 1px solid rgba(58, 67, 86, 0.2);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 0.08rem 0.4rem;
+  white-space: nowrap;
+}

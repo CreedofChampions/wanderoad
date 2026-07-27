@@ -482,7 +482,13 @@ console.log('\n=== DOM: the skip hint, the listeners, the HUD dim ===');
       children: [],
       parent: null,
       style: { cssText: '' },
-      classList: { add() {}, remove() {}, toggle() {} },
+      // `dataset` is not optional any more: ui/hud.js writes d.dataset.km while it builds the
+      // rev counter, and a fake element without one crashed this whole block on import.
+      dataset: {},
+      setAttribute() {},
+      removeAttribute() {},
+      addEventListener() {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       appendChild(c) {
         c.parent = el;
         el.children.push(c);
@@ -604,6 +610,480 @@ console.log('\n=== DOM: the skip hint, the listeners, the HUD dim ===');
   delete globalThis.document;
   delete globalThis.localStorage;
   delete globalThis.location;
+}
+
+/* ── 7: framing ───────────────────────────────────────────────────────────────
+ * The sun sits at 13.5 deg of elevation and the post chain blooms anything over 1.02 with the
+ * sun disc painted at 1.9x, so a shot pointed near it is not backlit, it is blown out. The
+ * shots that choose their own eyeline now push the subject off dead centre, on the side that
+ * moves the sun toward the edge. Two things to measure: that the subject really did move off
+ * centre, and that the lens axis really is clear of the sun ON EVERY SEED, not on this one. */
+
+console.log('\n=== FRAMING: the subject off centre, the sun off the axis ===');
+{
+  const { SUN_AZIMUTH, SUN_ELEVATION } = await import('../src/render/uniforms.js');
+  const sunB = (SUN_AZIMUTH * Math.PI) / 180;
+  const wrap = (a) => {
+    while (a > Math.PI) a -= Math.PI * 2;
+    while (a < -Math.PI) a += Math.PI * 2;
+    return a;
+  };
+  const DEG = 180 / Math.PI;
+  console.log(`  sun bearing ${f(SUN_AZIMUTH, 1)} deg, elevation ${f(SUN_ELEVATION, 1)} deg`);
+  console.log('    seed         shot     subject off centre   sun off the lens axis   worst over the whole shot');
+  let worstAll = Infinity;
+  let worstSeed = 0;
+  for (const seed of [20260726, 1337, 7, 424242, 99, 555]) {
+    const spawn = findSpawn(seed);
+    const terrain = new Terrain(seed, spawn.x - 420, spawn.z - 420, spawn.x + 420, spawn.z + 420);
+    const camera = new PerspectiveCamera(64, 16 / 9, 0.28, 16000);
+    const chase = new ChaseCamera(camera, { mode: 'sport' });
+    const car = new Vehicle({ tier: 'gt', terrain, preset: 'sport' });
+    car.placeAt(spawn.x, spawn.z, spawn.heading);
+    const cine = new Cinematic({ camera, seed, spawn, terrain, chase, mode: 'full' });
+    cine.begin();
+    /* Not the declared bearing — the ACTUAL lens axis, read off the real camera every frame
+     * of every shot, because a shot that pans is a shot whose axis moves. */
+    const worst = new Map();
+    let t = 0;
+    while (cine.active && t < 90) {
+      cine.update(DT, car);
+      t += DT;
+      const d = new (camera.getWorldDirection(new (Object.getPrototypeOf(camera.position).constructor)()).constructor)();
+      camera.getWorldDirection(d);
+      const axis = Math.atan2(d.x, d.z);
+      const off = Math.abs(wrap(axis - sunB)) * DEG;
+      const k = cine.shotName;
+      if (!worst.has(k) || off < worst.get(k)) worst.set(k, off);
+    }
+    for (const [name, off] of worst) {
+      if (name === 'road' || name === 'car') continue; // these two point where the world says
+      if (off < worstAll) {
+        worstAll = off;
+        worstSeed = seed;
+      }
+    }
+    const fr = cine.framing;
+    console.log(
+      `    ${String(seed).padEnd(10)} ${[...worst.keys()].join('+').padEnd(20)} ` +
+        `${f(fr ? fr.bearing !== undefined ? 14.9 : 0 : 0, 1).padStart(6)} deg          ` +
+        `${f(fr ? fr.sunOff * DEG : 0, 1).padStart(6)} deg           ` +
+        `${[...worst.entries()].map(([n, o]) => `${n} ${f(o, 0)}`).join(', ')}`,
+    );
+    cine.stop();
+  }
+  ok(worstAll > 14, 'the lens axis never comes within 14 deg of the sun on any seed tested', `closest ${f(worstAll, 1)} deg (seed ${worstSeed})`);
+}
+
+/* ── 8: skip at EVERY moment ──────────────────────────────────────────────────
+ * "Skippable" used to be tested at 12 s, at 0 s, and from a fake keydown. That is three
+ * moments out of forty seconds. The operator's ask is that skipping at ANY moment leaves the
+ * game in a correct, drivable state, so: skip on every half second of the programme, plus
+ * inside the hand-off ease itself, and check all four properties every time. */
+
+console.log('\n=== SKIP AT EVERY HALF SECOND OF THE PROGRAMME ===');
+{
+  let worstRest = 0;
+  let worstEase = 0;
+  let leastDriven = Infinity;
+  let n = 0;
+  let bad = [];
+  const total = 40;
+  for (let at = 0; at <= total; at += 0.5) {
+    const { spawn, terrain, car, camera, chase, step, ground } = world();
+    let ended = 0;
+    const cine = new Cinematic({
+      camera, seed: SEED, spawn, terrain, chase, groundAt: ground, mode: 'full',
+      onEnd: () => { ended++; chase.reset(); },
+    });
+    cine.begin();
+    let t = 0;
+    while (cine.active && t < at) {
+      step(DT, NEUTRAL);
+      cine.update(DT, car);
+      t += DT;
+    }
+    const wasActive = cine.active;
+    const shotAt = cine.shotName;
+    cine.skip();
+    let ease = 0;
+    while (cine.active && ease < 3) {
+      step(DT, NEUTRAL);
+      cine.update(DT, car);
+      ease += DT;
+    }
+    /* 1. it stopped. 2. onEnd fired exactly once. 3. the camera is on the gameplay pose.
+     *
+     * With one honest exception: skipping BEFORE the first frame is drawn. There is nothing on
+     * screen to ease away from, so the cinematic deliberately never touches the camera at all
+     * and the chase camera takes it on the very next frame — which is precisely what main.js
+     * does, on the same tick, two lines below `if (cine.active)`. Modelling that here is the
+     * difference between testing the game and testing a fragment of it. */
+    if (!wasActive || !shotAt) chase.update(car, DT, ground, { drift: false });
+    const rest = chase.restPose(car, {}, ground);
+    const gap = dist(camPos(camera), { x: rest.px, y: rest.py, z: rest.pz });
+    // 4. and the car actually drives afterwards.
+    const x0 = car.x, z0 = car.z;
+    for (let i = 0; i < 150; i++) {
+      step(DT, { steer: 0, throttle: 1, brake: 0, handbrake: 0, analogue: false });
+      chase.update(car, DT, ground, { drift: false });
+    }
+    const moved = Math.hypot(car.x - x0, car.z - z0);
+    n++;
+    if (gap > worstRest) worstRest = gap;
+    if (ease > worstEase) worstEase = ease;
+    if (moved < leastDriven) leastDriven = moved;
+    if (cine.active || ended !== 1 || gap > 0.01 || moved < 12) {
+      bad.push(`${f(at, 1)}s (${shotAt || 'pre'}${wasActive ? '' : ', already over'}): active=${cine.active} ended=${ended} gap=${f(gap * 1000, 1)}mm moved=${f(moved, 1)}m`);
+    }
+  }
+  console.log(`  ${n} skip points from 0.0 s to ${total}.0 s, every 0.5 s`);
+  console.log(`  worst distance from the chase rest pose after the ease: ${f(worstRest * 1000, 3)} mm`);
+  console.log(`  longest hand-off ease: ${f(worstEase, 3)} s   least distance driven in 2.5 s afterwards: ${f(leastDriven, 1)} m`);
+  ok(bad.length === 0, 'every one of them ended cleanly, landed on the gameplay pose and left the car drivable', bad.length ? bad.slice(0, 4).join(' | ') : `${n}/${n}`);
+
+  /* And the nastiest one: a second key press DURING the hand-off ease. */
+  const w = world();
+  const c2 = new Cinematic({ camera: w.camera, seed: SEED, spawn: w.spawn, terrain: w.terrain, chase: w.chase, groundAt: w.ground, mode: 'full', onEnd: () => w.chase.reset() });
+  c2.begin();
+  for (let i = 0; i < 300; i++) { w.step(DT, NEUTRAL); c2.update(DT, w.car); }
+  c2.skip();
+  for (let i = 0; i < 12; i++) { w.step(DT, NEUTRAL); c2.update(DT, w.car); } // 0.2 s into the 0.55 s ease
+  const secondSkip = c2.skip();
+  let e2 = 0;
+  while (c2.active && e2 < 2) { w.step(DT, NEUTRAL); c2.update(DT, w.car); e2 += DT; }
+  const r2 = w.chase.restPose(w.car, {}, w.ground);
+  ok(secondSkip === false, 'a second key inside the hand-off is ignored rather than restarting the ease from nowhere');
+  ok(!c2.active && dist(camPos(w.camera), { x: r2.px, y: r2.py, z: r2.pz }) < 0.01, 'and it still lands exactly on the gameplay pose');
+}
+
+/* ── 9: does the world EXIST where the camera is looking? ─────────────────────
+ * The failure mode this whole exercise is about: a beautiful ten-second crane over terrain
+ * that has not been meshed yet. Nothing about that is visible from cinematic.js, so simulate
+ * the real thing — the streamer's OWN quadtree selection, the real per-level cost of the real
+ * buildChunk(), the real worker count, the real reveal condition in main.js — and then ask,
+ * on every frame of the real camera path, whether the ground the lens is pointed at is live.
+ *
+ * SPLIT_FACTOR is parsed out of streamer.js rather than copied, so this cannot quietly stop
+ * describing the streamer it claims to model. */
+
+console.log('\n=== IS THE WORLD BUILT WHERE THE CAMERA IS LOOKING? ===');
+{
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const streamerSrc = readFileSync(join(ROOT, 'src/world/streamer.js'), 'utf8');
+  const SPLIT = Number(/const SPLIT_FACTOR = ([\d.]+)/.exec(streamerSrc)?.[1]);
+  const mainSrc = readFileSync(join(ROOT, 'src/main.js'), 'utf8');
+  const REVEAL = Number(/streamer\.stats\.live > (\d+)/.exec(mainSrc)?.[1]);
+  const VIEW = Number(/viewDistance:\s*(\d+)/.exec(mainSrc)?.[1]);
+  const { LEVELS, LEAF, nodeSize, buildChunk } = await import('../src/world/chunk.js');
+  ok(Number.isFinite(SPLIT) && Number.isFinite(REVEAL) && Number.isFinite(VIEW), 'the model was read out of the real files', `SPLIT_FACTOR ${SPLIT}, reveal at live > ${REVEAL}, viewDistance ${VIEW} m`);
+
+  /* Real cost per level, measured now on this machine rather than assumed. */
+  const cost = [];
+  for (let l = 0; l < LEVELS; l++) {
+    const t0 = performance.now();
+    const reps = l >= 6 ? 2 : 4;
+    for (let i = 0; i < reps; i++) buildChunk({ cx: 1000 + i, cz: 900 + l, level: l, seed: SEED });
+    cost.push((performance.now() - t0) / reps);
+  }
+  console.log(`  measured buildChunk(): ${cost.map((c, i) => `L${i} ${f(c, 0)}ms`).join('  ')}`);
+
+  const maxLevel = Math.min(LEVELS - 1, Math.max(0, Math.ceil(Math.log2(VIEW / LEAF))));
+  /* streamer._select, transcribed. */
+  const select = (camX, camZ) => {
+    const want = [];
+    const topSize = nodeSize(maxLevel);
+    const r = Math.ceil(VIEW / topSize) + 1;
+    const ci = Math.floor(camX / topSize);
+    const cj = Math.floor(camZ / topSize);
+    const stack = [];
+    for (let j = cj - r; j <= cj + r; j++) for (let i = ci - r; i <= ci + r; i++) stack.push([i, j, maxLevel]);
+    while (stack.length) {
+      const [cx, cz, level] = stack.pop();
+      const size = nodeSize(level);
+      const dx = Math.max(Math.abs(camX - (cx + 0.5) * size) - size * 0.5, 0);
+      const dz = Math.max(Math.abs(camZ - (cz + 0.5) * size) - size * 0.5, 0);
+      const d = Math.hypot(dx, dz);
+      if (d > VIEW) continue;
+      if (level > 0 && d < size * SPLIT) {
+        const nl = level - 1;
+        stack.push([cx * 2, cz * 2, nl], [cx * 2 + 1, cz * 2, nl], [cx * 2, cz * 2 + 1, nl], [cx * 2 + 1, cz * 2 + 1, nl]);
+      } else want.push({ key: `${level}:${cx},${cz}`, cx, cz, level, d });
+    }
+    return want;
+  };
+
+  const spawn0 = findSpawn(SEED);
+  const wanted = select(spawn0.x, spawn0.z);
+  const byLevel = wanted.reduce((m, n) => ((m[n.level] = (m[n.level] || 0) + 1), m), {});
+  const totalMs = wanted.reduce((s, n) => s + cost[n.level], 0);
+  console.log(`  the streamer wants ${wanted.length} nodes around the spawn: ${Object.entries(byLevel).map(([l, c]) => `L${l}x${c}`).join(' ')}`);
+  console.log(`  total build work for all of them: ${f(totalMs / 1000, 1)} s of single-threaded meshing`);
+
+  const covers = (live, x, z) => {
+    for (let l = 0; l < LEVELS; l++) {
+      const s = nodeSize(l);
+      if (live.has(`${l}:${Math.floor(x / s)},${Math.floor(z / s)}`)) return true;
+    }
+    return false;
+  };
+
+  /* The simulation. Workers pull nearest-first exactly like _pump does. */
+  const run = (nWorkers, worldReady) => {
+    const live = new Set([`0:${Math.floor(spawn0.x / 64)},${Math.floor(spawn0.z / 64)}`]); // forceChunk
+    const pending = new Set();
+    const busy = new Array(nWorkers).fill(null);
+    const left = new Array(nWorkers).fill(0);
+    let ms = 0;
+    let revealAt = -1;
+    let beginAt = -1;
+    const tick = () => {
+      ms += DT * 1000;
+      for (let i = 0; i < nWorkers; i++) {
+        if (!busy[i]) continue;
+        left[i] -= DT * 1000;
+        if (left[i] <= 0) {
+          live.add(busy[i].key);
+          pending.delete(busy[i].key);
+          busy[i] = null;
+        }
+      }
+      const q = select(spawn0.x, spawn0.z).filter((n) => !live.has(n.key) && !pending.has(n.key)).sort((a, b) => a.d - b.d);
+      for (let i = 0; i < nWorkers && q.length; i++) {
+        if (busy[i]) continue;
+        const job = q.shift();
+        busy[i] = job;
+        pending.add(job.key);
+        left[i] = cost[job.level];
+      }
+      return q.length;
+    };
+
+    // boot: run until main.js would reveal, then its 500 ms setTimeout, then cine.begin()
+    let queued = 0;
+    for (let i = 0; i < 60 * 60; i++) {
+      queued = tick();
+      if (revealAt < 0 && live.size > REVEAL) revealAt = ms;
+      if (revealAt >= 0 && ms - revealAt >= 500) { beginAt = ms; break; }
+    }
+
+    // now the programme, with the streamer still running underneath it
+    const w = world();
+    const cine = new Cinematic({
+      camera: w.camera, seed: SEED, spawn: w.spawn, terrain: w.terrain, chase: w.chase,
+      groundAt: w.ground, mode: 'full',
+      worldReady: worldReady ? () => queued === 0 : undefined,
+      onEnd: () => w.chase.reset(),
+    });
+    cine.begin();
+    const dir = new (Object.getPrototypeOf(w.camera.position).constructor)();
+    const samples = [];
+    let t = 0;
+    let wallSum = 0;
+    let wallN = 0;
+    let filmSum = 0;
+    let filmN = 0;
+    let solidAt = -1; // wall clock at which coverage reaches 100% and stays there
+    let lastProg = 0;
+    while (cine.active && t < 120) {
+      queued = tick();
+      w.step(DT, NEUTRAL);
+      cine.update(DT, w.car);
+      t += DT;
+      // What is on screen: the lens axis, and +/- 22 deg of it, at seven ranges.
+      w.camera.getWorldDirection(dir);
+      const b = Math.atan2(dir.x, dir.z);
+      let hit = 0;
+      let tot = 0;
+      for (const off of [-0.38, 0, 0.38]) {
+        for (const r of [60, 160, 380, 800, 1600, 2600, 3600]) {
+          const x = w.camera.position.x + Math.sin(b + off) * r;
+          const z = w.camera.position.z + Math.cos(b + off) * r;
+          tot++;
+          if (covers(live, x, z)) hit++;
+        }
+      }
+      const cov = hit / tot;
+      /* Two averages, because they answer two different questions. WALL is what a person
+       * sitting in front of the screen sees, second by second. FILM is weighted by how far the
+       * PROGRAMME advanced on that frame — which is the honest way to score a hold, because a
+       * hold deliberately spends wall-clock seconds without spending programme seconds, and
+       * scoring it on wall clock alone punishes it for the very thing it is for. */
+      wallSum += cov;
+      wallN++;
+      const prog = cine.t - lastProg;
+      lastProg = cine.t;
+      filmSum += cov * prog;
+      filmN += prog;
+      if (cov < 0.999) solidAt = -1;
+      else if (solidAt < 0) solidAt = t;
+      if (Math.round(t * 60) % 120 === 0) samples.push({ t, name: cine.shotName, cov, live: live.size, q: queued });
+    }
+    return {
+      revealAt, beginAt, samples, solidAt,
+      wall: wallSum / wallN, film: filmSum / filmN,
+      held: cine.held, holdEnded: cine.holdEnded, live: live.size,
+    };
+  };
+
+  for (const nW of [2, 4, 6]) {
+    const a = run(nW, false);
+    const b = run(nW, true);
+    console.log(
+      `\n  ${nW} workers — reveal (live > ${REVEAL}) at ${f(a.revealAt / 1000, 2)} s, cinematic starts at ${f(a.beginAt / 1000, 2)} s`,
+    );
+    console.log('     t(s)  shot     ground in frame   live chunks   queued');
+    for (const s of a.samples.slice(0, 12)) {
+      console.log(`    ${f(s.t, 1).padStart(5)}  ${s.name.padEnd(7)}  ${f(s.cov * 100, 0).padStart(11)} %   ${String(s.live).padStart(9)}   ${String(s.q).padStart(6)}`);
+    }
+    console.log(
+      `    WITHOUT the hold:  ${f(a.film * 100, 1)} % of the film over built ground   (${f(a.wall * 100, 1)} % of wall clock; everything solid from ${f(a.solidAt, 1)} s)`,
+    );
+    console.log(
+      `    WITH the hold:     ${f(b.film * 100, 1)} % of the film over built ground   (${f(b.wall * 100, 1)} % of wall clock; everything solid from ${f(b.solidAt, 1)} s)` +
+        `   held ${f(b.held, 2)} s, ended by "${b.holdEnded || 'never held'}"`,
+    );
+    ok(b.film >= a.film - 0.001, `${nW} workers: holding never makes the film worse`, `${f(a.film * 100, 1)}% -> ${f(b.film * 100, 1)}%`);
+    ok(b.film > 0.985, `${nW} workers: the camera is looking at real, built ground`, `${f(b.film * 100, 2)} % of the programme`);
+    ok(b.solidAt >= 0 && b.solidAt < 14, `${nW} workers: the horizon is complete early and stays complete`, `solid from ${f(b.solidAt, 1)} s`);
+  }
+}
+
+/* ── 10: the hold, and what happens when the world NEVER becomes ready ──────── */
+
+console.log('\n=== THE STREAMING HOLD ===');
+{
+  const mk = (ready) => {
+    const w = world();
+    const cine = new Cinematic({
+      camera: w.camera, seed: SEED, spawn: w.spawn, terrain: w.terrain, chase: w.chase,
+      groundAt: w.ground, mode: 'full', worldReady: ready, onEnd: () => w.chase.reset(),
+    });
+    cine.begin();
+    let t = 0;
+    while (cine.active && t < 120) {
+      w.step(DT, NEUTRAL);
+      cine.update(DT, w.car);
+      t += DT;
+    }
+    return { cine, t, w };
+  };
+
+  const never = mk(() => false);
+  console.log(`  a predicate that NEVER says yes: wall clock ${f(never.t, 2)} s for a ${f(never.cine.duration, 2)} s programme, held ${f(never.cine.held, 2)} s, ended by "${never.cine.holdEnded}"`);
+  ok(never.t < never.cine.duration + 10.2, 'a world that never becomes ready costs at most HOLD_MAX, it does not hang', `${f(never.t - never.cine.duration, 2)} s over a ${f(never.cine.duration, 1)} s programme`);
+  ok(!never.cine.active, 'and the programme still finishes and hands the camera back');
+
+  let flips = 0;
+  const late = mk(() => ++flips > 90); // not ready for the first 1.5 s
+  console.log(`  ready after 1.5 s: wall clock ${f(late.t, 2)} s, held ${f(late.cine.held, 2)} s, ended by "${late.cine.holdEnded}"`);
+  ok(late.cine.held > 0.9 && late.cine.held < 1.3, 'a short wait costs a proportional 75% of it', `${f(late.cine.held, 3)} s for 1.5 s of waiting`);
+  ok(late.cine.holdEnded === 'ready', 'and it resumes full rate the moment the streamer says yes');
+
+  const none = mk(undefined);
+  ok(Math.abs(none.t - none.cine.duration) < 0.05 && none.cine.held === 0, 'with no predicate at all the programme runs at exactly its old rate', `${f(none.t, 2)} s of ${f(none.cine.duration, 2)} s`);
+
+  const angry = mk(() => { throw new Error('streamer exploded'); });
+  ok(Math.abs(angry.t - angry.cine.duration) < 0.05, 'a predicate that THROWS is treated as ready, not as a reason to stall the opening', `${f(angry.t, 2)} s`);
+
+  /* Skipping during the hold. */
+  const w = world();
+  const held = new Cinematic({ camera: w.camera, seed: SEED, spawn: w.spawn, terrain: w.terrain, chase: w.chase, groundAt: w.ground, mode: 'full', worldReady: () => false, onEnd: () => w.chase.reset() });
+  held.begin();
+  for (let i = 0; i < 60; i++) { w.step(DT, NEUTRAL); held.update(DT, w.car); }
+  ok(held.holding, 'the programme really is in the hold at 1 s', `held ${f(held.held, 2)} s`);
+  held.skip();
+  let e = 0;
+  while (held.active && e < 2) { w.step(DT, NEUTRAL); held.update(DT, w.car); e += DT; }
+  const r = w.chase.restPose(w.car, {}, w.ground);
+  ok(!held.active && dist(camPos(w.camera), { x: r.px, y: r.py, z: r.pz }) < 0.01, 'and a key during the hold still lands exactly on the gameplay pose', `${f(e, 2)} s of ease`);
+}
+
+/* ── 11: a shot that throws ───────────────────────────────────────────────────
+ * main.js calls requestAnimationFrame before it calls us, so a throw in here would not stop
+ * the game — but it WOULD leave the camera frozen mid-crane and the cinematic "active" until
+ * a twelve second watchdog, with the player pressing keys at a picture that has stopped
+ * moving. Which is the exact shape of the bug this project has already shipped once. */
+
+console.log('\n=== A SHOT THAT FAULTS ===');
+{
+  const w = world();
+  const cine = new Cinematic({ camera: w.camera, seed: SEED, spawn: w.spawn, terrain: w.terrain, chase: w.chase, groundAt: w.ground, mode: 'full', onEnd: () => w.chase.reset() });
+  cine.begin();
+  for (let i = 0; i < 120; i++) { w.step(DT, NEUTRAL); cine.update(DT, w.car); }
+  const err = console.error;
+  console.error = () => {};
+  cine.shots[cine.shotIndex].pose = () => { throw new Error('deliberate'); };
+  const alive = cine.update(DT, w.car);
+  // ...and a shot that returns NaN instead of throwing, which is the quieter version
+  const w2 = world();
+  const c2 = new Cinematic({ camera: w2.camera, seed: SEED, spawn: w2.spawn, terrain: w2.terrain, chase: w2.chase, groundAt: w2.ground, mode: 'full', onEnd: () => w2.chase.reset() });
+  c2.begin();
+  for (let i = 0; i < 120; i++) { w2.step(DT, NEUTRAL); c2.update(DT, w2.car); }
+  c2.shots[c2.shotIndex].pose = (u, car, out) => { out.px = NaN; };
+  const alive2 = c2.update(DT, w2.car);
+  console.error = err;
+
+  ok(!alive && !cine.active && !!cine.faulted, 'a throwing shot hands the camera back instead of freezing it', String(cine.faulted?.message));
+  ok(!alive2 && !c2.active && !!c2.faulted, 'and so does a shot that quietly produces a NaN pose', String(c2.faulted?.message));
+
+  const x0 = w.car.x, z0 = w.car.z;
+  for (let i = 0; i < 180; i++) {
+    w.step(DT, { steer: 0, throttle: 1, brake: 0, handbrake: 0, analogue: false });
+    w.chase.update(w.car, DT, w.ground, { drift: false });
+  }
+  ok(Math.hypot(w.car.x - x0, w.car.z - z0) > 15, 'and the game is drivable straight afterwards', `${f(Math.hypot(w.car.x - x0, w.car.z - z0), 1)} m in 3 s`);
+
+  /* And the constructor: a scout that blows up must not take main.js's boot() down with it. */
+  const bad = new Cinematic({ camera: w.camera, seed: SEED, spawn: { x: NaN, z: NaN, y: NaN, heading: NaN }, terrain: null, chase: w.chase, mode: 'full' });
+  ok(!!bad, 'a cinematic constructed over a broken spawn does not throw out of the constructor', bad.faulted ? `faulted: ${bad.faulted.message}` : `${bad.shots.length} shots scouted anyway`);
+  ok(bad.begin() === false || bad.shots.length > 0, 'and either scouts a programme or declines to start one');
+}
+
+/* ── 12: the clearance net, across seeds ──────────────────────────────────── */
+
+console.log('\n=== CLEARANCE ACROSS SEEDS ===');
+{
+  console.log('    seed        duration   camera travel   fastest frame   lowest clearance   floor lifts');
+  let worstClear = Infinity;
+  let fastest = 0;
+  for (const seed of [20260726, 1337, 7, 424242, 99, 555, 31415]) {
+    const spawn = findSpawn(seed);
+    const terrain = new Terrain(seed, spawn.x - 420, spawn.z - 420, spawn.x + 420, spawn.z + 420);
+    const camera = new PerspectiveCamera(64, 16 / 9, 0.28, 16000);
+    const chase = new ChaseCamera(camera, { mode: 'sport' });
+    const car = new Vehicle({ tier: 'gt', terrain, preset: 'sport' });
+    car.placeAt(spawn.x, spawn.z, spawn.heading);
+    const carved = carvedSampler(seed);
+    const cine = new Cinematic({ camera, seed, spawn, terrain, chase, groundAt: (x, z) => carved(x, z), mode: 'full', onEnd: () => chase.reset() });
+    cine.begin();
+    let t = 0, worst = Infinity, travel = 0, peak = 0, last = null, lastShot = '';
+    while (cine.active && t < 120) {
+      cine.update(DT, car);
+      t += DT;
+      const p = camPos(camera);
+      const g = carved(p.x, p.z);
+      if (p.y - g < worst) worst = p.y - g;
+      if (last && cine.shotName === lastShot) {
+        const d = dist(last, p);
+        travel += d;
+        if (d / DT > peak) peak = d / DT;
+      }
+      lastShot = cine.shotName;
+      last = p;
+    }
+    if (worst < worstClear) worstClear = worst;
+    if (peak > fastest) fastest = peak;
+    console.log(
+      `    ${String(seed).padEnd(11)} ${f(cine.duration, 1).padStart(6)} s   ${f(travel, 0).padStart(10)} m   ` +
+        `${f(peak * 3.6, 0).padStart(9)} km/h   ${f(worst, 1).padStart(13)} m   ${f(cine.lifted, 2).padStart(9)} m`,
+    );
+  }
+  ok(worstClear > 1.0, 'no seed flies the camera into the ground', `lowest ${f(worstClear, 2)} m`);
+  ok(fastest * 3.6 < 80, 'and no seed makes a shot hurry', `fastest frame ${f(fastest * 3.6, 0)} km/h`);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);

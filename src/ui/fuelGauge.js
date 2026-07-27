@@ -11,6 +11,16 @@
  * it does anything is when the tank is genuinely low, and then it breathes rather than
  * flashes. Nothing here ever blinks red.
  *
+ * ONE THING ON THIS WIDGET IS DELIBERATELY NOT CONDITIONAL: the nearest-station distance and
+ * a small compass arrow, in the empty band above the arc, on screen at every fuel level — not
+ * just when the tank is low, unlike `.mins` below it, which only shows a distance once things
+ * are critical. It reads `fuel.nearest` — the same answer render/props.js's Props class is
+ * already recomputing twice a second for `.mins` and the low-fuel toast (see fuel.js's own
+ * comment on `findStation`) — so this adds no new station lookup of its own, only a second,
+ * permanent place to read the one that already exists. The arrow is a plain CSS triangle, not
+ * a Unicode glyph: this project already prefers to draw its own shapes rather than borrow a
+ * font's idea of one (the same reasoning that keeps the 100 roadside props "modelled in code").
+ *
  * A note on gotcha 3 (a flag being set is not a thing being visible): everything here is a
  * measured geometric property of an SVG, not a class toggle. `needleAngle()` returns the
  * angle actually written into the transform, which is what tools/bench-fuel.mjs asserts
@@ -18,6 +28,7 @@
  */
 
 import { LOW_FRACTION } from '../game/fuel.js';
+import { angleDelta, dampAngle, RAD2DEG } from '../core/math.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -37,6 +48,9 @@ const CSS = `
 #fuelGauge.filling{ opacity:1; }
 #fuelGauge .lbl{ position:absolute; left:0; right:0; bottom:-2px; text-align:center; letter-spacing:.08em; }
 #fuelGauge .mins{ position:absolute; left:0; right:0; bottom:10px; text-align:center; opacity:.72; font-size:10px; }
+#fuelGauge .station{ position:absolute; left:0; right:0; top:-2px; display:flex; align-items:center; justify-content:center; gap:4px; opacity:.85; }
+#fuelGauge .station .arrow{ width:0; height:0; border-left:4px solid transparent; border-right:4px solid transparent; border-bottom:6px solid #F6ECD8; transition:transform .5s ease; transform-origin:50% 65%; }
+#fuelGauge .station .dist{ font-size:10px; font-variant-numeric:tabular-nums; }
 @keyframes fuelBreathe{ 0%,100%{opacity:.72} 50%{opacity:1} }
 @media (max-width:640px){ #fuelGauge{ width:78px; height:54px; right:10px; bottom:60px; } }
 `;
@@ -126,16 +140,48 @@ export class FuelGauge {
     this.label.textContent = 'FUEL';
     this.root.appendChild(this.label);
 
+    /* Always-on nearest-station readout — see the file header for why this one is not gated
+     * on fuel level the way `.mins` above is. Sits in the empty band above the arc (the arc's
+     * own topmost point is at SVG y=22 of 70; see arcPath below), so nothing already drawn has
+     * to move to make room. */
+    this.station = document.createElement('div');
+    this.station.className = 'station';
+    this.arrow = document.createElement('div');
+    this.arrow.className = 'arrow';
+    this.stationDist = document.createElement('span');
+    this.stationDist.className = 'dist';
+    this.stationDist.textContent = '—'; // resting value before any station is known — never blank
+    this.station.appendChild(this.arrow);
+    this.station.appendChild(this.stationDist);
+    this.root.appendChild(this.station);
+
     this._cx = CX;
     this._cy = CY;
     this._shown = 1;
     this._angle = SWEEP;
+    /** Smoothed bearing to the nearest known station, relative to the car's own heading,
+     *  radians, + = to the left of the car — the same convention every bearing in this project
+     *  uses (see tools/diag-o2.mjs's own note on it). Smoothed with dampAngle, the short way
+     *  round, so a station scan finding a new nearest pump swings the arrow rather than
+     *  snapping it, and so it never spins the long way past 180°. */
+    this._arrowRad = 0;
+    this._stationText = '—';
     root.appendChild(this.root);
   }
 
   /** The angle currently written into the needle transform, degrees. Test hook. */
   needleAngle() {
     return this._angle;
+  }
+
+  /** The rotation currently written into the station arrow, degrees. Test hook, same idea as
+   *  needleAngle() above: the number actually driving the transform, not one re-derived by
+   *  parsing it back out of a DOM/CSS string. CSS rotate() turns clockwise for a positive
+   *  angle, and a positive `_arrowRad` means the station is to the LEFT (see its own comment
+   *  in the constructor) — so a left-hand station needs a NEGATIVE css turn to point there,
+   *  hence the sign flip here. */
+  stationArrowDeg() {
+    return -this._arrowRad * RAD2DEG;
   }
 
   /**
@@ -180,6 +226,21 @@ export class FuelGauge {
     if (text !== this._text) {
       this._text = text;
       this.mins.textContent = text;
+    }
+
+    // ── nearest station, always on — never gated on fuel level ─────────────
+    // bearing = atan2(dx, dz): this project's one bearing formula (car/vehicle.js's own
+    // "forward is (sin yaw, cos yaw)" note, tools/diag-o2.mjs, game/cinematic.js all agree).
+    // angleDelta(car.yaw, bearing) is then + when the target is to the LEFT — proved against
+    // this exact convention in tools/bench-fuel.mjs's "nearest-station counter" section.
+    const n = fuel.nearest;
+    const bearingTarget = n ? angleDelta(car.yaw, Math.atan2(n.x - car.x, n.z - car.z)) : 0;
+    this._arrowRad = dampAngle(this._arrowRad, bearingTarget, 3, dt);
+    this.arrow.style.transform = `rotate(${this.stationArrowDeg().toFixed(1)}deg)`;
+    const distText = n ? fmt(n.dist) : '—';
+    if (distText !== this._stationText) {
+      this._stationText = distText;
+      this.stationDist.textContent = distText;
     }
   }
 

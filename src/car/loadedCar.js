@@ -13,7 +13,7 @@
  * wheels, which is survivable, whereas guessing by bounding box is not.
  */
 
-import { Group, Vector3, Box3, BufferAttribute, Color } from 'three';
+import { Group, Vector3, Box3, Matrix4, BufferAttribute, Color } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { createPaintedMaterial, MAT } from '../render/painted.js';
 import { RGB, P } from '../core/palette.js';
@@ -170,7 +170,27 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
 
   const group = new Group();
   group.name = `car:${car}`;
-  group.add(src);
+  /* Body attitude gets its OWN node inside the yaw node. main.js owns `group.rotation`
+   * (`rotation.set(0, car.yaw, 0)`) and then calls setBodyRoll; writing roll and pitch onto
+   * that same Euler makes them share one XYZ rotation, and in XYZ the pitch is applied
+   * OUTSIDE the yaw — i.e. about the world X axis, not the car's own lateral axis. A car
+   * heading due east then "pitches" by leaning over sideways. This node sits under the yaw,
+   * so both angles land in the car's own frame, exactly as model.js's `chassis` does. */
+  const attitude = new Group();
+  attitude.name = 'attitude';
+  group.add(attitude);
+  attitude.add(src);
+
+  /* Matrices, before anything below measures anything. This is not housekeeping: the
+   * ride-height drop above changed `src.position` and did NOT refresh the cached world
+   * matrices, and the wheel rig is built by measuring the wheels in world space and
+   * converting back. Box3.expandByObject() reads the STALE matrices; Object3D.worldToLocal()
+   * quietly calls updateWorldMatrix() first and reads the NEW ones. Mixing the two — which
+   * is what this file used to do — put every hub exactly `box2.min.y` below its own axle,
+   * and a wheel spun about an axis 12-40 mm under its centre does not roll, it ORBITS.
+   * That was the "wheels don't spin perfectly round, they wobble oddly". See
+   * tools/diag-wheelwobble.mjs, which measures it in millimetres. */
+  group.updateMatrixWorld(true);
 
   /* ── build a wheel rig ──────────────────────────────────────────────────
    * Two things about these packs make the naive approach fail, and both were visible in the
@@ -209,17 +229,25 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
   }
 
   const wheels = { steer: [], spin: [], all: [] };
+  const _toParent = new Matrix4();
+  const _m = new Matrix4();
+  const _b = new Box3();
   for (const [key, list] of corners) {
-    // The hub is the centre of everything at this corner, measured in the car's own space.
+    /* The hub, measured DIRECTLY in the frame the pivot will live in. No world round trip:
+     * every geometry box is carried into `parent` space by one explicit matrix, so there is
+     * no second code path with its own idea of how fresh the matrices are. For a wheel — a
+     * cylinder whose axis is the model's X — the box's Y and Z centre IS the axle, which is
+     * the only part of this that has to be right; the X centre only decides where along the
+     * axle the pivot sits, and attach() below means nothing moves either way. */
+    const parent = list[0].parent;
+    _toParent.copy(parent.matrixWorld).invert();
     const box = new Box3();
     for (const o of list) {
-      o.updateMatrixWorld(true);
-      box.expandByObject(o);
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      box.union(_b.copy(o.geometry.boundingBox).applyMatrix4(_m.multiplyMatrices(_toParent, o.matrixWorld)));
     }
-    const hubWorld = new Vector3();
-    box.getCenter(hubWorld);
-    const parent = list[0].parent;
-    const hub = parent.worldToLocal(hubWorld.clone());
+    const hub = new Vector3();
+    box.getCenter(hub);
 
     const steer = new Group();
     steer.name = `wheel:${key}:steer`;
@@ -229,14 +257,14 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
     const spin = new Group();
     spin.name = `wheel:${key}:spin`;
     steer.add(spin);
+    steer.updateMatrixWorld(true);
 
-    for (const o of list) {
-      // Re-express each mesh relative to the hub, then hang it off the spin node. The
-      // geometry keeps its own shape; only where its origin sits changes.
-      const local = o.position.clone().sub(hub);
-      spin.add(o);
-      o.position.copy(local);
-    }
+    // attach(), not add(): it re-expresses each mesh in the spin node's frame while KEEPING
+    // its world transform, so no part of the car moves — only the point it turns about
+    // changes. add() plus a hand-computed offset is the same thing only while every mesh at
+    // a corner happens to share one parent with no rotation of its own, and that is an
+    // assumption about somebody else's model file.
+    for (const o of list) spin.attach(o);
 
     wheels.all.push(spin);
     wheels.spin.push(spin);
@@ -252,8 +280,13 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
     tier: spec.tier,
 
     setSteer(rad) {
-      // Every mesh at a front corner turns, on the outer node, which only ever yaws.
-      for (const s of wheels.steer) s.rotation.y = -rad;
+      /* Every mesh at a front corner turns, on the outer node, which only ever yaws.
+       * NOT -rad. main.js drives this from `car.steerAngle`, and a positive steerAngle is a
+       * positive yaw rate: tools/diag-wheelwobble.mjs drives the real Vehicle and it ends a
+       * second of full right stick at x = +3.3 m, so the nose swings toward +X and the front
+       * wheels have to point that way too. The negation had the loaded cars' front wheels
+       * pointing OUT of the corner — model.js has used +rad all along. */
+      for (const s of wheels.steer) s.rotation.y = rad;
     },
 
     setWheelSpin(rad) {
@@ -272,8 +305,10 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
     setLights() {},
 
     setBodyRoll(roll, pitch) {
-      group.rotation.z = roll;
-      group.rotation.x = pitch;
+      // On `attitude`, inside the yaw — see the note where that node is made. Same two
+      // lines model.js writes to its `chassis`, and for the same reason.
+      attitude.rotation.z = roll;
+      attitude.rotation.x = pitch;
     },
 
     dispose() {

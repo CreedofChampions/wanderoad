@@ -21,6 +21,16 @@
  *
  * All three are baked into one vec4 attribute at chunk-adopt time, so the per-frame cost of
  * water is a flat quad grid and nothing else.
+ *
+ * A fourth quantity, `wopen`, joins them for the same reason (see waterOpenness() below): a
+ * genuinely large body of water reads as open, calm water, not as a lake-sized puddle showing
+ * the same chop as a farm pond. Answering "how big is the water here" exactly would mean a
+ * flood fill over the whole connected body, which this project does not do per frame or even
+ * per chunk-adopt — instead a handful of point samples on two rings around the vertex, snapped
+ * to a coarse world-aligned cell and cached (module-level, keyed by cell, never by chunk), so
+ * every water chunk that shares a cell — which is most neighbours, since the cell is far bigger
+ * than a chunk at any LOD below the coarsest — agrees exactly and draws no seam at the chunk
+ * boundary, and the ring is only ever walked once per cell for the life of the session.
  */
 
 import {
@@ -46,6 +56,8 @@ import {
 import { C } from '../core/palette.js';
 import { clamp01, hash2i, TAU } from '../core/math.js';
 import { sharedUniforms, U } from './uniforms.js';
+import { biomeWeights, waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
+import { landHeight } from '../world/terrain.js';
 
 /* The cloud-shadow projection must match the terrain's exactly or the water in a lake would
  * sit in a different cloud's shadow than the shore beside it. Same numbers as
@@ -64,15 +76,120 @@ const MAX_WATER_LEVEL = 4;
  * changes at streaming rates, not at frame rates. */
 const CULL_INTERVAL = 0.1;
 
+/* ── water-body openness: a coarse, cached size estimate ─────────────────────
+ * "Large" here means "surrounded by more water", which is the one thing a river or a farm
+ * pond cannot fake: a point on a 6-8 m wide river almost always has dry bank within a couple
+ * of hundred metres in most directions, however long the river runs, and a compact pond reads
+ * the same way. A real lake or sea does not — most directions stay wet for hundreds of metres.
+ *
+ * Two rings (200 m and 400 m, ten spokes each) rather than one: a single ring is fooled by an
+ * elongated shape (a long, narrow bay can read "open" at the one radius that happens to run
+ * along it) and two independent radii very rarely agree on a false positive at once. Every
+ * sample point snaps to the centre of a 220 m world-aligned cell and is cached there for the
+ * life of the session — not just for speed (though it is: 20 point samples the first time a
+ * cell is asked for, an object lookup every time after), but because it is what makes two
+ * water CHUNKS that are neighbours in the world, and therefore usually share a cell or query
+ * adjacent ones, agree closely enough that no seam shows at the boundary between them.
+ *
+ * Thresholds and the two radii were read off real bodies in the shipped seed, not guessed:
+ * `node tools/diag-openwater.mjs` prints the table this was calibrated from. Over a 12 km
+ * square, the twelve largest connected bodies (up to 11.1 km²) scored 0.60-1.00 at their most
+ * open point; everything under 25,000 m² scored 0.00-0.70, the occasional high outlier being a
+ * cluster of several small pools within one wetland rather than a single body — which this
+ * proxy cannot and is not trying to tell apart from one genuinely large body, because doing
+ * that exactly is the flood fill this file is explicitly not doing. */
+const OPEN_CELL = 220; // metres — the world-aligned snap grid the cache keys on
+const OPEN_R1 = 200;
+const OPEN_R2 = 400;
+const OPEN_DIRS = 10;
+/** Below this score chop is unchanged; above it, fully calmed — see OPEN_CALM_* below. Exported,
+ *  like ambience.js's SEA_RANGE/SEA_MAX, so tools/diag-openwater.mjs prints the real thresholds
+ *  rather than a re-derived guess at them. */
+export const OPEN_LO = 0.55;
+export const OPEN_HI = 0.92;
+/** Ripple/normal amplitude on the calmest, largest water: 30% of normal, not zero — a dead
+ *  mirror reads as broken rather than as a calm sea, and the glint terms need SOME normal
+ *  variation to have anything to catch. */
+export const OPEN_CALM_AMP = 0.3;
+/** Wind-gust darkening on the same water: cut by just over half, not to nothing — an open sea
+ *  still shows cat's paws when the wind gets up, a village pond does not. */
+export const OPEN_CALM_GUST = 0.45;
+
+/**
+ * Pure JS mirror of the shader's `calm` term (`smoothstep(OPEN_LO, OPEN_HI, openness)`), and of
+ * how it scales the ripple amplitude and the gust darkening — the exact arithmetic the GLSL
+ * above is generated from, at the same OPEN_LO/OPEN_HI/OPEN_CALM_* constants, so a diagnostic
+ * tool can print real before/after amplitude numbers instead of a description of the shader.
+ */
+export function calmFactor(openness) {
+  const t = Math.max(0, Math.min(1, (openness - OPEN_LO) / (OPEN_HI - OPEN_LO)));
+  return t * t * (3 - 2 * t); // smoothstep
+}
+/** Ripple/normal-amplitude multiplier at a given openness, 1 (full chop) down to OPEN_CALM_AMP. */
+export function ampMultiplier(openness) {
+  const calm = calmFactor(openness);
+  return 1 - calm * (1 - OPEN_CALM_AMP);
+}
+/** Wind-gust multiplier at a given openness, 1 down to OPEN_CALM_GUST. */
+export function gustMultiplier(openness) {
+  const calm = calmFactor(openness);
+  return 1 - calm * (1 - OPEN_CALM_GUST);
+}
+
+const _openCache = new Map(); // "ci,cj" -> 0..1, world-aligned so neighbours agree exactly
+const OPEN_CACHE_MAX = 20000; // ~a very long session's worth of explored coastline; then reset
+const _wOpen = new Float32Array(BIOME_COUNT);
+
+/** True if the RAW LAND at (x, z) sits under the local water table. Same ground-truth pattern
+ *  as src/audio/ambience.js's own probes: biome weights -> the blended water plane -> raw land
+ *  height, no Terrain instance and no road query, because all this needs is "is it wet". */
+function isWetAt(x, z, seed) {
+  const b = biomeWeights(x, z, seed, _wOpen);
+  const plane = waterLevelAt(b.w, -Infinity);
+  return plane !== null && landHeight(x, z, seed) < plane;
+}
+
+/**
+ * Coarse water-body-size estimate at (x, z), 0..1. See the file-level comment above for what
+ * it means and how it was calibrated. Cheap after the first call for a given 220 m cell; NOT
+ * cheap enough for a per-frame, per-pixel loop — callers bake it at chunk-adopt time (this
+ * file) or at candidate-placement time (src/render/ships.js), never in the render loop.
+ */
+export function waterOpenness(x, z, seed) {
+  const ci = Math.round(x / OPEN_CELL);
+  const cj = Math.round(z / OPEN_CELL);
+  const key = `${ci},${cj}`;
+  const hit = _openCache.get(key);
+  if (hit !== undefined) return hit;
+
+  const cx = ci * OPEN_CELL;
+  const cz = cj * OPEN_CELL;
+  let wet = 0;
+  for (let i = 0; i < OPEN_DIRS; i++) {
+    const a = (i / OPEN_DIRS) * TAU;
+    const sx = Math.sin(a);
+    const sz = Math.cos(a);
+    if (isWetAt(cx + sx * OPEN_R1, cz + sz * OPEN_R1, seed)) wet++;
+    if (isWetAt(cx + sx * OPEN_R2, cz + sz * OPEN_R2, seed)) wet++;
+  }
+  const v = wet / (OPEN_DIRS * 2);
+  if (_openCache.size >= OPEN_CACHE_MAX) _openCache.clear(); // cheap to rebuild; never leak
+  _openCache.set(key, v);
+  return v;
+}
+
 const WATER_VS = /* glsl */ `
 in vec4 wdat;      // x depth in metres, yz bed-downhill direction, w flow speed
+in float wopen;    // 0..1 coarse water-body-size estimate — see waterOpenness() above
 out vec3 vW;
 out vec4 vD;
 out float vDist;
+out float vOpen;
 void main(){
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vW = wp.xyz;
   vD = wdat;
+  vOpen = wopen;
   vDist = length(wp.xyz - uCamPos);
   gl_Position = projectionMatrix * viewMatrix * wp;
 }
@@ -82,6 +199,7 @@ const WATER_FS = (axis) => /* glsl */ `
 in vec3 vW;
 in vec4 vD;
 in float vDist;
+in float vOpen;
 out vec4 fragColor;
 
 // The pen read its gusts out of a 256² wind render target that every system in the valley
@@ -182,10 +300,17 @@ void main(){
   vec2 adv = vec2(dot(fl, RIP_AXIS), dot(fl, vec2(-RIP_AXIS.y, RIP_AXIS.x)));
   vec2 drift = adv * (uTime * sp);
 
+  // Large, open water reads calm rather than choppy — see waterOpenness() and the OPEN_*
+  // constants at the top of this file for what vOpen means and how the two constants below
+  // were read off the real seeded world. This only ever scales an amplitude that already goes
+  // through the anti-aliasing/band-limiting above and below it; nothing about HOW the ripple or
+  // the gust field is built changes, only how tall they are allowed to stand on water this open.
+  float calm = smoothstep(${OPEN_LO.toFixed(3)}, ${OPEN_HI.toFixed(3)}, vOpen);
+
   // Gust cells are ~32 m across at their finest, so they too stop carrying information once
   // the pixel is wider than that — and their surface darkening is the most visible aliasing
   // of the lot, because it is a contrast term rather than a colour one.
-  float gust = gustAt(P.xz) * bandLimit(fw, vec2(0.031));
+  float gust = gustAt(P.xz) * bandLimit(fw, vec2(0.031)) * mix(1.0, ${OPEN_CALM_GUST.toFixed(3)}, calm);
 
   // The finite differences that build the normal are sampled at the pixel footprint of their
   // OWN axis rather than at the pen's fixed 0.42 m, so each degrades into a box filter of
@@ -198,6 +323,11 @@ void main(){
   float amp = mix(0.055, 0.20, clamp(sp*0.22, 0.0, 1.0)) * (0.55 + 0.9*gust);
   // Shallow water is choppier: the bed shortens the wave.
   amp *= mix(1.35, 1.0, smoothstep(0.3, 2.6, depth));
+  // Flat and calm on a genuinely large body — the operator's report, "large bodies of water
+  // should be flat". Current and depth above are left untouched: a big body can still show a
+  // current where its bed actually falls, and shallow water beside a deep lake still shortens
+  // its own wave — this only pulls down the ceiling those terms are allowed to reach.
+  amp *= mix(1.0, ${OPEN_CALM_AMP.toFixed(3)}, calm);
   vec2 dh = (vec2(hx, hy) - h0)/e * amp * 14.0;
   // Back out of the ripple frame into world xz. The warp is ignored in this rotation: it is a
   // few degrees of shear, and the normal only has to look right, not integrate.
@@ -480,6 +610,7 @@ export class Water {
 
     const pos = new Float32Array(n * n * 3);
     const dat = new Float32Array(n * n * 4);
+    const open = new Float32Array(n * n);
 
     for (let j = 0; j < n; j++) {
       const gj = j * stride;
@@ -490,6 +621,11 @@ export class Water {
         pos[k * 3] = i * cell;
         pos[k * 3 + 1] = 0;
         pos[k * 3 + 2] = j * cell;
+        // World position, not the local one just written above — waterOpenness()'s cache is
+        // keyed on world-space cells specifically so neighbouring chunks agree; a chunk-local
+        // coordinate would put every chunk's own (0,0) in the same cell regardless of where in
+        // the world it actually is.
+        open[k] = waterOpenness(rec.ox + i * cell, rec.oz + j * cell, this.seed);
 
         const im = gi - stencil < 0 ? 0 : gi - stencil;
         const ip = gi + stencil > G - 1 ? G - 1 : gi + stencil;
@@ -531,6 +667,7 @@ export class Water {
     const g = new BufferGeometry();
     g.setAttribute('position', new BufferAttribute(pos, 3));
     g.setAttribute('wdat', new BufferAttribute(dat, 4));
+    g.setAttribute('wopen', new BufferAttribute(open, 1));
     g.setIndex(new BufferAttribute(planeIndex(n), 1));
     // By hand: the plane is flat and chunk-sized, so walking every vertex to discover that
     // would be pure waste.

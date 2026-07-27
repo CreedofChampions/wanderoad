@@ -13,6 +13,8 @@
  *   - does stopping at a station refill the tank, read out of the model
  *   - is running dry gentle, and is it always recoverable
  *   - does the gauge needle actually move
+ *   - is the always-on nearest-station distance/direction honest — a real reading when one
+ *     exists, a real "unknown" when it does not, never a stale or fabricated one
  */
 
 import { Vehicle } from '../src/car/vehicle.js';
@@ -356,6 +358,226 @@ console.log('\n── the gauge needle actually moves ────────�
   check(atEmpty < -55, 'needle angle at an empty tank (deg)', atEmpty.toFixed(1), '< -55');
   check(fullAttr !== emptyAttr, 'the transform attribute changed', 'yes', 'yes');
   check(/rotate\(/.test(emptyAttr), 'and it is a rotation the browser will apply', emptyAttr.slice(0, 12), 'rotate(...)');
+}
+
+console.log('\n── the nearest-station counter is always on ──────────────────────────────');
+{
+  /* Distance and direction to the nearest known pump, unconditional on fuel level — unlike
+   * `.mins` above, which only shows a distance once the tank is critically low. This sets
+   * fuel.nearest directly, the same way the "refuelling at a real station" section's own
+   * findStation stub effectively does, rather than driving a real Props scan — the question
+   * here is whether the GAUGE reads fuel.nearest honestly, not whether Props finds one, which
+   * is proven separately in tools/bench-props.mjs. */
+  installDomStub();
+  const { FuelGauge } = await import('../src/ui/fuelGauge.js');
+  const g2 = new FuelGauge(globalThis.document.createElement('div'));
+  const fuel = new Fuel({ start: 0.9 });
+  const car = fresh(); // placeAt(0,0,0): yaw 0, forward is +Z (vehicle.js: "forward is (sin yaw, cos yaw)")
+
+  // nothing known yet: an honest resting state, never a blank box, never a fabricated direction
+  for (let k = 0; k < 30; k++) g2.update(1 / 60, fuel, car);
+  check(g2.stationDist.textContent === '—', 'before any station is known, an honest placeholder, not a blank box', g2.stationDist.textContent, '—');
+  check(Math.abs(g2.stationArrowDeg()) < 3, 'and the arrow rests dead ahead rather than pointing at a fabricated direction', `${g2.stationArrowDeg().toFixed(1)}°`, '~0°');
+
+  // straight ahead, 500 m
+  fuel.nearest = { x: 0, z: 500, dist: 500 };
+  for (let k = 0; k < 180; k++) g2.update(1 / 60, fuel, car);
+  check(g2.stationDist.textContent === '500 m', 'distance straight ahead formats under 1 km in metres', g2.stationDist.textContent, '500 m');
+  check(Math.abs(g2.stationArrowDeg()) < 3, 'and the arrow points dead ahead', `${g2.stationArrowDeg().toFixed(1)}°`, '~0°');
+
+  // 2.4 km to the LEFT (+X — three.js handedness: "+X is screen-left looking down +Z")
+  fuel.nearest = { x: 2400, z: 0, dist: 2400 };
+  for (let k = 0; k < 180; k++) g2.update(1 / 60, fuel, car);
+  check(g2.stationDist.textContent === '2.4 km', 'distance formats km once past 1000 m', g2.stationDist.textContent, '2.4 km');
+  check(g2.stationArrowDeg() < -30, "a station to the LEFT turns the arrow the way every bearing in this project turns (diag-o2.mjs's own rule)", `${g2.stationArrowDeg().toFixed(1)}°`, '< -30°');
+
+  // 500 m to the RIGHT (-X)
+  fuel.nearest = { x: -300, z: 400, dist: 500 };
+  for (let k = 0; k < 180; k++) g2.update(1 / 60, fuel, car);
+  check(g2.stationArrowDeg() > 30, 'and a station to the RIGHT turns it the other way', `${g2.stationArrowDeg().toFixed(1)}°`, '> 30°');
+
+  // loses the signal again: relaxes to neutral, shown honestly, never a frozen stale reading
+  fuel.nearest = null;
+  for (let k = 0; k < 300; k++) g2.update(1 / 60, fuel, car);
+  check(g2.stationDist.textContent === '—', 'forgetting a station is shown honestly too, not a frozen stale distance', g2.stationDist.textContent, '—');
+  check(Math.abs(g2.stationArrowDeg()) < 3, 'and the arrow relaxes back to neutral', `${g2.stationArrowDeg().toFixed(1)}°`, '~0°');
+}
+
+console.log('\n── capacity upgrades: every 5th can raises the tank, capped at +50% ───────');
+{
+  /* collectCans always hands back a small, fixed amount — the same pull-based, single-shot
+   * shape render/props.js's real drainCollectedFuel() delivers a can in — so N update() calls
+   * collect exactly N cans, one at a time. */
+  const car = fresh();
+  const fuel = new Fuel({ start: 1, collectCans: () => 0.01 });
+  const capAt = [];
+  for (let n = 1; n <= 30; n++) {
+    fuel.update(1 / 60, car);
+    capAt.push(fuel.capacity);
+  }
+  console.log(
+    `       capacity after can # : 1=${capAt[0].toFixed(0)}  4=${capAt[3].toFixed(0)}  5=${capAt[4].toFixed(0)}  ` +
+      `9=${capAt[8].toFixed(0)}  10=${capAt[9].toFixed(0)}  25=${capAt[24].toFixed(0)}  26=${capAt[25].toFixed(0)}  30=${capAt[29].toFixed(0)}`
+  );
+  check(Math.abs(capAt[3] - TANK_SECONDS) < 0.5, 'still the base tank after 4 cans', capAt[3].toFixed(1), `~${TANK_SECONDS}`);
+  check(Math.abs(capAt[4] - TANK_SECONDS * 1.1) < 0.5, 'first upgrade fires exactly on the 5th can (+10%)', capAt[4].toFixed(1), `~${(TANK_SECONDS * 1.1).toFixed(1)}`);
+  check(Math.abs(capAt[8] - TANK_SECONDS * 1.1) < 0.5, 'still one upgrade at 9 cans', capAt[8].toFixed(1), `~${(TANK_SECONDS * 1.1).toFixed(1)}`);
+  check(Math.abs(capAt[9] - TANK_SECONDS * 1.2) < 0.5, 'second upgrade on the 10th can (+20% total)', capAt[9].toFixed(1), `~${(TANK_SECONDS * 1.2).toFixed(1)}`);
+  check(Math.abs(capAt[24] - TANK_SECONDS * 1.5) < 0.5, 'fifth upgrade (25th can) reaches the +50% ceiling', capAt[24].toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
+  check(Math.abs(capAt[25] - TANK_SECONDS * 1.5) < 0.5, 'a 26th can refuels but the tank stops growing — the cap holds', capAt[25].toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
+  check(Math.abs(capAt[29] - TANK_SECONDS * 1.5) < 0.5, 'and neither does a 30th — not an unbounded grind', capAt[29].toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
+
+  // The upgrade message fires on the milestone can specifically, not on an ordinary one.
+  const said = [];
+  const car2 = fresh();
+  const fuel2 = new Fuel({ start: 1, say: (t) => said.push(t), collectCans: () => 0.01 });
+  for (let k = 0; k < 5; k++) fuel2.update(1 / 60, car2);
+  check(said.some((s) => /capacity|bigger tank/i.test(s)), 'the 5th can announces the upgrade', said.join(' | '), 'mentions capacity/bigger tank');
+  const said2 = [];
+  const car3 = fresh();
+  const fuel3 = new Fuel({ start: 1, say: (t) => said2.push(t), collectCans: () => 0.01 });
+  for (let k = 0; k < 4; k++) fuel3.update(1 / 60, car3);
+  check(!said2.some((s) => /capacity|bigger tank/i.test(s)), 'an ordinary can (1st-4th) does not', said2.join(' | ') || '(nothing capacity-related)', 'no capacity mention');
+
+  // fill(1) on an upgraded tank fills PAST the original 360 — capacity generalises everywhere
+  // "a full tank" is used, not just the top-up path.
+  fuel.fill(1);
+  check(Math.abs(fuel.seconds - TANK_SECONDS * 1.5) < 0.5, 'fill(1) on a maxed-out tank fills past the original 360', fuel.seconds.toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
+}
+
+console.log('\n── downhill coasting costs almost nothing ──────────────────────────────────');
+{
+  /* A real, if simplified, downhill grade — height falls as you drive forward (+Z). The sign
+   * was verified empirically against the real Vehicle solver before this test was written
+   * (car.vy reads NEGATIVE while descending it), per this project's own handedness gotcha:
+   * "Verify signs empirically," never assume. */
+  const GRADE = 0.14; // 14% — inside what this world's own roads produce (see fuel.js DESCENT_FULL)
+  const DOWNHILL = {
+    surface: (x, z) => ({
+      y: -z * GRADE, nx: 0, ny: 1 / Math.sqrt(1 + GRADE * GRADE), nz: GRADE / Math.sqrt(1 + GRADE * GRADE),
+      grip: 1, rough: 0.06, surfaceKind: 'tarmac', onRoad: 1, dominant: 0,
+    }),
+    height: (x, z) => -z * GRADE,
+  };
+  // The canonical cruise speed this whole file already calibrates against (CRUISE_V/
+  // CRUISE_THROTTLE, "the cruise the tank is measured against" section above) — not chosen to
+  // flatter the ratio, but because a slower coast makes a WEAKER case for the same reason a
+  // slow car always would: IDLE is a fixed floor and DRAG grows with v^2, so the FASTER you
+  // were coasting, the more of the flat rate is speed-cost the hill genuinely waives, and the
+  // more dramatic (and more honest) the saving looks — which is exactly the situation "almost
+  // no fuel" is meant to describe: it is at speed that a downhill coast pays for itself.
+  const START_KPH = 95;
+
+  /* Ramp up to the SAME speed the SAME way for both runs — on the FLAT, always, proven stable
+   * elsewhere in this file — then hand the already-cruising car over to the surface actually
+   * being measured and come completely OFF the throttle for a short, real coast. Deliberately
+   * NOT "hold a target speed with a controller ON the hill itself": the cruiseController used
+   * elsewhere here has no brake, and a grade steep enough to push the car past a held target
+   * with the pedal already at zero has nothing left for a no-brake PI loop to do but oscillate
+   * — measured, not guessed, an earlier version of this exact test tried exactly that and
+   * produced a downhill run that never even reached a clean starting speed. Position is reset
+   * to (0, 0) at the hand-off (a no-op for the flat's own uniform height, and what stops the
+   * downhill's height() jumping to wherever 30 s of flat driving had carried z) so the switch
+   * is a continuous join in height, not a physics discontinuity.
+   *
+   * The measured window skips the first 1.5 s of the coast before averaging: fuel.js's own
+   * descent signal is smoothed (DESCENT_SMOOTH, so a kerb cannot flicker the discount), and it
+   * starts from zero at the exact instant the throttle lifts — averaging over that ramp-up
+   * would blend "the discount has not caught up yet" into the number and understate what a
+   * SETTLED downhill coast actually costs. 1.5 s is comfortably past its own convergence (a
+   * ~0.4 s time constant). The window is then short (1.5 s of averaging) so the two runs stay
+   * close to their starting speed rather than drifting apart on natural deceleration alone
+   * (which a flat coast does far more than a downhill one, and would understate the discount
+   * in the OTHER direction — a longer average making the flat side look artificially cheap too
+   * as it slows down on its own). */
+  const coastRate = (terrain) => {
+    const car = new Vehicle({ tier: 'touring', terrain: FLAT, preset: 'cruise' });
+    car.placeAt(0, 0, 0); // yaw 0 -> heading +Z, matching the slope's own "downhill in +Z" sign
+    const ctl = cruiseController(START_KPH);
+    const DT = 1 / 60;
+    for (let k = 0; k < 60 * 30; k++) car.update(DT, { steer: 0, throttle: ctl(car, DT), brake: 0, handbrake: 0, analogue: true });
+    car.x = 0;
+    car.z = 0; // see the comment above: a clean, continuous hand-off to the surface being measured
+    car.terrain = terrain;
+    const fuel = new Fuel({ start: 1 });
+    let rateSum = 0, n = 0;
+    const kphAt = [];
+    for (let k = 0; k < 60 * 3; k++) {
+      const cmd = { steer: 0, throttle: 0, brake: 0, handbrake: 0, analogue: true }; // off the pedal, entirely
+      fuel.update(DT, car);
+      car.update(DT, fuel.gate(cmd));
+      if (k >= 60 * 1.5) {
+        rateSum += fuel.rate(car);
+        n++;
+      }
+      if (k % 30 === 0) kphAt.push(car.kph.toFixed(0));
+    }
+    return { rate: rateSum / n, kphTrace: kphAt.join(' -> ') };
+  };
+
+  const flat = coastRate(FLAT);
+  const down = coastRate(DOWNHILL);
+  console.log(`       coasting from ${START_KPH} km/h, throttle off, on the flat:            mean burn rate (settled 1.5-3 s) ${flat.rate.toFixed(3)}, speed ${flat.kphTrace} km/h`);
+  console.log(`       coasting from ${START_KPH} km/h, throttle off, on a ${(GRADE * 100).toFixed(0)}% downhill: mean burn rate (settled 1.5-3 s) ${down.rate.toFixed(3)}, speed ${down.kphTrace} km/h`);
+  check(flat.rate > 0.1, 'sanity: coasting on the flat still costs something real to compare against', flat.rate.toFixed(3), '> 0.10');
+  check(down.rate < flat.rate * 0.35, 'DOWNHILL COAST: settled burn rate drops to a small fraction of the flat coast — "almost no fuel"', down.rate.toFixed(3), `< ${(flat.rate * 0.35).toFixed(3)} (flat coast was ${flat.rate.toFixed(3)})`);
+  check(down.rate > 0.05, 'and never goes to zero or negative — the engine is still on', down.rate.toFixed(3), '> 0.05');
+}
+
+console.log('\n── off-road driving costs double ────────────────────────────────────────────');
+{
+  /* Part 1: an ISOLATED read of rate() itself — same car object, same throttle, same speed,
+   * flipping ONLY car.onRoad — so this measures exactly the multiplier fuel.js applies, with
+   * no confound from anything else. */
+  const car = fresh();
+  car.throttle = CRUISE_THROTTLE;
+  car.speed = CRUISE_V;
+  car.onRoad = 1;
+  const onRoadRate = new Fuel({}).rate(car);
+  car.onRoad = 0;
+  const offRoadRate = new Fuel({}).rate(car);
+  const isoRatio = offRoadRate / onRoadRate;
+  console.log(`       same car, same throttle/speed, only car.onRoad flipped: on-road rate ${onRoadRate.toFixed(3)}, off-road rate ${offRoadRate.toFixed(3)}, ratio ${isoRatio.toFixed(3)}x`);
+  check(Math.abs(isoRatio - 2.0) < 0.02, 'OFF-ROAD: the rate() multiplier is exactly double, as coded', isoRatio.toFixed(3), '~2.0 ("double fuel to off-road")');
+
+  /* Part 2: the honest, end-to-end number. Holding the SAME target speed for real, off-road's
+   * own already-higher rolling resistance (src/car/vehicle.js: `crr = lerp(0.145, 0.014,
+   * onRoad)`) compounds with this x2 multiplier, so real off-road driving costs MORE than a
+   * clean 2x — reported here, not hidden, and only loosely bounded because that compounding
+   * is real physics, not a number this file owns. */
+  const OFFROAD = {
+    surface: () => ({ y: 0, nx: 0, ny: 1, nz: 0, grip: 0.55, rough: 0.5, surfaceKind: 'ground', onRoad: 0, dominant: 0 }),
+    height: () => 0,
+  };
+  /* Below vehicle.js's own OFF-ROAD SPEED CEILING (44 km/h — "Off-road speed ceiling was dead
+   * code" in docs/BACKLOG.md, `offCap = lerp(12.2, 200, ...)` at onRoad=0 is 12.2 m/s), with
+   * real margin, so BOTH runs can genuinely reach and hold it rather than one pinning against
+   * a ceiling this test did not intend to measure. */
+  const TARGET_KPH2 = 32;
+  const runHoldingSpeed2 = (terrain, seconds) => {
+    const car2 = new Vehicle({ tier: 'touring', terrain, preset: 'cruise' });
+    car2.placeAt(0, 0, 0);
+    const fuel2 = new Fuel({ start: 1 });
+    const ctl = cruiseController(TARGET_KPH2);
+    const DT = 1 / 60;
+    for (let k = 0; k < 60 * 30; k++) car2.update(DT, { steer: 0, throttle: ctl(car2, DT), brake: 0, handbrake: 0, analogue: true });
+    fuel2.fill(1);
+    let rateSum = 0, kphSum = 0, n = 0;
+    for (let k = 0; k < 60 * seconds; k++) {
+      const cmd = { steer: 0, throttle: ctl(car2, DT), brake: 0, handbrake: 0, analogue: true };
+      fuel2.update(DT, car2);
+      car2.update(DT, fuel2.gate(cmd));
+      if (k > 60 * 2) { rateSum += fuel2.rate(car2); kphSum += car2.kph; n++; }
+    }
+    return { rate: rateSum / n, kph: kphSum / n };
+  };
+  const onRoadDrive = runHoldingSpeed2(FLAT, 6);
+  const offRoadDrive = runHoldingSpeed2(OFFROAD, 6);
+  const driveRatio = offRoadDrive.rate / onRoadDrive.rate;
+  console.log(`       real drive holding ${TARGET_KPH2} km/h: on-road rate ${onRoadDrive.rate.toFixed(3)} (${onRoadDrive.kph.toFixed(1)} km/h), off-road rate ${offRoadDrive.rate.toFixed(3)} (${offRoadDrive.kph.toFixed(1)} km/h), ratio ${driveRatio.toFixed(2)}x`);
+  check(Math.abs(onRoadDrive.kph - TARGET_KPH2) < 8, 'the on-road drive held the target speed', onRoadDrive.kph.toFixed(1), `~${TARGET_KPH2}`);
+  check(Math.abs(offRoadDrive.kph - TARGET_KPH2) < 10, 'so did the off-road drive — a fair like-for-like comparison', offRoadDrive.kph.toFixed(1), `~${TARGET_KPH2}`);
+  check(driveRatio > 1.8, 'and the real, driven ratio is at least the double this file promises (often more, from rolling resistance)', driveRatio.toFixed(2), '> 1.8');
 }
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all fuel checks passed'}\n`);

@@ -331,15 +331,33 @@ export const SEA_MAX = 0.075;
  *
  * `extent` is the share of the probed disc that is water, and it is why a farm pond does not
  * roar. It cannot go to zero — a stream you are driving beside should still trickle, and a
- * coast seen from far enough away covers very little of the disc however big it is — so it
- * only spans 0.5 to 1. Half the difference between a puddle and the sea, no more.
+ * coast seen from far enough away covers very little of the disc however big it is.
+ *
+ * SIZE, WIDENED. Operator report: "ocean-size water needs its own sound, not just the existing
+ * shoreline-proximity effect." Measured before this pass (`node tools/diag-openwater.mjs`,
+ * section 1): approaching a real 11.1 km² lake and a real ~13,000 m² pond in this seeded world,
+ * by 20 m out the POND was reading LOUDER than the LAKE (0.0702 vs 0.0649), and at 5 m they
+ * were within 3% of each other. Cause, measured rather than assumed: the old range this mapped
+ * `extent` into (0.5..1, saturating once extent passed 0.22) is reached by almost ANY
+ * shoreline once you are close enough to stand at it — lake or pond alike — so at exactly the
+ * distance the layer is most audible, its "how big is this" term had already stopped
+ * discriminating between them. Extent differs most in the 100-400 m band instead (a big lake's
+ * probe disc is still mostly water at 200 m out; a pond's is not), so the domain this maps FROM
+ * is widened outward to spend more of its range there (0.02-0.22 -> 0.08-0.40), and the range
+ * it maps TO is widened both ways (0.5-1 -> 0.32-1.2) so a real difference in extent still
+ * means a real difference in level even at the one distance — right at the shore — where both
+ * bodies eventually read as "surrounded by water". A puddle is now audibly quieter through most
+ * of the approach rather than only far away, and a genuinely large body can end up louder than
+ * the old ceiling at the shore itself — deliberately, since that is the "its own, more present
+ * sound" the report asked for; it only happens metres from real open water, and only grows the
+ * PEAK, so duckFor() below still owns every case where the car is actually moving.
  */
 export function seaGain(dist, extent = 1) {
   if (!(dist < SEA_RANGE)) return 0;
   const roll = 1 / (1 + Math.pow(dist / SEA_D0, SEA_POW));
   // Fade the last 18% of the range to nothing so a probe flipping wet at 539 m cannot click.
   const window = smoothstep(SEA_RANGE, SEA_RANGE * 0.82, dist);
-  const size = lerp(0.5, 1, smoothstep(0.02, 0.22, extent));
+  const size = lerp(0.32, 1.2, smoothstep(0.08, 0.4, extent));
   return SEA_MAX * roll * window * size;
 }
 

@@ -213,6 +213,225 @@ console.log(
     ` worst ${Math.max(...errs.map(Math.abs)).toFixed(0)} m over ${errs.length} steps\n`,
 );
 
+/* ── 2.5 large vs small water — does the sound scale with SIZE, not just distance ──────────
+ * Operator report, verbatim: "Ocean-size water needs to make sound of sea -- large bodies of
+ * water should be flat and have ships on em." The audio half of that: does a genuinely large
+ * body get more PRESENT sound than a small one at the same distance, or did extent's old
+ * saturation (widened in this pass — see seaGain()'s own comment for the before/after and the
+ * real numbers it was tuned from) erase the difference by the time you are close enough to
+ * hear it at all?
+ *
+ * Real bodies, not assumed ones: a coarse (40 m) flood fill over a 12 km square finds every
+ * connected body — the same technique src/render/water.js's waterOpenness() is calibrated
+ * against, see tools/diag-openwater.mjs. The biggest by area, and the most ISOLATED small one
+ * (2-20 cells, i.e. 3,200-32,000 m², ranked by distance to the next-nearest wet cell so a pond
+ * inside a marsh cluster — which genuinely does have a lot of water nearby, however small any
+ * ONE pool in it is — is not mistaken for a small, isolated feature), are each approached along
+ * whichever of 32 directions stays driest longest past its own shore, then compared at the same
+ * set of distances. */
+console.log('--- large vs small water: does the sea gain law actually scale with body size ---');
+{
+  const FHALF = 6000;
+  const FSTEP = 40;
+  const FN = (FHALF * 2) / FSTEP;
+  const fgrid = new Uint8Array(FN * FN);
+  for (let j = 0; j < FN; j++) {
+    const z = -FHALF + j * FSTEP;
+    for (let i = 0; i < FN; i++) if (freeboard(-FHALF + i * FSTEP, z) < 0) fgrid[j * FN + i] = 1;
+  }
+  const compId = new Int32Array(FN * FN).fill(-1);
+  const comps = [];
+  for (let s = 0; s < FN * FN; s++) {
+    if (fgrid[s] !== 1 || compId[s] !== -1) continue;
+    const id = comps.length;
+    const stack = [s];
+    compId[s] = id;
+    const cells = [];
+    while (stack.length) {
+      const k = stack.pop();
+      cells.push(k);
+      const i = k % FN, j = (k / FN) | 0;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ni = i + di, nj = j + dj;
+        if (ni < 0 || ni >= FN || nj < 0 || nj >= FN) continue;
+        const nk = nj * FN + ni;
+        if (fgrid[nk] === 1 && compId[nk] === -1) {
+          compId[nk] = id;
+          stack.push(nk);
+        }
+      }
+    }
+    comps.push({ id, cells });
+  }
+  comps.sort((a, b) => b.cells.length - a.cells.length);
+  const big = comps[0];
+  const bigArea = big.cells.length * FSTEP * FSTEP;
+  const centroid = (cells) => {
+    let si = 0, sj = 0;
+    for (const k of cells) { si += k % FN; sj += (k / FN) | 0; }
+    return [si / cells.length, sj / cells.length];
+  };
+
+  // Distance-to-shore for every wet cell, by multi-source BFS from the dry/wet boundary — a
+  // real "most interior point" rather than a raw centroid, which an irregular lake (this one is
+  // 3.7 x 7.4 km bounding-box, plainly not a simple blob) can land outside of, or right next to
+  // a peninsula with no clean approach in any direction.
+  const distToShore = new Int32Array(FN * FN).fill(-1);
+  {
+    const q = [];
+    let qh = 0;
+    for (let j = 0; j < FN; j++) {
+      for (let i = 0; i < FN; i++) {
+        const k = j * FN + i;
+        if (fgrid[k] !== 1) continue;
+        let shoreAdj = false;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const ni = i + di, nj = j + dj;
+          if (ni < 0 || ni >= FN || nj < 0 || nj >= FN || fgrid[nj * FN + ni] !== 1) { shoreAdj = true; break; }
+        }
+        if (shoreAdj) { distToShore[k] = 1; q.push(k); }
+      }
+    }
+    while (qh < q.length) {
+      const k = q[qh++];
+      const i = k % FN, j = (k / FN) | 0;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ni = i + di, nj = j + dj;
+        if (ni < 0 || ni >= FN || nj < 0 || nj >= FN) continue;
+        const nk = nj * FN + ni;
+        if (fgrid[nk] === 1 && distToShore[nk] === -1) {
+          distToShore[nk] = distToShore[k] + 1;
+          q.push(nk);
+        }
+      }
+    }
+  }
+  const deepestIn = (cells) => {
+    let best = cells[0], bestD = -1;
+    for (const k of cells) if (distToShore[k] > bestD) { bestD = distToShore[k]; best = k; }
+    return best;
+  };
+  const bigDeep = deepestIn(big.cells);
+  const bigX = -FHALF + (bigDeep % FN) * FSTEP;
+  const bigZ = -FHALF + ((bigDeep / FN) | 0) * FSTEP;
+
+  const smallCandidates = comps
+    .map((c, idx) => ({ idx, cells: c.cells }))
+    .filter((c) => c.cells.length >= 2 && c.cells.length <= 20);
+  let bestSmall = null;
+  for (const cand of smallCandidates) {
+    const [ci, cj] = centroid(cand.cells);
+    let iso = Infinity;
+    for (let o = 0; o < comps.length; o++) {
+      if (o === cand.idx) continue;
+      for (const k of comps[o].cells) {
+        const i = k % FN, j = (k / FN) | 0;
+        const d = Math.hypot((i - ci) * FSTEP, (j - cj) * FSTEP);
+        if (d < iso) iso = d;
+      }
+    }
+    if (!bestSmall || iso > bestSmall.iso) bestSmall = { ...cand, iso, ci, cj };
+  }
+  const smallArea = bestSmall.cells.length * FSTEP * FSTEP;
+  const smallDeep = deepestIn(bestSmall.cells);
+  const smallX = -FHALF + (smallDeep % FN) * FSTEP;
+  const smallZ = -FHALF + ((smallDeep / FN) | 0) * FSTEP;
+
+  console.log(
+    `  biggest body: ${(bigArea / 1e6).toFixed(2)} km² (${big.cells.length} cells), interior ~${bigX.toFixed(0)},${bigZ.toFixed(0)}`,
+  );
+  console.log(
+    `  most isolated small body: ${smallArea} m² (${bestSmall.cells.length} cells), nearest other water ${bestSmall.iso.toFixed(0)} m away, centre ~${smallX.toFixed(0)},${smallZ.toFixed(0)}`,
+  );
+
+  // Walk outward from each centre in every direction, and keep whichever stays dry the LONGEST
+  // past its own shore — not merely the first direction that clears a fixed bar. On a map that
+  // is ~19% water (measured above), "some direction is dry for 300 m" is a low bar that a lot
+  // of directions clear while still running close past a second, unrelated puddle; the ray with
+  // the longest clean run is the one most likely to be a genuinely open approach.
+  function findApproach(ix, iz) {
+    let best = null;
+    for (let a = 0; a < 32; a++) {
+      const th = (a / 32) * Math.PI * 2;
+      const dx = Math.sin(th), dz = Math.cos(th);
+      let shoreR = null;
+      for (let r = 5; r < 900; r += 5) {
+        if (freeboard(ix + dx * r, iz + dz * r) >= 0) { shoreR = r; break; }
+      }
+      if (shoreR === null || shoreR < 350) continue;
+      let clean = shoreR;
+      for (let r = shoreR + 15; r < 890; r += 15) {
+        if (freeboard(ix + dx * r, iz + dz * r) < 0) break;
+        clean = r;
+      }
+      const run = clean - shoreR;
+      if (run < 250) continue;
+      if (!best || run > best.run) best = { tx: ix + dx * shoreR, tz: iz + dz * shoreR, dx, dz, shoreR, run };
+    }
+    return best;
+  }
+
+  // The gain law only ever sees field.seaDist/seaExtent, not which body they came from — and
+  // the AmbienceField genuinely (and correctly) reports the nearest water in ANY direction, not
+  // just back along the ray this walked out on. So this prints seaDist next to the INTENDED
+  // distance at every step, same honesty as section 2's own "true d / probe d / err" columns,
+  // rather than silently trusting a label — a row where they disagree by a lot means some other
+  // water was found nearer than the one this site was chosen for, and the pass/fail check below
+  // only compares rows where both sides are actually clean.
+  const rows = [];
+  for (const site of [
+    { name: `BIG (${(bigArea / 1e6).toFixed(1)} km2)`, x: bigX, z: bigZ },
+    { name: `SMALL (${smallArea} m2, isolated)`, x: smallX, z: smallZ },
+  ]) {
+    const app = findApproach(site.x, site.z);
+    if (!app) {
+      console.log(`  ${site.name}: no clean approach found`);
+      rows.push({ name: site.name, byDist: {} });
+      continue;
+    }
+    const field = new AmbienceField(SEED);
+    const yaw = Math.atan2(-app.dx, -app.dz);
+    const byDist = {};
+    for (const d of [400, 300, 200, 100, 50, 20, 5]) {
+      if (d > app.shoreR + 30) continue;
+      const x = app.tx + app.dx * d;
+      const z = app.tz + app.dz * d;
+      field.prime(x, z);
+      field.read(x, z, yaw);
+      byDist[d] = { g: seaGain(field.seaDist, field.seaExtent), pd: field.seaDist, ex: field.seaExtent };
+    }
+    rows.push({ name: site.name, byDist });
+  }
+
+  console.log(`\n  dist(m)     ${rows.map((r) => `${r.name.padEnd(14)}gain   probe-d`).join('    ')}`);
+  for (const d of [400, 300, 200, 100, 50, 20, 5]) {
+    const cells = rows.map((r) => {
+      const c = r.byDist[d];
+      if (!c) return '-'.padEnd(26);
+      return `${f2(c.g).padEnd(11)}${(c.pd === Infinity ? 'inf' : c.pd.toFixed(0)).padStart(5)} m`.padEnd(26);
+    });
+    console.log(`  ${String(d).padStart(4)}        ${cells.join('    ')}`);
+  }
+
+  const CLEAN_TOL = 60; // metres — how close probe-d must sit to the intended distance to count
+  const cleanRatios = [];
+  for (const d of [400, 300, 200, 100]) {
+    const bigC = rows[0].byDist[d];
+    const smallC = rows[1].byDist[d];
+    if (!bigC || !smallC) continue;
+    if (Math.abs(bigC.pd - d) > CLEAN_TOL || Math.abs(smallC.pd - d) > CLEAN_TOL) continue;
+    cleanRatios.push({ d, ratio: bigC.g / Math.max(smallC.g, 1e-9) });
+  }
+  if (cleanRatios.length) {
+    console.log(`\n  clean rows (probe-d within ${CLEAN_TOL} m of intended, both sites): ${cleanRatios.map((r) => `${r.d}m=${r.ratio.toFixed(1)}x`).join('  ')}`);
+    const allBigger = cleanRatios.every((r) => r.ratio > 1.3);
+    console.log(`  large water audibly more present at every clean distance: ${check(allBigger, 'large water is not consistently more present')}`);
+  } else {
+    console.log(`\n  no distance was clean at both sites this seed/run — see the raw probe-d column above (not a fail: real terrain, not guaranteed to offer one)`);
+  }
+}
+console.log('');
+
 /* ── 3. woodland, thin wood and open plain ───────────────────────────────── */
 console.log('--- birds: real woodland, thin wood and open plain ---');
 let deep = null;

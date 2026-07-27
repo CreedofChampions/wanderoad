@@ -5,8 +5,17 @@
  * the bottom of the lake, eleven metres under, forever. This measures the way out.
  *
  * Two things have to be true and they pull against each other:
- *   - drive in, and you are back on a road and driving inside a couple of seconds
+ *   - touch the water, and you are back on a road and driving inside about a second
  *   - potter about at the shoreline, or drive a lakeside road, and NOTHING happens
+ *
+ * 2026-07-27 — "Water = respawn (R) on contact not float under". The first of those got much
+ * stricter: the gate is now 0.25 m of water held for 0.25 s, then 0.35 s of settling, instead
+ * of 0.6 m held for a second and a second of settling. So the timings asserted below are
+ * measured from FIRST CONTACT with the water rather than from crossing the old 0.6 m line,
+ * and the dip test now runs at the scale of the new arming window instead of the old one — a
+ * 0.9 s submersion is no longer a "dip", it is the thing the operator asked to be rescued
+ * from, and there is a check below that proves it now fires. The false-positive set is
+ * otherwise unchanged and still has to come out at zero.
  *
  *   node tools/bench-rescue.mjs
  */
@@ -79,6 +88,8 @@ console.log('\n── the shore, measured ────────────�
 
 console.log('\n── drive in, and you come back ───────────────────────────────────');
 {
+  // Named so the expectations below quote the shipped numbers rather than restating them.
+  const CONTACT = 0.25;
   const { car, rescue, log, placed } = makeRig();
   const q = T.roads.query(LAKE.x, LAKE.z);
   const dx = LAKE.x - q.qx;
@@ -88,6 +99,7 @@ console.log('\n── drive in, and you come back ──────────
   car.placeAt(q.qx, q.qz, Math.atan2(dx / L, dz / L));
 
   let tWet = null;
+  let tContact = null;
   let tDeep = null;
   let tPlaced = null;
   let tDrivable = null;
@@ -99,6 +111,7 @@ console.log('\n── drive in, and you come back ──────────
     const d = waterDepth(surf);
     if (d > deepest) deepest = d;
     if (d > 0 && tWet === null) tWet = t;
+    if (d > CONTACT && tContact === null) tContact = t;
     if (d > 0.6 && tDeep === null) tDeep = t;
     const moved = rescue.update(DT, car, surf);
     if (moved && tPlaced === null) tPlaced = t;
@@ -114,19 +127,26 @@ console.log('\n── drive in, and you come back ──────────
     }
     if (tDrivable !== null) break;
   }
-  console.log(`  first wet ${tWet === null ? '-' : tWet.toFixed(2)} s, past 0.6 m at ${tDeep === null ? '-' : tDeep.toFixed(2)} s, deepest ${deepest.toFixed(1)} m`);
+  const f = (v) => (v === null ? '-' : v.toFixed(2));
+  console.log(`  first wet ${f(tWet)} s, past ${CONTACT} m at ${f(tContact)} s, past 0.6 m at ${f(tDeep)} s, deepest ${deepest.toFixed(1)} m`);
   console.log(`  said: ${log.join(' | ') || '(nothing)'}`);
   check(
-    tPlaced !== null && tPlaced - tDeep < 2.4,
-    'in deep water -> back on the road',
-    `${(tPlaced - tDeep).toFixed(2)} s`,
-    'about 2 s (1 s under + 1 s settling)',
+    tPlaced !== null && tPlaced - tContact < 1.0,
+    'water contact -> back on the road',
+    `${(tPlaced - tContact).toFixed(2)} s`,
+    'about 0.6 s (0.25 s in + 0.35 s settling)',
   );
   check(
-    tDrivable !== null,
+    tPlaced !== null && tPlaced - tWet < 1.2,
+    'measured from the very first drop of water',
+    `${(tPlaced - tWet).toFixed(2)} s`,
+    'under 1.2 s',
+  );
+  check(
+    tDrivable !== null && tDrivable - tContact < 1.6,
     'and driving again, on a road, out of the water',
-    `${(tDrivable - tDeep).toFixed(2)} s after going under`,
-    'under 3 s',
+    `${(tDrivable - tContact).toFixed(2)} s after contact`,
+    'under 1.6 s',
   );
   check(placed() === 1, 'placed exactly once', `${placed()} placements`, '1');
 }
@@ -205,22 +225,56 @@ console.log('\n── and it never fights you ───────────�
     '0 rescues',
   );
 }
+/* A hand-made surface record, so the dips below are exact rather than terrain-dependent.
+ * `deep` is the bottom of a lake; `wash` is 0.14 m — the depth measured at the water's edge on
+ * the dunes at (668, -439), i.e. the surf on a beach; `dry` is well clear of any water table. */
+const wet = new Float32Array(BIOME_COUNT);
+wet[4] = 1; // wetland, the biome with the highest water table
+const WATER_TABLE = waterLevelAt(wet, -99);
+const probe = (kind) => ({
+  w: wet,
+  y: kind === 'deep' ? -3 : kind === 'wash' ? WATER_TABLE - 0.14 : WATER_TABLE + 9,
+  onRoad: 0,
+});
 {
-  // 3. Dipping in and out: a second under is not enough if you come straight back up.
+  /* 3. Dipping in and out — a ford, or clipping a shoreline. The window is the ARMING window,
+   * so this runs at the new scale: 0.2 s in the water is four metres of ford at 70 km/h, or a
+   * corner cut through the edge of a lake, and it has to pass straight through. */
   const { car, rescue, placed } = makeRig();
-  // A hand-made surface record, so the dip is exact rather than terrain-dependent.
-  const wet = new Float32Array(BIOME_COUNT);
-  wet[4] = 1; // wetland, the biome with the highest water table
-  const probe = (deep) => ({ w: wet, y: deep ? -3 : 12, onRoad: 0 });
   car.placeAt(LAKE.x, LAKE.z, 0);
   for (let cycle = 0; cycle < 12; cycle++) {
-    for (let i = 0; i < 60 * 0.9; i++) rescue.update(DT, car, probe(true));
-    for (let i = 0; i < 60 * 0.2; i++) rescue.update(DT, car, probe(false));
+    for (let i = 0; i < 60 * 0.2; i++) rescue.update(DT, car, probe('deep'));
+    for (let i = 0; i < 60 * 0.2; i++) rescue.update(DT, car, probe('dry'));
   }
-  check(placed() === 0, '12 x (0.9 s under, 0.2 s out)', `${placed()} rescues`, '0 — the timer restarts');
-  // ...and one continuous second is.
-  for (let i = 0; i < 60 * 2.2; i++) rescue.update(DT, car, probe(true));
-  check(placed() === 1, 'then 2.2 s under without a break', `${placed()} rescues`, '1');
+  check(placed() === 0, '12 x (0.2 s under, 0.2 s out) — fords, clipped shores', `${placed()} rescues`, '0 — the timer restarts');
+  // ...and staying in is not.
+  for (let i = 0; i < 60 * 1.0; i++) rescue.update(DT, car, probe('deep'));
+  check(placed() === 1, 'then 1.0 s under without a break', `${placed()} rescues`, '1');
+}
+{
+  /* 4. Standing in the surf. Same 0.14 m the dunes shoreline measures, off the road, for a
+   * solid minute — the case that rules out gating on d > 0 rather than on a contact depth. */
+  const { car, rescue, placed } = makeRig();
+  car.placeAt(LAKE.x, LAKE.z, 0);
+  for (let i = 0; i < 60 * 60; i++) rescue.update(DT, car, probe('wash'));
+  check(placed() === 0, '60 s parked in 0.14 m of beach wash', `${placed()} rescues`, '0');
+}
+{
+  /* 5. And the thing the operator actually reported. The old gate let the car sit in a metre
+   * of water for two full seconds before anything happened; a 0.9 s submersion used to be
+   * short enough to pass unnoticed entirely. It is not "a dip" — it is floating under. */
+  const { car, rescue, placed } = makeRig();
+  car.placeAt(LAKE.x, LAKE.z, 0);
+  let tFired = null;
+  for (let i = 0; i < 60 * 0.9 && tFired === null; i++) {
+    if (rescue.update(DT, car, probe('deep'))) tFired = i * DT;
+  }
+  check(
+    tFired !== null && tFired < 0.7,
+    'the old 0.9 s "dip" now IS a rescue (it used to be 0)',
+    `fired at ${tFired === null ? 'never' : `${tFired.toFixed(2)} s`}`,
+    'under 0.7 s — this is the reported bug',
+  );
 }
 
 console.log(`\n${failures ? `${failures} FAILED` : 'ALL GOOD'}\n`);

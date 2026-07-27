@@ -110,12 +110,26 @@ recorded finding is a complete pass.
       fence-post colliders are gone: **nothing draws `scatter.rocks`, `.posts` or `.reeds`**, so
       those were invisible walls — 26 per hectare of highland, up to 2.4 m across. A graze still
       slides (keeps 94% of its speed). `node tools/bench-impact.mjs`.
-- [x] **W7 — water is a trap.** `game/rescue.js`. In deep water you are put back on the road
-      **1.98 s** after going under (1 s to arm, 1 s of the car settling) and driving again at
-      **2.52 s**, via main.js's own `backToRoad()`. Gated on DEPTH (0.6 m) and being off the
-      carriageway, so it cannot fight you: 60 s pottering in 0.14 m of shallows, 60 s of
-      lakeside road with deep water 9 m off, and twelve 0.9 s dips all give **0 rescues**.
+- [x] **W7 — water is a trap.** `game/rescue.js`. Touch the water and you are put back on the
+      road **0.60 s** later (0.25 s to arm, 0.35 s of the car settling), **0.65 s** from the
+      very first drop, and driving again at **1.13 s**, via main.js's own `backToRoad()`.
+      Gated on CONTACT depth (0.25 m — water onto the rim, tyres being 0.34 m in radius) and on
+      being off the carriageway, so it still cannot fight you: 60 s pottering in 0.14 m of
+      shallows, 60 s of lakeside road with deep water 9 m off, twelve 0.2 s ford/shoreline dips
+      and 60 s parked in 0.14 m of beach wash all give **0 rescues**.
       `node tools/bench-rescue.mjs`. A better-looking water treatment is still open.
+
+      **Revised 2026-07-27 — "Water = respawn (R) on contact not float under" (the operator).**
+      It used to be 0.6 m held for 1 s plus 1 s of settling: **2.13 s** of wallowing, by which
+      time the car had sunk to **6.80 m**. Now 0.25 m / 0.25 s / 0.35 s: **0.65 s**, deepest
+      **2.39 m** — measured A/B against the same terrain in one process, since the constructor
+      takes `contact`/`hold`/`lift` as options. The one deliberate behaviour flip: the old
+      "twelve 0.9 s dips → 0 rescues" case now gives **3 rescues**, because a 0.9 s submersion
+      is not a dip, it is the floating-under being fixed. The dip test now runs at the new
+      arming scale (0.2 s in, 0.2 s out → 0) so fords and clipped shorelines still pass through
+      untouched. Not gated on `d > 0` literally: the wash at the dunes shoreline (668, -439) is
+      0.14 m and peaks at 0.18 m, and yanking the car off a beach for standing in the surf
+      would break the never-fight-you rule the same brief also asked to preserve.
 - [x] **W8 — findSpawn (and R / the rescue) could hand back a point in water.** The operator,
       verbatim: "its a buggy mess still starting on water". `findSpawn()` scored candidates on
       grade and distance only — no water check anywhere, including its own last-resort
@@ -173,6 +187,166 @@ recorded finding is a complete pass.
 
 Newly asked for, not yet started:
 
+- [x] **Trees pop in just in front of you, and the cinematic cam shows grass popping out of
+      existence behind the car.** Two playtest reports, two separate root causes, both
+      measured rather than assumed — `world/scatter.js`, `render/trees.js`, `render/grass.js`.
+
+      TREES. `tools/diag-treepop.mjs` drives a real car with the real `Autopilot` along the
+      real road network, through a simulated worker pool timed against REAL `buildChunk()`/
+      `scatterChunk()` calls, feeding the real `Flora`. In steady state (queue empty, not the
+      cold-start burst — that resolves in ~17 s and was not the ongoing problem) trees were
+      still attaching as close as **222–260 m ahead (~10.5 s from arrival at the project's own
+      95 km/h cruise)**, hard and instant, no fade — because `SCATTER_MAX_LEVEL` (2) capped
+      tree DATA at a ~870 m existence radius, silently undercutting `render/trees.js`'s own
+      1400 m `DEFAULT_CULL` the whole time, and a level-2 node's own near edge can sit far
+      closer to the car than the node's characteristic distance. Two-part fix: `SCATTER_MAX_LEVEL`
+      2 -> **3** (existence radius -> ~1740 m, past the 1400 m cull at last) measurably widens
+      typical lead time — steady-state median pop-in 1117.6 -> **1210.9 m**, mean 1017.7 ->
+      **1143.2 m**, p10 554.2 -> **638.5 m** — but the worst-case close attach barely moves
+      (227.9 -> 227.5 m), because that mechanism recurs at any LOD boundary. So every attach
+      now grows in from a 5% seedling to full size over 1.5 s, anchored at its own root (reuses
+      the existing per-instance scale channel, zero shader changes). Verified as real geometry,
+      not just code that runs: `tools/diag-treegrow.mjs` samples a live instance's actual GPU
+      attribute float every frame — 5.1% -> 100% of target, monotonic, landing exactly on
+      schedule. Frame cost: `Flora.update()` mean +0.019 ms/frame (0.048 -> 0.067 ms), worst
+      frame 4.29 -> 6.46 ms — both trivial against a 16.7 ms budget. Not fixed, flagged: a
+      level-3 node's `scatterChunk()` costs ~36 ms, paid synchronously on the main thread in
+      `main.js`'s `onChunk` (same pre-existing pattern every level already uses, just extended
+      to one more, much rarer level) — a real hitch risk if it lands in a render frame, but
+      restructuring that onto a worker is a `main.js`/`chunkWorker.js` change outside this
+      pass's files.
+
+      GRASS. Read `main.js`'s real frame loop rather than guessing: `flora`/`water`/`clouds`/
+      `wind` all get `camera.position`, but `grass.update(car.x, car.z, car.y, dt)` gets the
+      CAR's position — the one outlier. Ring residency being car-anchored is intentional (the
+      file banner's own point 4), so that stayed; but `_draw()`'s visibility test — distance
+      bands AND the cone cull against `U.uCull` (always the TRUE camera's forward direction) —
+      was also being evaluated from that car-relative point. The sport camera sits ~6–7 m from
+      the car, so this rarely showed; `car/camera.js`'s DRIFT orbit (auto-drive only) swings the
+      rig up to ~25 m out and ~39° around the car while looking back across it, which is enough
+      to make an already-built, already-resident chunk that IS in the true lens's view fail a
+      test measured from 25 m and 39° away — `mesh.visible = false` for a chunk whose own data
+      never changed, i.e. grass popping out of existence. Fix: `_draw()` now reads
+      `U.uCamPos`/`U.uCull` directly (already fresh by the time it runs) instead of the
+      passed-in car position; `_recentre`/`_ensureRegion` untouched. `tools/diag-grasscine.mjs`
+      drives a real car through the real DRIFT orbit against the real `Grass`: measured camera
+      offset up to 25.1 m, orbit swing up to 38.6°, and **5.43%** of resident-chunk samples
+      where the true camera should see a chunk the old car-relative test would have hidden.
+      Cross-checked the actual shipped code (not just the theory) against an independent
+      oracle fed the true camera position over 438 058 real samples: **0 disagreements**. Frame
+      cost: isolated steady-state `_draw()` (nothing dirty) measured at 0.016 ms mean / 0.30 ms
+      worst over 244 chunks / 361k instances — the change swaps which `Vector3` three numbers
+      are read from, so no regression is possible in the arithmetic, confirmed in practice.
+
+      `npm test` and `node tools/bench-props.mjs`/`bench-fuel.mjs` stayed green throughout
+      (scatter.js's other consumers all call `scatterChunk` at fixed levels 0/1, never bound to
+      `SCATTER_MAX_LEVEL`, so raising it cannot touch them — checked by grep before relying on
+      it). No GPL/AGPL, no new third-party assets — pure code, nothing for docs/CREDITS.md.
+- [x] **Snow biome: pine-only trees, snow-dusted foliage; dunes: a real desert shape and sand
+      that actually bogs you down off-road.** Two playtest reports from screenshots, `world/
+      biomes.js`, `world/scatter.js`, `render/trees.js`, `game/presets.js`, `car/vehicle.js`,
+      `game/garage.js`.
+
+      SNOW TREES. "Green bushes/trees should be covered in snow too in snow biome -- only pine
+      trees in snow biomes." Cobalt Highlands is the snow biome (`BIOME_TINT[HIGHLAND].snow`
+      is the only nonzero entry in `core/palette.js`), and `BIOME_SCATTER[HIGHLAND].kinds`
+      already said pine/pine/deadpine — but `scatterChunk`'s tree emitter picked a tree's
+      SPECIES with `pickBiome(w, rnd())`, drawing from the site's FULL blended weight vector
+      rather than its dominant biome, so a site that read as highland to the player could still
+      roll a meadow/steppe species (broadleaf, acacia) a fraction of the time — a real
+      cross-biome leak, not a cosmetic one. Fixed narrowly in `world/scatter.js`: once highland
+      is the DOMINANT biome at a site, draw its own kinds only; the genuine mix the weighted
+      draw is FOR still happens in the approach, where highland has not yet won. Measured with
+      the new `node tools/diag-snowtrees.mjs` against 5800 real tree sites at real
+      highland-dominant coordinates (alpine preset, 2401 level-0 chunks scanned around a real
+      spawn): **0 non-pine kinds**, was leaking before the fix.
+
+      No snow-covered material existed anywhere for trees/bushes — `vTint` only ever carried
+      the per-biome foliage COLOUR multiplier, never a white-dusting term. Rather than invent a
+      second system, `render/trees.js` now reads the SAME per-biome `snow` scalar
+      `terrainMaterial.js`/`grass.js` already blend by (`biomeTintArrays().scal`'s third
+      component, packed into a new `B_SNOW` GLSL array alongside the existing `B_FOLIAGE` one)
+      and blends toward the SAME three colours those two files already use
+      (`vec3(0.95,0.96,0.99)` lit / `(0.80,0.85,0.94)` mid / `(0.58,0.66,0.82)` shade) over the
+      SAME 120–240 m altitude band, so a snowy hillside's pines and bushes read as part of the
+      same snowfall as the ground and sward they stand in rather than a disconnected overlay.
+      Biased toward upward-facing surfaces (`N.y`) so the dusting sits on top of a canopy or
+      bush rather than painting it solid. `node tools/diag-snowtrees.mjs` replicates the real
+      shader formula in JS with the real per-biome numbers (the `diag-carpaint.mjs` technique)
+      and shows Cobalt Highlands foliage moving from plain green to (0.90, 0.92, 0.91) as
+      altitude crosses the snowline while Hoshi Meadow (snow = 0.0) never moves at any
+      altitude — the material is wired to the real scalar, not a flag nothing reads.
+      `render/trees.js` is NOT part of `render/painted.js`'s pipeline (Flora owns its own
+      RawShaderMaterial; painted.js is buildings/props/road furniture only) — this reuses
+      trees.js's OWN existing per-vertex biome-tint mechanism rather than building a second
+      material system, which is the same principle the painted-pipeline instruction was
+      pointing at.
+
+      DUNES SHAPE. "Dunes must be a new desert theme... dunes smooth but tall", not another
+      hilly preset with a sand texture. `BIOME_TERRAIN[DUNES].amp` 62 -> **70** (biomes.js,
+      applies everywhere dune-weighted ground exists, including inside other presets) with the
+      comb term's SHARE pulled 0.20 -> 0.16 in the same move so its absolute crest contribution
+      stays flat while the smooth billow part genuinely grows — see the in-file comment for the
+      full reasoning. A larger first attempt (amp 96) measured taller but pushed
+      `node tools/diag-cliffs.mjs`'s DEFAULT-preset gate from 0.016% to 0.060% against its
+      committed 0.019% ceiling: a known highland/meadow/steppe boundary hot-spot (the same
+      cluster the W4 fix already had to fade in) sits within a few points of 45° on its own
+      relief, and even an 8–9% trace of dunes weight there was enough to tip several samples
+      over — reverted to the smaller, safe step. The rest of "tall" is bought in
+      `game/presets.js`'s dunes preset alone (`amp` 0.9 -> **0.98**), which cannot touch that
+      gate at all (scoped to the preset, `diag-cliffs.mjs` never calls `applyTerrain`).
+      Measured, `node tools/diag-relief.mjs dunes`: 720 m-window relief median 73.8 -> **78.2**,
+      mean 80.5 -> **83.7**; at the real spawn (the number the W4 entry above tracks) 34.3 ->
+      **39.5**; massif road grades essentially unchanged (0.9%/22.5%, was 1.0%/22.7%) — taller
+      without the roads getting harder to climb. Dunes' own cliffs figure moved 0.001% to
+      0.065%, deliberately kept under alpine's ("the most dramatic and the least forgiving")
+      own 0.147% so dunes reads as tall-but-smooth rather than the jaggedest preset in the
+      game. `node tools/diag-cliffs.mjs`'s default-preset gate itself: unaffected by the preset
+      change, and the biomes.js step alone measured 60→31 of 360 000 across two different
+      states of a concurrent, unrelated roads.js fix landing mid-session (see below) — safe
+      against both.
+
+      DUNES OFF-ROAD. "sand makes impossible drive offroad 10+ meters (slow/stuck) for
+      non-rally cars." Ordinary off-road in this game is a flat, `onRoad`-driven penalty, the
+      same everywhere; nothing distinguished sand from grass off the tarmac. New `SAND` block
+      in `car/vehicle.js`: while a wheel is genuinely off the made surface AND the ground is
+      dune-dominant, distance actually travelled accumulates into a bog severity (0 at 0 m, 1
+      at 7 m for the ordinary fleet) that steepens the off-road speed ceiling AND — the term
+      that actually matters — a NEW speed-proportional resistance (a flat rolling-resistance
+      bump alone cannot bleed off a fast entry speed within a few metres; a term that grows
+      with speed can). Drains back to 0 in about 1.6 s once the car is back on a made surface,
+      never a hard wall (there is always a real, if tiny, crawl speed), and R still works.
+      Measured with the new `node tools/diag-sandbog.mjs` (a controlled synthetic-field unit
+      test, isolating this from the real road network's own curves): a non-rally car leaving
+      the tarmac at 70 km/h is down to **8.5 km/h by 20 m** and **never reaches 25 m** in dune
+      sand, against **61–63 km/h at the same marks** on an ordinary off-road patch under
+      identical throttle — dramatically harsher, not "somewhat slower". The fleet already
+      documents the Rally as "the only one that is genuinely happy off the tarmac" via
+      `feel.offRoad: 1.35` in `game/garage.js`, which — like the Patrol's brakes and the
+      Estate's forgiving ones before it — was declared and read nowhere outside that file.
+      Wired: `applyCarFeel()` now sets `TYRE.offRoadMul`, and the Rally's severity is capped at
+      1/1.35 ≈ 0.74 rather than merely delayed (dividing only the DISTANCE still walked every
+      car to fully stuck eventually, just a few metres later — measured, then rejected for
+      that reason). Confirmed on the real wiring path (`applyCarFeel(FLEET_BY_ID.rally)`, not a
+      hand-set number): the Rally reaches 25 m at 13.3 km/h where the non-rally car never
+      arrives at all.
+
+      **A concurrent-session note, said plainly because it happened mid-pass:** partway through
+      this work, `world/biomes.js`, `game/presets.js`, `game/garage.js` and `car/vehicle.js` —
+      including another session's own unrelated tilt/rollover work in the last of those — were
+      all found reverted to their pre-session state at once, almost certainly a stray write
+      from another concurrent agent in this same checkout racing a `git` operation neither
+      session was asked to run. Not fought or reverted-back blindly: re-verified against the
+      actual current disk state and re-applied cleanly, with the other session's own tilt/
+      rollover changes (`_smRoll`/`_smPitch`, the `onRoadMin`-based off-road gating, the
+      reverse governor) intact and coexisting rather than clobbered a second time. `npm test`,
+      `node tools/bench-car.mjs` and `node tools/bench-props.mjs` all re-verified green
+      afterward. Left here as a signal that whatever is doing full-file writes across sessions
+      in this workflow is a real risk worth the orchestrator knowing about, not just this pass.
+
+      `npm test`, `node tools/bench-car.mjs` and `node tools/bench-props.mjs` all green. No
+      GPL/AGPL, no new third-party assets — pure code and constant-table changes, nothing new
+      for docs/CREDITS.md.
 - [x] **Intro cinematic.** `src/game/cinematic.js`. Four shots, 38 s, on first visit only (the
       closing shot alone on later visits; `?intro=full|short|off`): a crane over the land toward
       the seed's tallest massif, a low glide in off the water, a tracking shot down a road, then
@@ -460,8 +634,313 @@ Newly asked for, not yet started:
 - [ ] Base44 backend is defined in `base44/` but undeployed — the CLI login is a device-code
       flow that needs one human click.
 - [ ] Remote cars are ghosts with no interpolation testing under real latency.
+- [x] **Two multiplayer bugs from the same playtest report, plus proximity fuel-sharing and a
+      3-strikes limit on the passing-driver mercy.** Operator, verbatim: "person 1 sees a
+      ghoast as player 2 of the wrong car - player 2 does not see 1."
+
+      WRONG CAR, confirmed as a real, 100%-reproducible bug and fixed. `carPacket()`
+      (`src/main.js`) sent `car.tier` — the Vehicle's own `'gt'|'sports'|'hyper'` silhouette
+      STRING — straight onto a wire field `server/drive.php` stores as SQL `INTEGER`. PHP
+      casts a non-numeric string to 0, so every ghost, for every peer, rendered as
+      `CAR_TIERS[0]` regardless of what its driver had actually chosen. Confirmed directly
+      against the live backend, not just read in the PHP source: sending the three old string
+      shapes (`'gt'`, `'sports'`, `'hyper'`) all came back `tier: 0` on the peer that received
+      them. Fixed by sending the FLEET index (0-6, the same numbering `game/garage.js` already
+      uses) instead — a lossless fit in the same 0-63 wire field, no server change needed — and
+      decoding it back to the correct silhouette in a new `buildGhostFromFleet` adapter
+      (`src/main.js`). `tools/net-test.mjs` used to hardcode `tier: 0` for BOTH its test seats,
+      which is exactly the kind of gap that let this ship looking green (a bug that collapses
+      every tier to 0 is invisible to a harness that only ever sends 0); it now drives two real,
+      different fleet cars and asserts both arrive intact — `PASS seat 2's car arrived intact —
+      not just tier 0  sent patrol (index 6) — got index 6 (patrol)`, and the same the other way.
+
+      PLAYER 2 DOES NOT SEE 1: investigated hard, not found as a deterministic protocol bug.
+      Read `server/drive.php`'s interest-cell query and self-exclusion in full — both are
+      provably symmetric by construction (a 3x3 neighbourhood built from your OWN position,
+      `player_id <> ?` bound to a server-derived id) — and built a NEW, deliberately
+      uncoordinated live-backend harness (one seat idling alone, the other approaching on its
+      own independent timer, no scripted hand-off) rather than trusting the existing
+      `net-test.mjs`, whose own coordinated "wait, then let each side speak once" pattern could
+      not have caught an asymmetry like this even if one existed. Both directions saw each
+      other reliably; the one blip found (a single tick at the exact edge of interest range)
+      self-corrected within a second and hit the approaching side, not preferentially either
+      role. What WAS found and fixed: `netTick()` ran only from inside the rAF-driven `frame()`
+      loop, and browsers pause `requestAnimationFrame` for a document that is not the visible
+      tab — documented behaviour, not a tuning knob. `docs/MULTIPLAYER.md`'s own recommended
+      way to test multiplayer solo is two windows on one machine, which guarantees one of them
+      is always backgrounded, so that window's presence would starve exactly the way "the other
+      person can't see me" describes. `netTick()` now runs off its own `setInterval` (250 ms),
+      independent of rendering. Said plainly: this is the most likely concrete cause given
+      everything else checks out symmetric, not a confirmed root cause — logged honestly rather
+      than claimed as fixed beyond what was actually shown.
+
+      PROXIMITY FUEL SHARING, new. Operator: "let them also share gas when close -- so they can
+      team up." A press (`KeyF`) gives `SHARE_FRACTION` (20%) of a tank to the nearest ACTUAL
+      other player within `SHARE_RADIUS` (25 m) — gated so the giver can never strand
+      themselves (`MIN_GIVER_RESERVE`), and a REAL transfer: the giver's tank drops by exactly
+      what the receiver's gains, never both sides topping up from nothing. There is no
+      server-side concept of fuel, so this rides the two spare bits already in the wire's
+      `flags` integer (`SHARE_FLAG`, bit 2) rather than asking the live backend for a new
+      message type this round could not get deployed — `src/net/remotes.js` watches for the
+      bit's RISING edge on a nearby peer (re-checking the giver's reported position at the
+      moment the share arrives, not a stale interpolated one) and hands the fraction to
+      `Fuel.update()` through the same pull pattern `collectCans()` already uses. Proven three
+      ways in the new `tools/net-test-fuel-share.mjs`: (A) against the LIVE backend, the
+      SHARE_FLAG bit set by one real client really arrives set on the other's peer response;
+      (B) with the real `Fuel` and `Remotes` classes driven directly, a give costs the giver
+      72.0 s of tank and the receiver gains the same 72.0 s, a pulse held across several
+      snapshots pays out once and not once per snapshot, and a flag from outside SHARE_RADIUS
+      is correctly not credited; (C) the giver's own refusals (too little to spare, nobody
+      close enough) cost nothing. 37/37 checks green.
+
+      THE PASSING-DRIVER MERCY GETS A BOTTOM, deliberately overriding this file's own former
+      "never a game over" note on the operator's explicit instruction: "3x max 'someone gives
+      you a gas can' and then game over (restart og position) so its teamwork to find gas
+      stations and get the furthest from home." `MERCY_MAX` (3) uses, persisted for ever per
+      player exactly like `Streak.best` (`localStorage`, one small record, read once, written
+      on every change — proven to survive a fresh `Fuel` instance on the same key, i.e. a
+      reload). The 4th dry stop calls a new `resetToSpawn()` (the session's ORIGINAL spawn
+      point, not `backToRoad()`'s "nearest road" — the operator asked for "restart og position"
+      specifically) instead of granting a can. **Is "game over" too harsh for a cozy game?**
+      Asked plainly, as requested: the MECHANISM is a real, felt, lifetime consequence exactly
+      as asked for, deliberately harsher than anything else in this game — but the MOMENT
+      itself was kept to the same gentle shape every other setback here already uses: a single
+      calm toast ("no one is passing this time — a quiet ride back to the start"), a graceful
+      teleport, and the tank left at a real 50% rather than empty, so the reset is not ALSO an
+      immediate second emergency. Checked automatically that no message anywhere in the
+      sequence reads like a fail screen. `git diff -- src/world/props.js` was read before any
+      of this was written: another agent's `stationDistanceMul()` (station spacing eases from
+      1.0 near spawn to a 0.4 floor by 70 km out) is exactly the "easier at start, slowly
+      harder" curve the operator asked for — not duplicated here. It is not exported (module-
+      private in `props.js`, not this pass's file to add an export to), so the SAME breakpoints
+      and shape are mirrored, not imported, in `game/fuel.js`'s `mercyScarcityMul()` — applied
+      as the inverse, so a mercy far from home still covers roughly the same number of
+      "stations you might have missed" (measured: 0.16 near spawn -> 0.40 at the 70 km floor,
+      ratio 2.50, matching `STATION_FAR_MUL` exactly). The active, player-to-player share
+      deliberately does NOT scale with distance — a distant giver being asked to sacrifice more
+      of their own increasingly precious fuel to be equally kind is a cost falling on generosity,
+      not on the game being harder, which is not what was asked for.
+
+      `npm test` and `node tools/bench-fuel.mjs` both stayed fully green throughout, including
+      the other agent's own new capacity-upgrade and downhill/off-road sections built into
+      `bench-fuel.mjs` concurrently this same round — confirmed compatible, not fought.
+      `node tools/net-test.mjs` and `node tools/net-test-fuel-share.mjs`.
 - [ ] Engine audio is still synthesised. RPM-indexed CC0 sample crossfading is the researched
       answer; sources are listed in docs/CREDITS.md.
+- [x] **Auto-drive drove off dead ends, and never recovered from being stuck.** Operator report,
+      verbatim: "Road stop without explanation in middle of no where and autodrive keeps driving
+      off that road-end", plus separately "auto drive should reset to road when stuck and have a
+      ping when activated". A screenshot showed a road stopping in open ground with nothing
+      marking why — that half is legitimate: the lattice in `src/world/roads.js` produces real
+      dead ends by construction (a node with no qualifying connection on one side), not a
+      worldgen bug. What was wrong was `src/car/autopilot.js`'s reaction to one: `headAt()`
+      correctly holds the heading flat past the end of a chain, on purpose, so a dead end never
+      reads as a phantom hairpin — but nothing was reading "the chain stopped because there is
+      nothing left to chain" as different from "the chain stopped because this frame did not
+      need to look any further", so a dead end looked exactly like an open, straight road right
+      up until there was none left, and the car drove off the last vertex into the field beyond.
+
+      `_horizon()` now tells the two apart (`this._deadEnd`, set only when `nextEdge()` is
+      actually asked "what comes after this?" and reports nothing — the same "qualifying
+      connection" test the lattice itself uses for a leaf node), and the speed plan brakes to a
+      real stop against a CONFIRMED one, well before the existing reactive lost-the-road brake
+      would ever notice (that one only fires once the car is already off the tarmac; extended,
+      not replaced — same 4 s timeout, same hand-back-control shape it already had). Separately,
+      a stuck detector now watches speed independent of position: near zero for more than 3.5 s
+      while still engaged — wedged on a rock, hung up on a verge, anything that physically pins
+      it — resets the car to the nearest road by calling the SAME `recover()` function the R key
+      and the water rescue already call (`src/game/rescue.js`'s own constructor pattern;
+      `main.js` wires all three to the one `backToRoad()`, so none of them can disagree about
+      where "the road" is), then carries on driving rather than handing control back. A short
+      synthesised tone (`EngineAudio.ping()`, a sine settling from D5 to B4, no external audio
+      file) now fires once per G-press, additional to the existing "auto-drive on — sit back"
+      toast — kept, not replaced.
+
+      New harness, `tools/bench-autopilot-safety.mjs` (bench-drive.mjs measures normal driving,
+      the wrong shape of test for either of these): finds a genuine dead end in a real generated
+      network with the exact same `nextEdge()` test the autopilot itself brakes against, drives
+      straight at it, and confirms the car stops short — measured across seeds, 3.6-4.0 m from
+      the literal last vertex every time, never past it — and hands back with reason "the road
+      ends here", never open terrain. Separately pins a car's velocity 550-830 m off the network
+      to simulate being wedged (this harness has no collision system to wedge it against for
+      real) and confirms `recover()` fires at 3.51 s every time — bounded, and deliberately ahead
+      of the 4 s lost-road path so the one case they overlap resolves through the better outcome
+      — and the car ends up exactly on the road afterward, still engaged. Confirms the ping fires
+      exactly once on activation, stays flat across 240 frames of ordinary driving and across
+      deactivation, and fires again on a second activation. All green across 6 seeds (1, 7, 42,
+      2026, 999999, 20260726). `npm test` and `node tools/bench-drive.mjs` unaffected — 100%
+      on-road, 1.4 m worst offset, unchanged from baseline, since the new checks only ever
+      engage away from ordinary driving.
+
+- [x] **Road cuttings read as stark cliffs, not soft hillsides.** Operator, verbatim: "Road cuts
+      through mountains too stark -- should be less cliff-cut more soft hill." Screenshots showed
+      a near-vertical, dark, jagged, low-poly wall right beside the tarmac — reading as a
+      rendering glitch rather than a graded roadside slope — and the same kind of wall right
+      where two roads meet. **DONE 27 July.**
+
+      Not a repeat of the batter tuning above (search "batter"): that work's SHAPE decision
+      (smoothstep over straight-with-eased-ends) and RATIO (1.6, uncapped) both stand, untouched.
+      What was still wrong sat one level up, in `RoadField.carve()` (roads.js), which hands
+      `terrain.js`'s `groundFromCarve()` the `d`/`y`/`width` it uses to size and place its own
+      (correctly uncapped) shoulder. Two distinct mismatches, both confirmed with real per-edge
+      dumps on the seeded world (20260726) before either was touched:
+
+      **Two roads' earthworks blending — the aggravating case the second screenshot pointed at,
+      confirmed real: 53 of 59 over-45° points in the standard window sat within reach of TWO
+      road edges, not one.** `out.d` (nearest-edge distance) was tracked independently of
+      `out.y`/`out.width` (the weighted blend across contributing edges), so a short lane —
+      geometrically nearest, but already past its own narrow 12 m shoulder — could set `d`, while
+      a distant, much deeper arterial cutting 40 m out, still legitimately blending in, set `y`.
+      groundFromCarve then sized a wide shoulder from the arterial's own big drop and evaluated it
+      at the lane's much shorter distance: a real point came out 20 m below the land beside it, an
+      80° face, from two edges that were each individually well-behaved. Fix: `d` is now blended
+      the SAME weighted way as `y`/`width` (`dSum += w * ed`, same `w`), not tracked as a separate
+      nearest-wins scalar. Provably safe: `mask > 0.001` (the only condition under which
+      groundFromCarve ever reads `d`) implies `wSum > 1e-6` by construction — mask IS the largest
+      single term inside wSum — so the blended `d` is live exactly where the old unblended one
+      used to be the lone straggler, and the untouched raw-nearest fallback only surfaces where
+      mask is already ~0 and groundFromCarve is never called.
+
+      **A second, single-edge mismatch, same root shape.** roads.js's own per-edge weight capped
+      the drop it fed its shoulder formula at `MAX_EARTHWORK + 4` (22 m) — sized for how far a
+      ROAD's own profile may sit from the land under it, not the different question `drop`
+      answers there (how far the QUERY POINT's land sits from the road, unbounded by that clamp).
+      terrain.js's groundFromCarve uses the identical formula on the identical `drop`, uncapped on
+      purpose (its own comment: "capping the width while the height keeps growing is how you
+      build a wall"). Past 22 m of true drop, roads.js undercounted the shoulder and reported
+      `mask` near zero a few metres before groundFromCarve — the same edge, uncapped — was still
+      blending a third of the way toward it: one otherwise well-behaved edge produced an 89° jump
+      inside 20 cm, right at that crossover. Fix: uncapped to match, with a safety ceiling tied to
+      the coarse bounding box each edge already qualified against (never tighter than real
+      measurement needed — true drop maxed at 29 m over the checked window; the ceiling only
+      bites past ~41-44 m).
+
+      `node tools/diag-cliffs.mjs`: **59/360000 (0.016%) -> 31/360000 (0.009%)**, comfortably
+      under the recorded 0.019% ceiling. The tail is the real story, not just the count: histogram
+      50-60/60-70/70-80 went **21/18/13 -> 3/0/0**, worst point **80° -> 56°** — every sample that
+      would have read as a near-vertical dark wall is gone; what remains peaks in the high 40s to
+      mid 50s, a steep grassy bank rather than a cliff face. New tool `node tools/diag-batter.mjs`
+      walks the real PROFILE (land / carve target / final height) through the worst real
+      multi-edge and single-edge points, kept as a permanent regression check, not just a
+      pass/fail count: before, a 19.4 m vertical step in a 0.2 m span (89°) at the multi-edge
+      point measured directly; after, the same walk is smooth and continuous across its full
+      44 m, peak 65.5° reached gradually, no step anywhere. Honestly measured, not hidden: `node
+      tools/diag-relief.mjs` shows alpine (already flagged there as "the one that grows walls")
+      improving **0.139% -> 0.070%**, better than its own historical 0.078% baseline — but rolling
+      and dunes each pick up a handful of new over-45° points (0/1 samples -> 11/9), all in the
+      45-48° range on inspection (mask 0.42-0.75, genuinely covered, nowhere near the eliminated
+      70-90° tail) — a threshold test sitting across a now-more-consistent boundary, not a new
+      cliff mechanism. `npm test` 22/22; `node tools/diag-seam.mjs` (the fall-through guard,
+      gotcha 6) unaffected on both rolling and alpine — nothing this pass touches the road
+      elevation profile itself, only the terrain-carve blend around it.
+
+      **Junction notch/crack, checked, not touched.** The triangular gap and stray marking
+      fragments the operator's earlier screenshots showed at a crossing are gone by construction,
+      not just by measurement: the junction patch (this round's own 90-degree-junction work,
+      `render/road.js`'s `buildJunction`) is a raised overlay on top of full-length, un-trimmed
+      ribbons, and two strips crossing at any angle cannot enclose a hole between them (every ray
+      out from the crossing point stays covered by at least one strip's own width until it exits
+      both). `node tools/diag-junction-geom.mjs` still passes all 5 checks across 121 real
+      crossings in 4 windows (no NaN, every triangle faces up, vertex heights agree with
+      Terrain.height to 0.001 m, patch bbox reaches at least half the narrower road's width every
+      side) — re-run after this pass's own change, not reused from before it. Not touched: that
+      geometry system is large and belongs with whoever built it.
+- [x] **Ocean-size water needs sea sound, should be flat, and should have ships on it.**
+      Operator, verbatim: "Ocean-size water needs to make sound of sea -- large bodies of water
+      should be flat and have ships on em." Three parts, one shared idea underneath all three:
+      "large" is not knowable exactly without a flood fill, which this pass does not do per
+      frame or even per chunk-adopt — instead a coarse, cheap, CACHED ring-sample
+      (`waterOpenness()`, `src/render/water.js`), snapped to a 220 m world-aligned cell so
+      neighbouring water chunks agree exactly and draw no seam. Calibrated against a real 40 m
+      flood fill over a 12 km square of the shipped seed, not guessed: `node
+      tools/diag-openwater.mjs` (new) prints the table — the twelve largest real bodies (up to
+      11.1 km²) scored 0.55-1.00 at their most open point, real ponds under 25,000 m² scored
+      0.00-0.70 (an occasional high outlier is a cluster of several small pools in one wetland,
+      which genuinely does have a lot of water nearby and which this proxy is not trying to
+      tell apart from one big body).
+
+      SEA SOUND. `src/audio/ambience.js`'s positional ambience (built two sessions ago) already
+      had a size term, `extent`, but measured — not assumed — it was not doing its job: before
+      this pass, approaching a real 11.1 km² lake and a real, genuinely isolated 12,800 m² pond
+      in this seeded world, by 20 m out the POND read LOUDER than the LAKE (0.0702 vs 0.0649),
+      because `extent`'s old range (0.5-1, saturating past 0.22) is reached by almost any
+      shoreline once you are close enough to stand at it, lake or pond alike — so right where
+      the layer is most audible, its "how big" term had already stopped discriminating. Fixed
+      by widening both the domain (`0.02-0.22` -> `0.08-0.4`, spending more of the map on the
+      100-400 m band where big and small bodies actually differ) and the range it maps to
+      (`0.5-1` -> `0.32-1.2`) in `seaGain()` — see that function's own comment for the full
+      derivation. After: at a real isolated pond vs the real biggest lake, 400 m out the lake is
+      **12.6x** louder, 200 m out **2.5x**, closing to parity only in the last ~10-20 m, where a
+      130 m-wide pond's own edge and a kilometres-wide sea's edge both genuinely put "a lot of
+      water" within the same 500 m probe disc — an intrinsic limit of a bounded-radius proxy, not
+      a bug left in. `node tools/diag-ambience.mjs`'s existing checks (including its own
+      shore-gain-ratio and handedness sections) stayed green throughout; a new section in that
+      same tool reproduces the big-vs-small measurement with real, honestly-reported probe
+      distances (not assumed labels) on every run.
+
+      FLAT. `src/render/water.js`'s ripple/gust shader (deliberately careful anti-aliasing
+      already documented there — untouched) now reads a fourth per-vertex quantity, `wopen`,
+      baked from `waterOpenness()` once at chunk-adopt time, never per frame. A `calm` factor
+      (`smoothstep(0.55, 0.92, wopen)`) scales the ripple-bump amplitude down to 30% and the
+      wind-gust darkening down to 45% on the calmest, largest water — nothing about HOW the
+      bands are built or band-limited changed, only how tall they are allowed to stand. Real
+      before/after off a REAL built water plane (`buildChunk` + `Water.add`, not just the
+      standalone function): the biggest lake's own chunk bakes `wopen` 1.000 across every
+      vertex, giving amp x0.300 / gust x0.450; a small pond bakes 0.050-0.350 and is left
+      untouched (x1.0). `node tools/diag-openwater.mjs` section 2.
+
+      SHIPS. New `src/render/ships.js`: a rare, low-poly boat (five painted-pipeline faces for
+      the hull, tapering to a stem edge at the bow — no lofted curve, matching this project's
+      whole visual language — plus an optional cabin box and mast), no third-party asset (see
+      docs/CREDITS.md). Placed on its own rolling lattice around the car, like `render/props.js`
+      and `render/road.js`, deliberately NOT tied to the terrain streamer's chunk records —
+      `props.js`'s own file header explains why: a sparse feature tied to the quadtree gets
+      re-decided every time a chunk's LOD changes. One candidate per 500 m tile, gated in
+      increasing cost order (real depth, then `waterOpenness() >= 0.68`, then a tight 40 m
+      all-round shore-clearance ring, then 70 m clear of every road via `world/roads.js`'s own
+      cheap standalone `roadDistance()`, then a 0.3 rarity draw) — measured over a real 144 km²
+      square: 34 sites clear every gate but rarity, 7 real ships result, **0.58 ships per km² of
+      qualifying large-open water**, independently re-verified (a second, separately-written
+      check, not the placement code grading its own homework): nearest road to any placed ship
+      72.3 m, worst shore-ring sample -1.27 m of freeboard (both clear their floors). A ship
+      never moves its (x, z) after placement — it bobs (0.14 m), rocks (~2°) and slowly swings
+      its heading (~7°) at anchor, entirely in `Object3D` transform updates, which is a safety
+      property as much as a look: the road/shore checks are only ever paid for once. Real,
+      driven proof it animates and never drifts: `node tools/diag-openwater.mjs` section 4 reads
+      a live hull's own `position`/`rotation` before and after 5 s of simulated time.
+
+      FRAME COST. `waterOpenness()` never runs in the render loop — only from
+      `Water._buildPlane()` (chunk-adopt) and `Ships`' own 0.5 s-gated rescan, and it is cached
+      per 220 m cell: 139 µs cold (20 point samples), 175 ns warm. The water shader gained one
+      extra 4-byte vertex attribute and a smoothstep plus two `mix()`es in the fragment shader —
+      no new texture read, no new branch. Ships: ~21 triangles per hull, one draw call each
+      (individually meshed, like the floating fuel cans, so each can bob independently), and
+      section 3's own density measurement is the bound on how many can ever be live at once.
+      `node tools/diag-openwater.mjs` section 5.
+
+      Concurrent-session note: `git diff -- src/world/terrain.js src/world/roads.js
+      src/world/props.js tools/bench-props.mjs` was read before this pass touched anything and
+      stayed clean at that point (both files carry real, unrelated work from other sessions as
+      of this entry — a Terrain.height/roads.js crossing fix and a props.js/bench-props.mjs
+      pass — neither reached by anything in this entry: this pass's files never import
+      `world/props.js`, and `world/roads.js` is only ever called through its existing, unchanged
+      `roadDistance()`/`RoadField` public API, never edited). Another session's
+      `src/world/biomes.js` dunes-amplitude tuning landed mid-pass too; it touches none of the
+      `water`/biome-weight machinery this work reads, confirmed by re-reading its diff rather
+      than assuming. `src/main.js` was re-read immediately before every edit — two further
+      concurrent sessions (multiplayer ghost/fuel sharing, and the station/mercy work above)
+      were landing real, unrelated changes to it throughout this pass; the `Ships` hookup is
+      four lines (an import, a construction, one `update()` call, one `window.WANDEROAD` entry)
+      chosen to sit beside the existing `water`/`props` lines rather than restructure anything
+      nearby. Also observed, worth recording: partway through this pass every uncommitted change
+      in the working tree — this entry's own files included, and every other concurrent
+      session's — was wiped back to HEAD by something outside any of these sessions (git diff
+      went clean repo-wide, not just for this pass's files); nobody here ran a destructive git
+      command, so it was external to this workflow. Everything in this entry was re-applied
+      after and re-verified green; flagged in case it recurs. `npm test` green throughout
+      (`bench-car`, `bench-slope`, `diag-water` 0 underwater, `diag-cliffs` 0.009% against the
+      0.019% ceiling, `diag-seam` all passed) — nothing in this pass touches terrain, road or
+      collision geometry.
 
 ## Done
 

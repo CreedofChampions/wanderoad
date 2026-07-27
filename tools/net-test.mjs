@@ -19,11 +19,24 @@
  *      it from its own peer list, so neither window ever sees the other.
  *   1. Interest management hides a player 6 km away — the 2048 m cells are real.
  *   2. Two players parked at the same place appear in EACH OTHER's peer list, with the
- *      position and name the other one actually sent.
+ *      position, name AND CAR (tier/paint — see below) the other one actually sent.
  *   3. The adaptive tick rate rises to 2 Hz when they are close, which is the server
  *      independently agreeing that they are near each other.
  *   4. `bye` removes you: the peer list can go down as well as up, so a passing peer list
  *      is not just a table that only ever grows.
+ *
+ * Car identity, added after a playtest report ("person 1 sees a ghost as player 2 of the
+ * wrong car — player 2 does not see 1"): this harness used to hardcode `tier: 0` for BOTH
+ * seats, which is exactly the kind of gap that lets a real bug ship looking green — a
+ * transmit bug that collapses every tier to 0 is invisible to a test that only ever sends 0.
+ * The two seats below now drive different, real fleet cars (see FLEET in src/game/garage.js)
+ * and section 4 asserts each one's tier AND paint arrive intact, decoded back to the correct
+ * car. What this cannot do is call main.js's carPacket() directly — main.js imports three.js
+ * and the DOM and cannot run under Node, which is the whole reason this harness exists — so
+ * it proves the wire and the live server carry a real fleet index faithfully end to end,
+ * using the SAME FLEET data main.js reads, rather than proving main.js's own encoding line
+ * by line. That line was read by hand instead (see src/main.js, the note above
+ * buildGhostFromFleet and above carPacket()'s `tier` field).
  *
  * Usage:
  *   node tools/net-test.mjs                          # against the live backend
@@ -39,6 +52,11 @@
 import { createTransport } from '../src/net/transport.js';
 import { createIdentity } from '../src/net/identity.js';
 import { joinUrl, mountInvite, nextSeat } from '../src/net/invite.js';
+// FLEET is the one list of real cars (src/game/garage.js); reading it here — never editing
+// it — is what lets this harness send the SAME fleet-index encoding main.js's carPacket()
+// sends, off the SAME data, rather than a second hand-maintained copy of "which car is which
+// number" that could quietly drift from the game's own list.
+import { FLEET } from '../src/game/garage.js';
 
 /* ── options ───────────────────────────────────────────────────────────────*/
 
@@ -66,16 +84,21 @@ const EXPIRE_S = 8;
  * and never called) these two would read the same key and come back as one player.
  */
 
-function makeClient(seat, label) {
+function makeClient(seat, label, carId) {
   const id = createIdentity(seat);
   id.setName(label);
   const transport = createTransport({ backend: 'php', phpBase: BASE, identity: id });
+  // The exact expression src/main.js's carPacket() sends: the FLEET index of the car this
+  // player is driving, not the physics tier string — see the note there.
+  const tierIndex = Math.max(0, FLEET.findIndex((c) => c.id === carId));
   return {
     seat: seat || '(default)',
     label,
     id,
     playerId: id.getPlayerId(),
     transport,
+    carId: FLEET[tierIndex]?.id ?? FLEET[0].id,
+    tierIndex,
     x: 0,
     z: 0,
     vx: 0,
@@ -108,7 +131,9 @@ async function tick(c, { x, z, vx = 0, vz = 0 }) {
       throttle: vx || vz ? 0.4 : 0,
       brake: 0,
       gear: 2,
-      tier: 0,
+      // The car this seat is "driving" — see makeClient(). Used to be hardcoded 0 for both
+      // seats, which is why the wrong-car bug shipped looking green: see the header note.
+      tier: c.tierIndex,
       paint: c.id.getLook().paint,
       flags: 0,
     },
@@ -227,12 +252,16 @@ async function main() {
   log(`backend  ${BASE}`);
   log(`meeting  ${MEET_X}, ${MEET_Z}\n`);
 
-  const a = makeClient('', 'net-test seat 1');
-  const b = makeClient('2', 'net-test seat 2');
+  // Deliberately different, and deliberately not tier 0: 'estate' is FLEET[0] ('gt'), so if
+  // a transmit bug ever collapses every tier back to 0 (exactly what shipped before this
+  // fix — see the header note), seat 1 driving something else makes that a visible mismatch
+  // instead of an accidental pass.
+  const a = makeClient('', 'net-test seat 1', 'coupe');
+  const b = makeClient('2', 'net-test seat 2', 'patrol');
 
   log('0. two seats are two players');
-  log(`   seat ${String(a.seat).padEnd(10)} id ${a.playerId}  name "${a.id.getName()}"`);
-  log(`   seat ${String(b.seat).padEnd(10)} id ${b.playerId}  name "${b.id.getName()}"`);
+  log(`   seat ${String(a.seat).padEnd(10)} id ${a.playerId}  name "${a.id.getName()}"  car ${a.carId} (tier ${a.tierIndex})`);
+  log(`   seat ${String(b.seat).padEnd(10)} id ${b.playerId}  name "${b.id.getName()}"  car ${b.carId} (tier ${b.tierIndex})`);
   check(a.id.getSecret() !== b.id.getSecret(), 'the two seats hold different secrets');
   check(
     a.playerId !== b.playerId,
@@ -290,7 +319,7 @@ async function main() {
   await sleep(700);
   r2a = await tick(a, { x: a.x, z: a.z, vx: 0, vz: 0 });
 
-  log('\n4. each one is in the other’s peer list');
+  log('\n4. each one is in the other’s peer list — with the right position, name AND CAR');
   const bSeenByA = peerOf(r2a, b.playerId);
   const aSeenByB = peerOf(r2b, a.playerId);
 
@@ -298,14 +327,16 @@ async function main() {
     log(
       `   seat 1 sees  id ${bSeenByA.id}  "${bSeenByA.name}"  at ${bSeenByA.x.toFixed(1)}, ${bSeenByA.z.toFixed(1)}` +
         `  v(${bSeenByA.vx.toFixed(1)}, ${bSeenByA.vz.toFixed(1)})` +
-        `  ${Math.hypot(bSeenByA.x - a.x, bSeenByA.z - a.z).toFixed(1)} m away`
+        `  ${Math.hypot(bSeenByA.x - a.x, bSeenByA.z - a.z).toFixed(1)} m away` +
+        `  car tier ${bSeenByA.tier} paint ${bSeenByA.paint} (sent as ${b.carId})`
     );
   }
   if (aSeenByB) {
     log(
       `   seat 2 sees  id ${aSeenByB.id}  "${aSeenByB.name}"  at ${aSeenByB.x.toFixed(1)}, ${aSeenByB.z.toFixed(1)}` +
         `  v(${aSeenByB.vx.toFixed(1)}, ${aSeenByB.vz.toFixed(1)})` +
-        `  ${Math.hypot(aSeenByB.x - b.x, aSeenByB.z - b.z).toFixed(1)} m away`
+        `  ${Math.hypot(aSeenByB.x - b.x, aSeenByB.z - b.z).toFixed(1)} m away` +
+        `  car tier ${aSeenByB.tier} paint ${aSeenByB.paint} (sent as ${a.carId})`
     );
   }
 
@@ -320,6 +351,17 @@ async function main() {
       `sent ${b.x}, ${b.z} — got ${bSeenByA.x}, ${bSeenByA.z}`
     );
     check(bSeenByA.name === b.label, 'seat 2’s name arrived intact', `"${bSeenByA.name}"`);
+    // The actual claim in the playtest report: not just presence, the CAR. seat 1 must see
+    // seat 2 driving seat 2's real car, not tier 0 by default (the bug: carPacket() used to
+    // send car.tier — a 'gt'/'sports'/'hyper' STRING — straight onto an INTEGER wire column,
+    // and PHP casts a non-numeric string to 0, so every ghost anyone ever saw was CAR_TIERS[0]
+    // regardless of what its driver had chosen).
+    check(
+      bSeenByA.tier === b.tierIndex,
+      'seat 2’s car arrived intact — not just tier 0',
+      `sent ${b.carId} (index ${b.tierIndex}) — got index ${bSeenByA.tier} (${FLEET[bSeenByA.tier]?.id ?? 'out of range'})`
+    );
+    check(bSeenByA.paint === b.id.getLook().paint, 'seat 2’s paint arrived intact');
   }
   if (aSeenByB) {
     check(
@@ -328,6 +370,12 @@ async function main() {
       `sent ${a.x}, ${a.z} — got ${aSeenByB.x}, ${aSeenByB.z}`
     );
     check(aSeenByB.name === a.label, 'seat 1’s name arrived intact', `"${aSeenByB.name}"`);
+    check(
+      aSeenByB.tier === a.tierIndex,
+      'seat 1’s car arrived intact — not just tier 0',
+      `sent ${a.carId} (index ${a.tierIndex}) — got index ${aSeenByB.tier} (${FLEET[aSeenByB.tier]?.id ?? 'out of range'})`
+    );
+    check(aSeenByB.paint === a.id.getLook().paint, 'seat 1’s paint arrived intact');
   }
   check(
     r2a.rate >= 2 && r2b.rate >= 2,

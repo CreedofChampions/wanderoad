@@ -17,6 +17,7 @@ import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
 import { Water } from './render/water.js';
+import { Ships } from './render/ships.js';
 import { Clouds } from './render/clouds.js';
 import { Flora } from './render/trees.js';
 import { Roads } from './render/road.js';
@@ -41,7 +42,7 @@ import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, c
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
 import { Props } from './render/props.js';
-import { Fuel } from './game/fuel.js';
+import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
 import { Hud } from './ui/hud.js';
 import { Cinematic } from './game/cinematic.js';
@@ -115,6 +116,11 @@ async function boot() {
   setStat('drawing the map…', 0.14);
   const material = createTerrainMaterial();
   const water = new Water({ seed: SEED, scene });
+  /* Boats: a rare, slow silhouette on genuinely large open water — see src/render/ships.js.
+   * Its own rolling window around the car, like props/roads/grass below, not tied to the
+   * terrain streamer's onChunk (that file's own header explains why: a sparse feature tied to
+   * the quadtree gets re-decided every time a chunk's LOD changes). */
+  const ships = new Ships({ seed: SEED, scene });
   const flora = new Flora({ seed: SEED, scene });
   const solids = new Solids();
 
@@ -196,7 +202,13 @@ async function boot() {
   const chase = new ChaseCamera(camera, { mode: 'sport' });
   const input = new Input(window);
   input.attachTouch(canvas);
-  const auto = new Autopilot();
+  /* `recover`/`say`/`ping` are all forward references — backToRoad() is a hoisted function
+   * declared further down, and hud/audio are consts assigned a few lines below this one — which
+   * is safe because none of the three is actually CALLED until well after the whole boot
+   * function has finished running (autopilot's own update loop, which only starts once the
+   * player is driving). `recover` is the same backToRoad() the R key and the water rescue below
+   * both call, so all three can never disagree about where "the road" is. */
+  const auto = new Autopilot({ recover: backToRoad, say: (t, s) => hud.say(t, s), ping: () => audio.ping() });
   const streak = new Streak();
   let trail = null;
   const hud = new Hud();
@@ -223,6 +235,15 @@ async function boot() {
     // Same sampler the chase camera gets, so the closing shot lands on the same terrain floor.
     groundAt: (x, z) => car.terrain.height(x, z),
     hud,
+    /* The veil lifts as soon as fifteen chunks are live (see `revealed` below) and the opening
+     * shot then immediately flies 270 m away and looks 2.6 km out. The streamer wants ~300
+     * nodes around a spawn — measured at ~14 s of single-threaded meshing — so on a two-worker
+     * machine that shot spends its first five seconds over ground that does not exist yet.
+     * This is the whole of the fix: while the queue is still draining the cinematic runs at a
+     * quarter rate, for at most ten seconds of lost time, and never freezes. Measured in
+     * tools/diag-cinematic.mjs: 94.8% -> 98.7% of the programme over built terrain at two
+     * workers, 97.8% -> 99.4% at four. */
+    worldReady: () => streamer.stats.queued === 0,
     onEnd: () => chase.reset(),
   });
 
@@ -238,7 +259,13 @@ async function boot() {
   const fuel = new Fuel({
     findStation: (x, z) => props.nearestStation(x, z),
     collectCans: () => props.drainCollectedFuel(),
+    // remotes is constructed a little further down (it needs the transport/identity wiring
+    // above it), but this callback is not CALLED until update() runs deep inside the frame
+    // loop, well after boot() has finished — the same forward-reference pattern already used
+    // for auto's recover/say/ping a little earlier in this function.
+    incomingShares: () => remotes.drainIncomingShares(),
     say: (t, s) => hud.say(t, s),
+    resetToSpawn,
   });
   const fuelGauge = new FuelGauge(hud.root);
 
@@ -322,6 +349,19 @@ async function boot() {
     hud.say('back on the road', 2);
   }
 
+  /** Sent home once the passing-driver mercy runs out (src/game/fuel.js, MERCY_MAX uses,
+   *  then this instead of a fourth rescue) — the session's ORIGINAL spawn point, not
+   *  backToRoad()'s "nearest road", because the operator asked for "restart og position"
+   *  specifically. Same placeAt/chase/trail sequence backToRoad() uses so the car lands
+   *  exactly as it does on every other reset in this game; no hud.say() of its own — Fuel
+   *  already says its own toast right before calling this, and two messages stacked on one
+   *  event would read as noise, not calm. */
+  function resetToSpawn() {
+    car.placeAt(spawn.x, spawn.z, spawn.heading);
+    chase.reset();
+    trail.reset(car);
+  }
+
   /* The lakes have 35° banks and a flat bed you can drive along for ever, eleven metres
    * under. This notices and undoes it, using the same backToRoad() the R key does so the
    * two can never drift apart. See src/game/rescue.js for why it is depth-gated. */
@@ -332,7 +372,21 @@ async function boot() {
     backend: OFFLINE ? 'none' : 'auto',
     phpBase: new URL('./api/', location.href).href,
   });
-  const remotes = new Remotes({ scene, buildGhostCar });
+  /* Ghosts still render through the one procedural body every local fallback car already uses
+   * (car/model.js's buildGhostCar — 3 silhouettes: gt/sports/hyper; there is no per-fleet GLB
+   * ghost yet, see docs/BACKLOG.md). What WAS broken: carPacket() below used to send car.tier,
+   * the Vehicle's own silhouette STRING ('gt'|'sports'|'hyper' — see car/vehicle.js setTier()),
+   * straight onto the wire. The server's `tier` column is INTEGER, and PHP casts a non-numeric
+   * string to 0 (wr_int() in server/drive.php), so every ghost, for every peer, rendered as
+   * CAR_TIERS[0] ('gt') regardless of what they were actually driving — the reported "wrong
+   * car". Sending the FLEET index instead (0..6, the same cars garage.js already numbers) is a
+   * lossless fit in the same wire field (still 0-63, no server change) and decodes back to the
+   * peer's real silhouette here. See tools/net-test.mjs's car-identity section. */
+  const buildGhostFromFleet = ({ tier, paint }) => {
+    const spec = FLEET[tier] || FLEET[0];
+    return buildGhostCar({ tier: spec.tier, paint });
+  };
+  const remotes = new Remotes({ scene, buildGhostCar: buildGhostFromFleet });
   const save = new WorldSave({ seed: SEED, transport });
   await save.load().catch(() => {});
   /* Presence interest cells are 2048 m, rounded (not floored) so the 3x3 neighbourhood the
@@ -380,9 +434,14 @@ async function boot() {
     throttle: car.throttle,
     brake: car.brake,
     gear: car.gear,
-    tier: car.tier,
+    // The FLEET index of the car actually being driven (0..6), not car.tier — see the note
+    // above buildGhostFromFleet. Recomputed each call rather than cached against carKeyLive
+    // so a car swap can never leave it stale; FLEET has 7 entries, this is not worth memoising.
+    tier: Math.max(0, FLEET.findIndex((c) => c.id === carKeyLive)),
     paint: me.look?.paint ?? 0,
-    flags: (car.onGround ? 0 : 1) | (car.handbrake > 0.5 ? 2 : 0),
+    // Bit 2: "I am sharing fuel with a nearby player right now" — see game/fuel.js's
+    // SHARE_FLAG and src/net/remotes.js's rising-edge check on the receiving end.
+    flags: (car.onGround ? 0 : 1) | (car.handbrake > 0.5 ? 2 : 0) | (fuel.sharing ? SHARE_FLAG : 0),
   });
 
   let netState = 'offline';
@@ -408,6 +467,19 @@ async function boot() {
       nextTick = performance.now() + 8000;
     }
   }
+  /* Presence must not live and die with requestAnimationFrame. Browsers pause rAF entirely for
+   * a document that is not the visible tab — documented behaviour, not a tuning knob — so a
+   * netTick() driven only from inside frame() lets a BACKGROUNDED window's presence row sit
+   * untouched and expire 8 s later, which reads as "the other person can't see me" from
+   * exactly the window that was not in front. docs/MULTIPLAYER.md's own recommended way to
+   * test multiplayer solo is two windows on one machine, which guarantees one of them is
+   * always in that position — this is the most likely concrete cause of "player 2 does not
+   * see player 1 at all" (playtest report, two sessions ago's net-test.mjs only ever proved
+   * the protocol symmetric under a script that ticks both sides in lockstep, never under two
+   * independently-scheduled, differently-focused loops). netTick() already no-ops until its
+   * own `nextTick` gate says a send is due, so driving it from an independent timer as well
+   * costs nothing and keeps both windows live regardless of which one has focus. */
+  setInterval(() => netTick(performance.now()), 250);
 
   /* ── the loop ────────────────────────────────────────────────────────── */
   let last = performance.now();
@@ -444,6 +516,11 @@ async function boot() {
     if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
     if (input.tapped('autodrive')) hud.say(auto.toggle(car) ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
     if (input.tapped('reset')) backToRoad();
+    // 'Give fuel' is not in car/input.js's KEYMAP (that file is out of scope this pass) — the
+    // same raw, already-edge-triggered check the assist-preset keys just below use. KeyF:
+    // free of every other binding, and reads naturally as favour/friend/fuel. See
+    // game/fuel.js's tryGiveFuel() for the range check and the real transfer itself.
+    if (input.pressed.has('KeyF')) fuel.tryGiveFuel(remotes.nearestDistance());
     for (const [key, name] of [
       ['Digit1', 'cruise'],
       ['Digit2', 'sport'],
@@ -522,11 +599,15 @@ async function boot() {
     water.update(dt, camera.position);
     flora.update(dt, camera.position);
     props.update(dt, car.x, car.z);
+    ships.update(dt, car.x, car.z);
     save.markVisited(car.x, car.z);
 
     /* net */
+    // netTick() runs off its own setInterval now, not this rAF-driven loop — see the note
+    // above where it is registered. remotes.update() stays here: it is the visual
+    // interpolation of ghosts already ingested, which is a rendering concern and belongs
+    // exactly where every other per-frame visual update lives.
     remotes.update(dt, now);
-    netTick(now);
 
     /* audio + post cues */
     audio.update(dt, car);
@@ -548,7 +629,7 @@ async function boot() {
         dbg.textContent =
           `fps ${fps.toFixed(0)}  live ${s.live}  queue ${s.queued}  built ${s.built}  wk ${s.workers}\n` +
           `pos ${car.x.toFixed(0)}, ${car.z.toFixed(0)}  ${car.kph.toFixed(0)} km/h  g${car.gear}  slip ${((car.slip * 180) / Math.PI).toFixed(0)}°  limit ${car.limit.toFixed(2)}\n` +
-          `road ${surf.onRoad.toFixed(2)}  grip ${surf.grip.toFixed(2)}  ${BIOME_SHORT[surf.dominant]}  solids ${solids.count}\n` +
+          `road ${surf.onRoad.toFixed(2)}  wheel ${car.onRoadMin.toFixed(2)}  grip ${surf.grip.toFixed(2)}  ${BIOME_SHORT[surf.dominant]}  solids ${solids.count}\n` +
           `calls ${renderer.info.render.calls}  tris ${(renderer.info.render.triangles / 1000) | 0}k  net ${netState}  peers ${remotes.count}`;
       }
     }
@@ -595,6 +676,7 @@ async function boot() {
     remotes,
     post,
     props,
+    ships,
     fuel,
     SEED,
     stats: () => streamer.stats,
