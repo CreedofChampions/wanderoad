@@ -258,6 +258,33 @@ Newly asked for, not yet started:
       caught away".
 
 - [ ] Water still looks poor at distance — moire on large sheets, and the shoreline is hard.
+
+      **Investigated this pass, NOT fixed, recorded instead.** Two separate claims, checked
+      separately.
+
+      Moire: `render/water.js` is NOT missing an obvious fix here — every procedural layer
+      already runs through `bandLimit()`, an analytic per-band Nyquist gate keyed off
+      `fwidth()` (see the design note at line ~100), including the base ripple bands, the gust
+      field, the caustic sparkle, the wet-bed grain, AND the specular glints (line ~261, which
+      even hands sub-pixel glints to a broad lobe rather than letting them strobe — a purpose-
+      built anti-aliasing scheme, not an oversight). If moire is still visible, the cause is not
+      "a layer nobody band-limited" — the easy version of this bug was already fixed by someone
+      before this pass. Next step would be a real screenshot-at-distance comparison to find
+      which specific layer is still aliasing, which is visual grading work, not a code read.
+
+      Hard shoreline: found a real, named mechanism, and it is NOT simply "add a soft edge."
+      `if(!(vD.x > -0.5)) discard;` at line 167 is a binary cutoff — discards inside a triangle
+      get no MSAA softening, so it does produce a hard, jagged edge exactly where depth crosses
+      -0.5 m. But the same line's own comment says it exists to solve a DIFFERENT, already-
+      solved problem: the water plane is a coarser 2 m-sampled mesh than the terrain's 1 m
+      mesh, so their waterlines do not perfectly coincide, and the 0.5 m tolerance stops the
+      water mesh's own edge from visibly cutting inside the terrain mesh (dry ground showing
+      through where there should be shore). Softening this into an alpha fade is a real fix,
+      but it has to preserve that seam-prevention property or it reopens a bug this project has
+      already been bitten by once (roads: "there should be nothing above a road ever"), and
+      there is no automated check for either the softness or the seam — both would need visual
+      verification this pass does not have tooling for. Left for a session where that grading
+      can happen.
 - [x] **Grass aliasing at 100–300 m — the angular width floor was calibrated wrong, and never
       updated.** Two compounding bugs in `render/grass.js`, both by inspection rather than a
       visual before/after (there is no automated aliasing metric in this suite — flagged, not
