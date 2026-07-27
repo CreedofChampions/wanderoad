@@ -12,6 +12,7 @@
 
 import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, SRGBColorSpace } from 'three';
 import * as THREE_NS from 'three';
+import { DEG } from './core/math.js';
 import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
@@ -148,6 +149,13 @@ async function boot() {
   // once — which is most of what sells a landscape as alive.
   const wind = new Wind(renderer, { seed: SEED });
   const grass = new Grass({ seed: SEED, scene, wind });
+  /* grass.js floors blade width to ~1 screen pixel so the far field can thin in density
+   * without ever thinning in coverage — but its constructor default assumes a 58 deg vertical
+   * fov on a 1080 px canvas, and this camera is 64 deg. On the real, current viewport a "1
+   * pixel" floor was actually sub-pixel, and `setAngular` existed to correct it but was never
+   * called from anywhere — so it was permanently wrong, on every viewport, not just on resize.
+   * Grass aliasing at 100-300 m was reported; this is at minimum a real contributor. */
+  grass.setAngular((camera.fov * DEG) / innerHeight);
 
   setStat('finding a road…', 0.34);
   const spawn = findSpawn(SEED);
@@ -321,6 +329,7 @@ async function boot() {
     post.setSize(innerWidth, innerHeight);
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
+    grass.setAngular((camera.fov * DEG) / innerHeight);
   });
   addEventListener('pagehide', () => {
     streak.flush();

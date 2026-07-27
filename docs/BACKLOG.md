@@ -258,7 +258,22 @@ Newly asked for, not yet started:
       caught away".
 
 - [ ] Water still looks poor at distance — moire on large sheets, and the shoreline is hard.
-- [ ] Grass aliases at 100–300 m even with the angular width floor.
+- [x] **Grass aliasing at 100–300 m — the angular width floor was calibrated wrong, and never
+      updated.** Two compounding bugs in `render/grass.js`, both by inspection rather than a
+      visual before/after (there is no automated aliasing metric in this suite — flagged, not
+      invented one this pass): (1) the constructor default assumes a 58° vertical fov on a
+      1080 px canvas, but the real camera is 64° (`new PerspectiveCamera(64, ...)` in
+      `main.js`) — a "1 screen pixel" floor was sub-pixel by construction, at any resolution.
+      (2) `Grass.setAngular()` exists specifically to recompute the floor from the real
+      viewport and is called `on resize` per its own comment — except nothing anywhere in the
+      repo ever called it. `main.js` now calls `grass.setAngular((camera.fov * DEG) /
+      innerHeight)` once at startup and again in the resize handler, so the floor tracks the
+      real fov and the real canvas height instead of a fixed assumption.
+      `npm test` and `npm run test:browser` both stayed at their current totals (40/40, "THE
+      GAME WORKS") on a freshly restarted dev server — this changes a rendering LOD constant,
+      not gameplay, so the existing suite is the right gate; nothing in it measures aliasing
+      directly. If it is still visibly shimmering next session, the next lever is the floor
+      MULTIPLIER (currently exactly 1px) rather than the calibration, which this pass fixed.
 - [ ] The autopilot in tools/shoot.mjs follows roads only loosely. It is a smoke test, not a
       driver, and it should be good enough to be a benchmark.
 - [ ] Base44 backend is defined in `base44/` but undeployed — the CLI login is a device-code
