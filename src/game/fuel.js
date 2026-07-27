@@ -78,11 +78,16 @@ export class Fuel {
    *        nearest petrol station. render/props.js already has the loaded ones, so this is a
    *        scan of a handful of entries — do NOT wire it to world/props.js nearestStation(),
    *        which rebuilds the road network and costs tens of milliseconds.
+   * @param {()=>number} [opts.collectCans] fuel gained (a fraction of a tank, 0 if none) from
+   *        floating cans collected since the last call — render/props.js's Props class owns
+   *        the live meshes and already gets the car's position every frame (the same
+   *        argument findStation makes), so this is pull-based and needs nothing scanned here.
    * @param {(text:string, secs:number)=>void} [opts.say] one quiet HUD line.
    * @param {number} [opts.start] starting fill, 0..1.
    */
-  constructor({ findStation = null, say = null, start = 0.72 } = {}) {
+  constructor({ findStation = null, collectCans = null, say = null, start = 0.72 } = {}) {
     this.findStation = findStation;
+    this.collectCans = collectCans;
     this.say = say || (() => {});
     /** Seconds of cruise left in the tank. The single source of truth. */
     this.seconds = TANK_SECONDS * clamp01(start);
@@ -98,7 +103,7 @@ export class Fuel {
     this._saidDry = false;
     this._visiting = false;
     /** Totals, for the acceptance harness and for anyone debugging a burn rate. */
-    this.stats = { burned: 0, filled: 0, rescues: 0, refuels: 0, drySeconds: 0 };
+    this.stats = { burned: 0, filled: 0, rescues: 0, refuels: 0, drySeconds: 0, cansCollected: 0 };
   }
 
   get fraction() {
@@ -130,6 +135,23 @@ export class Fuel {
   update(dt, car) {
     if (!(dt > 0)) return;
     const speed = Math.abs(car.speed || 0);
+
+    /* ── a can, if one was just driven past ──────────────────────────────────
+     * Unconditional and first: a can is a find, not a state you can be "in", so it has none
+     * of the pump's visiting/refuelling machinery — just a top-up and a single quiet line.
+     * Capped exactly like a pump top-up, so a can found on an already-fullish tank cannot
+     * push it over TANK_SECONDS. */
+    if (this.collectCans) {
+      const gained = this.collectCans();
+      if (gained > 0) {
+        const before = this.seconds;
+        this.seconds = Math.min(TANK_SECONDS, this.seconds + TANK_SECONDS * gained);
+        this.stats.filled += this.seconds - before;
+        this.stats.cansCollected++;
+        this._clearDry();
+        this.say('found a can of fuel', 2.6);
+      }
+    }
 
     // ── where is the nearest pump ───────────────────────────────────────────
     // Twice a second is plenty for a gauge and cheap even if the provider is not.

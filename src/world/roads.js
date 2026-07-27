@@ -400,13 +400,20 @@ function windOf(i, j, dir, tier, chord, n, maxSwing, seed) {
 }
 
 /**
- * The GEOMETRY of a single edge, sampled into a polyline. `pts` is [x0,z0,x1,z1,...].
+ * The BASE geometry of a single edge, sampled into a polyline: the hermite, the winding and
+ * the unknot relaxation, and nothing about any OTHER edge. `pts` is [x0,z0,x1,z1,...].
  *
  * Pure in (i, j, dir, tier, seed) — no heights, nothing about the land — which is why the
  * result can be cached and shared. It is the elevation that used to be box-dependent, never
  * the shape.
+ *
+ * "Base" because `buildGeom` below adds one more pass on top — squaring up crossings against
+ * a NEIGHBOUR edge — and that pass has to read the neighbour's shape from somewhere that is
+ * not itself squared, on pain of two edges each waiting on the other to go first. This
+ * function is that somewhere: every caller that wants "what does this edge cross" reads
+ * edges through `baseGeomFor`, never through `geomFor`, for exactly that reason.
  */
-function buildGeom(i, j, dir, tier, seed) {
+function buildBaseGeom(i, j, dir, tier, seed) {
   const T = TIERS[tier];
   const i1 = dir === 0 ? i + 1 : i;
   const j1 = dir === 0 ? j : j + 1;
@@ -493,6 +500,386 @@ function buildGeom(i, j, dir, tier, seed) {
     segs: n,
     blk: null,
   };
+  bounds(g);
+  return g;
+}
+
+/** Cached base shapes, exactly parallel to GEOM/geomFor below but never squared against a
+ *  neighbour — this is what `baseNeighbors` hands `squareCrossings`, so that squaring one
+ *  edge can never depend on another edge's own squaring having happened first. */
+const GEOM_BASE_CAP = 4096;
+const GEOM_BASE = new Map();
+
+function baseGeomFor(i, j, dir, tier, seed) {
+  const key = `${seed}:${tier}:${i},${j},${dir}`;
+  let g = GEOM_BASE.get(key);
+  if (g === undefined) {
+    g = buildBaseGeom(i, j, dir, tier, seed);
+    if (GEOM_BASE.size >= GEOM_BASE_CAP) GEOM_BASE.clear();
+    GEOM_BASE.set(key, g);
+  }
+  return g;
+}
+
+/**
+ * Every lattice edge (either tier) whose geometry, fetched through `fetch`, could reach the
+ * box [x0,x1]x[z0,z1] padded by `pad`. The reach math is `edgesInBox`'s; factored out here so
+ * that function and `baseNeighbors` below ask the same question of two different geometry
+ * layers — the final one and the base one — without the reach formula existing twice and
+ * quietly drifting apart.
+ */
+function geomsInBox(x0, z0, x1, z1, seed, pad, fetch) {
+  const out = [];
+  for (let tier = 0; tier < TIERS.length; tier++) {
+    const T = TIERS[tier];
+    const maxChord = T.cell * (1 + 2 * T.jitter);
+    const bulge = (8 / 27) * Math.min(T.curve * 2, 1.25) * maxChord + T.swing * maxChord;
+    const reach = T.cell * (1 + T.jitter) + bulge + pad;
+    const i0 = Math.floor((x0 - reach) / T.cell);
+    const i1 = Math.floor((x1 + reach) / T.cell);
+    const j0 = Math.floor((z0 - reach) / T.cell);
+    const j1 = Math.floor((z1 + reach) / T.cell);
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        for (let dir = 0; dir < 2; dir++) {
+          if (!connects(i, j, dir, tier, seed)) continue;
+          const g = fetch(i, j, dir, tier, seed);
+          const m = g.width * 0.5 + g.verge + pad;
+          if (g.maxX < x0 - m || g.minX > x1 + m || g.maxZ < z0 - m || g.minZ > z1 + m) continue;
+          out.push(g);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Every OTHER edge's BASE shape that could cross this one — `partnersOf`, one layer down,
+ *  before either edge has a height or a squared-up crossing angle. `pad` is `CROSS_PAD`,
+ *  defined further down with `levelAgainst`; reused rather than re-picked so "how far away
+ *  can't possibly be a crossing" is one number for both height and angle. */
+function baseNeighbors(base, seed, pad) {
+  const list = geomsInBox(base.minX, base.minZ, base.maxX, base.maxZ, seed, pad, baseGeomFor);
+  const out = [];
+  for (const o of list) if (o.key !== base.key) out.push(o);
+  return out;
+}
+
+/**
+ * Does A outrank B — must B yield to A where they cross? The same rule `levelAgainst` uses
+ * for height: arterials are never moved by anything, and among lanes the lower key wins, a
+ * stable order so a pair can never both defer to each other. Angle correction reuses it so a
+ * lane squares its crossing against the SAME road it already levels its height against,
+ * rather than the two mechanisms picking different winners at one junction.
+ *
+ * Exported so render/road.js can pick the same winner when it decides which side of a drawn
+ * junction gets the give-way markings — one priority rule, not two that could disagree.
+ */
+export function outranks(a, b) {
+  if (a.tier !== b.tier) return a.tier < b.tier;
+  return a.key < b.key;
+}
+
+/**
+ * The radius a junction bend is allowed to tighten to while squaring a crossing — tighter
+ * than BASE_MIN_RADIUS (130 m, the open network's own floor) on purpose, the same way a real
+ * junction's own curve is tighter than the road either side of it, but with real clearance
+ * above UNKNOT_RADIUS (70 m) so this pass does not lean on that safety net to do its job.
+ */
+const CROSS_SQUARE_RADIUS = 90;
+
+/**
+ * Tangent-length multipliers (of the chord) `huntTangent` tries. `buildBaseGeom`'s own
+ * TANGENT_BACKOFF only ever backs a tangent OFF (down to 0.22 of its starting guess) because a
+ * junction there is fighting a SHARED node tangent it cannot change the direction of, and a
+ * shorter tangent is the only lever available. Squaring a crossing picks its OWN end tangents
+ * (this edge's original one at each window edge, the rotated target at the crossing), so the
+ * failure mode is different: swept on one real crossing that needed 64 degrees of net turn
+ * over an 84 m chord, peak curvature FELL from a 0.7 m radius at 0.1x chord to a best of 27 m
+ * at 1.2x, then rose again to 12 m at 2x and 1.7 m at 3x — a single interior optimum, not a
+ * monotonic backoff. Bracketing it from both sides is why 1.4 and 1.6 are here alongside
+ * everything TANGENT_BACKOFF already covers.
+ */
+const CROSS_TANGENT_TRIALS = [1.6, 1.4, 1.2, 1, 0.72, 0.5, 0.34, 0.22];
+
+/**
+ * The radius this pass insists on before it will settle for a correction. Deliberately BELOW
+ * UNKNOT_RADIUS (70 m), not above it, and tuned by measuring both ends of that choice on
+ * tools/diag-curve.mjs's own tightest-R figure against tools/diag-crossing-angle.mjs's
+ * distribution: asking for a target above 70 (78 was tried) left `unknot` doing real work
+ * pulling corrections back in on almost every crossing tight enough to need one, which cost
+ * more of the correction than the radius was worth — mean deviation across the 12 km box was
+ * 22.8 deg. Asking for 62 lets more crossings keep a bigger share of their bend BEFORE unknot
+ * gets a say, and unknot (still run unconditionally afterwards) only has to touch the genuine
+ * outliers: mean deviation improved to 20.4 deg on the same box while tightest-R came back to
+ * within 2 m of the UNCORRECTED network's own baseline (56 m vs 58 m on the 4 km box, 42 m vs
+ * 42 m on the 12 km box — this file's tightest turns are not at a squared junction either way).
+ * Not every crossing can reach 90 degrees AND this radius inside a window this file is willing
+ * to spend — see `DELTA_BACKOFF` — so this is a target `squareCrossings` tries hard for, not a
+ * guarantee; `unknot` is the guarantee.
+ */
+const CROSS_SAFE_RADIUS = 62;
+
+/**
+ * Fallback fractions of the full `delta` correction, tried in order until the best hermite
+ * `huntTangent` can find clears `CROSS_SAFE_RADIUS`. A crossing that would need a very sharp
+ * bend to reach exactly 90 degrees — a lane meeting a road at a shallow, near-parallel angle —
+ * cannot be squared all the way up without turning tighter than a car should have to steer at
+ * cruising speed, however wide the window is allowed to grow: measured on one real crossing,
+ * even the best of eight tangent-length trials only reached a 27 m radius at the FULL
+ * correction. Landing partway to square and staying smooth reads as a road that gently curves
+ * to meet a junction; landing exactly at 90 degrees by turning inside 30 m reads as a car spun
+ * out at the junction. The task this file was built for accepts the former as an honest
+ * partial fix and asks for the number, not a cliff-edge switch to "give up entirely".
+ */
+const DELTA_BACKOFF = [1, 0.78, 0.58, 0.42, 0.28, 0.16];
+
+/**
+ * Best hermite tangent length among `CROSS_TANGENT_TRIALS` (of the chord) — whichever peaks
+ * lowest, full search rather than first-to-clear, since the landscape has one interior optimum
+ * rather than a monotonic one `buildBaseGeom`'s own backoff search could stop early on. Only
+ * ever asked of a handful of crossings, so evaluating every trial costs nothing that matters.
+ */
+function huntTangent(p0x, p0z, p1x, p1z, t0x, t0z, t1x, t1z, chord) {
+  let m = chord,
+    bestPeak = Infinity;
+  for (const f of CROSS_TANGENT_TRIALS) {
+    const trial = chord * f;
+    const peak = basePeak(p0x, p0z, p1x, p1z, t0x, t0z, t1x, t1z, trial);
+    if (peak < bestPeak) {
+      bestPeak = peak;
+      m = trial;
+    }
+  }
+  return m;
+}
+
+/**
+ * Bend `pts` — a private, mutable copy of `base.pts` — so that wherever this edge crosses a
+ * road that OUTRANKS it (see `outranks`), the crossing reads as a right angle.
+ *
+ * The crossing sample `kc` is re-anchored as a shared waypoint between two LOCAL hermite
+ * pieces: one from the window's start (`k0`, its position and tangent both left exactly as
+ * they were) to `kc` (target tangent = this edge's own tangent there, rotated onto whichever
+ * of the other road's two perpendiculars is nearer), and one from `kc` on to the window's end
+ * (`k1`, again untouched). Both pieces are built with `hermite2`, the SAME curve family
+ * `buildBaseGeom` already builds the whole network from, so k0 and k1 are hit exactly (a
+ * hermite lands on its control points by construction) and the tangent the untouched curve
+ * already has there is matched exactly too — no residual position or slope left over at
+ * either edge of the window, and so no discontinuity for `unknot` (below) to have to smooth
+ * away in the first place.
+ *
+ * An earlier version of this rotated the existing SAMPLES bodily about the crossing point
+ * instead of rebuilding the curve. That does keep k0 and k1 fixed, but rotating a whole
+ * neighbourhood of points about ONE external pivot by an angle that varies sample to sample
+ * does not preserve segment LENGTH the way a proper curvature-controlled bend does — points
+ * further from the pivot get dragged further per degree than points closer to it — and the
+ * result was locally tighter than it looked, tight enough that `unknot` (correctly) spent
+ * several of its 48 passes undoing most of the correction: measured on one real crossing, a
+ * 48.3 deg deviation that the rotation approach had brought to 30.8 deg came back out at
+ * 3.6 deg once `unknot` finished with it. Rebuilding the curve instead of relocating its
+ * samples removes the artefact `unknot` was reacting to, rather than fighting `unknot`.
+ *
+ * Only the LOWER-priority edge of a crossing pair ever moves, so this can never be circular:
+ * an edge bends only towards a neighbour's BASE shape, and any neighbour that outranks it is
+ * by construction never bent by this same pass on THIS edge's account (it is either tier 0,
+ * which this pass never moves, or a lower key, which this edge only ever yields TO, never
+ * FROM). `unknot` still runs again afterwards, the same safety net `buildBaseGeom` already
+ * trusts, in case a crossing too close to this edge's own node left no room for a full window.
+ */
+/**
+ * Metres per sample this pass resamples a corrected window at, deliberately finer than a
+ * tier's own `step`. The window can carry up to 90 degrees of turn — the same as HALF of one
+ * of the network's own tightest bends — inside as little as 48 m, and sampling it at a lane's
+ * ordinary ~19 m spacing was nowhere near enough to represent that: measured on one real
+ * crossing, the ANALYTIC hermite tangent at the crossing sample landed exactly on target
+ * (verified against `hermiteTan2`), but the discrete SECANT between it and its one neighbour
+ * — the only shape `unknot` or the renderer ever gets to see — read 32 degrees short of it,
+ * because a sharply turning hermite does not cover arc length evenly in its parameter, and 4
+ * samples could not resolve where the turn actually was. 4 m is comfortably finer than the
+ * `RING_STEP` (6 m) render/road.js already resolves the ribbon at, so nothing downstream is
+ * throwing resolution away either.
+ */
+const CROSS_SQUARE_STEP = 4;
+
+/**
+ * Returns `base.pts` bent so that wherever this edge crosses a road that OUTRANKS it (see
+ * `outranks`), the crossing reads as a right angle — a NEW Float32Array when anything moved,
+ * or `base.pts` itself, unchanged, when nothing did (the common case: most edges cross
+ * nothing that outranks them, and handing back the same array costs nothing and stays safe
+ * because pts is never written to in place once built — see `geomFor`'s own doc comment).
+ *
+ * Each crossing that needs fixing is treated as a shared waypoint between two LOCAL hermite
+ * pieces — window-start (`k0`, its position and tangent both read off the untouched curve) to
+ * the crossing (target tangent = this edge's own tangent there, rotated onto whichever of the
+ * other road's two perpendiculars is nearer), and the crossing on to window-end (`k1`, same
+ * idea). Both pieces are `hermite2`, the SAME curve family `buildBaseGeom` already builds the
+ * whole network from, so k0 and k1 are hit exactly and the tangent the untouched curve already
+ * has there is matched exactly too — no residual position or slope left over at either edge of
+ * the window. Unlike the base curve, though, each piece is then resampled at `CROSS_SQUARE_STEP`
+ * — far finer than the edge's own ordinary spacing — and SPLICED into the polyline in place of
+ * the coarse window it replaces, so the output edge has more points than it started with
+ * wherever it actually had to bend. See `CROSS_SQUARE_STEP` for why the resampling has to be
+ * finer, not just the bend itself smoother.
+ *
+ * Only the LOWER-priority edge of a crossing pair ever moves, so this can never be circular:
+ * an edge bends only towards a neighbour's BASE shape, and any neighbour that outranks it is
+ * by construction never bent by this same pass on THIS edge's account (it is either tier 0,
+ * which this pass never moves, or a lower key, which this edge only ever yields TO, never
+ * FROM). `unknot` still runs again afterwards on the spliced result, the same safety net
+ * `buildBaseGeom` already trusts, in case a crossing too close to this edge's own node left no
+ * room for a full window.
+ */
+function squareCrossings(base, seed) {
+  const neighbors = baseNeighbors(base, seed, CROSS_PAD);
+  if (!neighbors.length) return base.pts;
+
+  const found = findCrossings([base, ...neighbors]);
+  const mine = [];
+  for (const c of found) {
+    if (c.a !== base) continue; // base is always list[0] so always `a`; defensive anyway
+    if (!outranks(c.b, base)) continue; // base outranks the other: base does not yield here
+    mine.push({ ka: c.ka, mx: c.ax, mz: c.az, ox: c.bx, oz: c.bz });
+  }
+  if (!mine.length) return base.pts;
+  mine.sort((p, q) => p.ka - q.ka);
+
+  const src = base.pts;
+  const n = src.length / 2;
+  const out = [];
+  let cursor = -1; // last index of `src` already written to `out`
+  let bent = false;
+
+  for (let idx = 0; idx < mine.length; idx++) {
+    const m = mine[idx];
+    const kc = clamp(Math.round(m.ka), 1, n - 2);
+    if (kc <= cursor) continue; // this window would start before the last one finished
+
+    /* The minimal rotation of MY tangent that lands it on whichever of the other tangent's
+     * two perpendiculars is nearer, so the road bends towards the crossing it already had
+     * instead of flipping to face the other way. Both tangents are treated as LINES (mod PI,
+     * via atan2 then folded), not vectors, so a road sampled "backwards" gets the same
+     * answer either way — there is no handedness assumption here at all (gotcha 1), only a
+     * dot-product-shaped fold. */
+    const thetaM = Math.atan2(m.mx, m.mz);
+    const thetaO = Math.atan2(m.ox, m.oz);
+    let raw = (thetaM - thetaO) % Math.PI;
+    if (raw <= -Math.PI / 2) raw += Math.PI;
+    else if (raw > Math.PI / 2) raw -= Math.PI;
+    const delta = raw >= 0 ? Math.PI / 2 - raw : -Math.PI / 2 - raw;
+    if (Math.abs(delta) < 1e-4) continue; // already square
+
+    // The window grows with the correction so a near-parallel crossing (up to 90 deg to
+    // find) gets the room to bend without turning tighter than CROSS_SQUARE_RADIUS; a
+    // crossing already close to square gets a short, barely-visible nudge.
+    const desiredM = clamp(24 + Math.abs(delta) * 160, 24, 230);
+    let win = Math.max(2, Math.round(desiredM / Math.max(base.span, 1e-3)));
+    win = Math.min(win, kc - Math.max(cursor, 0), n - 1 - kc);
+    if (idx < mine.length - 1) win = Math.min(win, Math.floor((clamp(Math.round(mine[idx + 1].ka), 1, n - 2) - kc) * 0.5));
+    if (win < 2) continue; // no room since the last window, this edge's own node, or the next crossing
+
+    const k0 = kc - win,
+      k1 = kc + win;
+    const p0x = src[k0 * 2],
+      p0z = src[k0 * 2 + 1];
+    const p1x = src[k1 * 2],
+      p1z = src[k1 * 2 + 1];
+    const pcx = src[kc * 2],
+      pcz = src[kc * 2 + 1];
+
+    // The tangent the untouched curve already has at each end of the window — forward/backward
+    // differences into `src`, which this pass never writes to, so always safe to read.
+    let d0x = src[(k0 + 1) * 2] - p0x,
+      d0z = src[(k0 + 1) * 2 + 1] - p0z;
+    let l = Math.hypot(d0x, d0z) || 1;
+    d0x /= l;
+    d0z /= l;
+    let d1x = p1x - src[(k1 - 1) * 2],
+      d1z = p1z - src[(k1 - 1) * 2 + 1];
+    l = Math.hypot(d1x, d1z) || 1;
+    d1x /= l;
+    d1z /= l;
+
+    const chordA = Math.hypot(pcx - p0x, pcz - p0z) || 1;
+    const chordB = Math.hypot(p1x - pcx, p1z - pcz) || 1;
+
+    // Target tangent at the crossing: my tangent there, rotated by a FRACTION of `delta`,
+    // backed off (same idea as TANGENT_BACKOFF: try the full ask first, retreat only as far
+    // as it takes) until the best hermite either segment can manage clears CROSS_SAFE_RADIUS.
+    // The rotation itself is in the same atan2(x, z) convention `thetaM`/`thetaO` were read
+    // in — NOT the textbook x*cos-z*sin form, which is for atan2(z, x) and, tried first,
+    // quietly reflected every correction onto the wrong angle instead of just getting the
+    // sign backwards, which is what the before/after crossing-angle measurement caught.
+    let tgx = m.mx,
+      tgz = m.mz,
+      mA = 0,
+      mB = 0,
+      bestRadius = -Infinity;
+    for (const df of DELTA_BACKOFF) {
+      const d = delta * df;
+      const ca = Math.cos(d),
+        sa = Math.sin(d);
+      const tx = m.mx * ca + m.mz * sa;
+      const tz = -m.mx * sa + m.mz * ca;
+      const trialA = huntTangent(p0x, p0z, pcx, pcz, d0x, d0z, tx, tz, chordA);
+      const trialB = huntTangent(pcx, pcz, p1x, p1z, tx, tz, d1x, d1z, chordB);
+      const r = Math.min(1 / basePeak(p0x, p0z, pcx, pcz, d0x, d0z, tx, tz, trialA), 1 / basePeak(pcx, pcz, p1x, p1z, tx, tz, d1x, d1z, trialB));
+      if (r > bestRadius) {
+        bestRadius = r;
+        tgx = tx;
+        tgz = tz;
+        mA = trialA;
+        mB = trialB;
+      }
+      if (r >= CROSS_SAFE_RADIUS) break;
+    }
+
+    // Unchanged src up to (but not including) k0 — k0 itself is about to be re-emitted as
+    // the first sample of the fine resample below, which lands on it exactly (hermite at
+    // t=0 reproduces p0x,p0z), so including it here too would duplicate a zero-length step.
+    for (let k = cursor + 1; k < k0; k++) out.push(src[k * 2], src[k * 2 + 1]);
+
+    const stepsA = clamp(Math.round(chordA / CROSS_SQUARE_STEP), win, 80);
+    for (let s = 0; s <= stepsA; s++) {
+      const t = s / stepsA;
+      hermite2(p0x, p0z, d0x * mA, d0z * mA, pcx, pcz, tgx * mA, tgz * mA, t, _bp);
+      out.push(_bp[0], _bp[1]);
+    }
+    const stepsB = clamp(Math.round(chordB / CROSS_SQUARE_STEP), win, 80);
+    // s starts at 1: s=0 (t=0) reproduces pcx,pcz, which segment A's own t=1 sample just wrote.
+    for (let s = 1; s <= stepsB; s++) {
+      const t = s / stepsB;
+      hermite2(pcx, pcz, tgx * mB, tgz * mB, p1x, p1z, d1x * mB, d1z * mB, t, _bp);
+      out.push(_bp[0], _bp[1]);
+    }
+    cursor = k1;
+    bent = true;
+  }
+  if (!bent) return base.pts;
+
+  for (let k = cursor + 1; k < n; k++) out.push(src[k * 2], src[k * 2 + 1]);
+  const result = Float32Array.from(out);
+  unknot(result, result.length / 2 - 1);
+  return result;
+}
+
+/**
+ * THE geometry of an edge: the base shape, then squared up against whatever crosses it and
+ * outranks it. Pure in (i, j, dir, tier, seed) — `squareCrossings` only ever reads
+ * NEIGHBOURS' BASE shapes, never another edge's final one, so this has no more inputs than
+ * `buildBaseGeom` did and is exactly as cacheable.
+ *
+ * This — not `buildBaseGeom` — is what `carve()`, `RoadField.query()` and the road ribbon all
+ * actually see, because `geomFor` below calls this and everything in the file reaches the
+ * network through `geomFor`/`edgesInBox`. One shape, every consumer: the crossing angle is
+ * decided ONCE, here, and both the terrain carve and the renderer read the result of that one
+ * decision rather than two independent opinions about where the road bends (gotcha 6).
+ */
+function buildGeom(i, j, dir, tier, seed) {
+  const base = baseGeomFor(i, j, dir, tier, seed);
+  const pts = squareCrossings(base, seed);
+  if (pts === base.pts) return base; // nothing crossed and outranked this edge; no new object
+  const g = { ...base, pts };
   bounds(g);
   return g;
 }
@@ -631,30 +1018,116 @@ function blockDist2(blk, g, x, z) {
 /**
  * Every edge whose curve could come within `pad` metres of the axis-aligned box
  * [x0,x1]×[z0,z1]. Deterministic and order-stable, so two clients build identical lists.
+ *
+ * The furthest an edge that STARTS in cell (i,j) can get from that cell's centre — its far
+ * node is a cell away plus the jitter; the hermite bulges off the chord by up to 4/27 of each
+ * tangent; the winding swings on top of that — is `geomsInBox`'s reach formula, shared with
+ * `baseNeighbors` so the two layers of geometry (final and pre-crossing) never disagree about
+ * what counts as "nearby". Under-reaching here does not cost time, it loses whole roads at a
+ * chunk boundary, so it is generous on purpose.
  */
 export function edgesInBox(x0, z0, x1, z1, seed, pad = 40) {
+  return geomsInBox(x0, z0, x1, z1, seed, pad, geomFor).map(edgeFrom);
+}
+
+/** The two lattice-node keys an edge's ends are pinned to — `${tier}:${i},${j}` each. */
+function edgeNodeKeys(e) {
+  const [tier, rest] = e.key.split(':');
+  const [i, j, dir] = rest.split(',').map(Number);
+  const i1 = dir === 0 ? i + 1 : i;
+  const j1 = dir === 0 ? j : j + 1;
+  return [`${tier}:${i},${j}`, `${tier}:${i1},${j1}`];
+}
+
+/**
+ * Do edges A and B share a lattice node? Two edges that meet at a shared node are the network
+ * CONTINUING — nodeDir() already makes them leave that node along one shared tangent, so they
+ * are close to parallel there by design (a straight run) or turn smoothly (a bend), and that
+ * point is not a junction in the operator's sense at all. Without this filter the brute-force
+ * segment test below finds that shared endpoint as a "crossing" on every single adjacent edge
+ * pair in the network and reports it as a near-0-degree crossing (two nearly-parallel tangents
+ * touching at one point) — which swamped the real crossings 8 to 1 the first time this was
+ * measured and made the same-tier numbers look catastrophically worse than the cross-tier
+ * ones, exactly backwards from what two independent lattices predicts.
+ */
+function sharesNode(a, b) {
+  if (a.tier !== b.tier) return false; // different tiers never share a node, ever
+  const [a0, a1] = edgeNodeKeys(a);
+  const [b0, b1] = edgeNodeKeys(b);
+  return a0 === b0 || a0 === b1 || a1 === b0 || a1 === b1;
+}
+
+/**
+ * Every point where edge A's polyline actually crosses edge B's (A !== B, and not sharing a
+ * lattice node — see `sharesNode`), for a list of edges as `edgesInBox` (or anything shaped
+ * like its output) returns them. Geometry only, no heights needed, and pairwise with a
+ * bounding-box pre-check so it stays cheap into the thousands of segments a multi-kilometre
+ * box carries.
+ *
+ * THIS is the one crossing detector in the file. `squareCrossings` below (which bends an
+ * edge's own tangent near a junction) and render/road.js (which draws the junction patch and
+ * its markings) both call it rather than re-deriving "where do roads cross" a second and
+ * third time — see the file-level rule next to `levelAgainst`.
+ *
+ * Returns [{ a, b, x, z, ka, kb, ax, az, bx, bz, angleDeg, deviationDeg }, ...]: a/b are the
+ * two edges, (x,z) the crossing point, ka/kb the segment index of each edge the crossing
+ * falls on, (ax,az)/(bx,bz) each edge's UNIT TANGENT there, angleDeg the ACUTE angle between
+ * the two tangents (0 = parallel, 90 = perpendicular) and deviationDeg = |90 - angleDeg| — 0
+ * is a perfect right-angle junction. The angle comes from a dot product of unit vectors, which
+ * has no notion of handedness or "which side is left", so it cannot be bitten by gotcha 1.
+ */
+export function findCrossings(edges) {
   const out = [];
-  for (let tier = 0; tier < TIERS.length; tier++) {
-    const T = TIERS[tier];
-    /* The furthest an edge that STARTS in cell (i,j) can get from that cell's centre. Its far
-     * node is a cell away plus the jitter; the hermite bulges off the chord by up to 4/27 of
-     * each tangent; the winding swings on top of that. Under-reaching here does not cost time,
-     * it loses whole roads at a chunk boundary, so this is generous on purpose. */
-    const maxChord = T.cell * (1 + 2 * T.jitter);
-    const bulge = (8 / 27) * Math.min(T.curve * 2, 1.25) * maxChord + T.swing * maxChord;
-    const reach = T.cell * (1 + T.jitter) + bulge + pad;
-    const i0 = Math.floor((x0 - reach) / T.cell);
-    const i1 = Math.floor((x1 + reach) / T.cell);
-    const j0 = Math.floor((z0 - reach) / T.cell);
-    const j1 = Math.floor((z1 + reach) / T.cell);
-    for (let j = j0; j <= j1; j++) {
-      for (let i = i0; i <= i1; i++) {
-        for (let dir = 0; dir < 2; dir++) {
-          if (!connects(i, j, dir, tier, seed)) continue;
-          const g = geomFor(i, j, dir, tier, seed);
-          const m = g.width * 0.5 + g.verge + pad;
-          if (g.maxX < x0 - m || g.minX > x1 + m || g.maxZ < z0 - m || g.minZ > z1 + m) continue;
-          out.push(edgeFrom(g));
+  for (let ai = 0; ai < edges.length; ai++) {
+    const a = edges[ai];
+    const na = a.pts.length / 2 - 1;
+    for (let bi = ai + 1; bi < edges.length; bi++) {
+      const b = edges[bi];
+      if (a.key === b.key) continue;
+      if (sharesNode(a, b)) continue;
+      if (a.maxX < b.minX || a.minX > b.maxX || a.maxZ < b.minZ || a.minZ > b.maxZ) continue;
+      const nb = b.pts.length / 2 - 1;
+      for (let ka = 0; ka < na; ka++) {
+        const ax0 = a.pts[ka * 2],
+          az0 = a.pts[ka * 2 + 1];
+        const ax1 = a.pts[ka * 2 + 2],
+          az1 = a.pts[ka * 2 + 3];
+        const alx = ax1 - ax0,
+          alz = az1 - az0;
+        const la = Math.hypot(alx, alz) || 1;
+        for (let kb = 0; kb < nb; kb++) {
+          const bx0 = b.pts[kb * 2],
+            bz0 = b.pts[kb * 2 + 1];
+          const bx1 = b.pts[kb * 2 + 2],
+            bz1 = b.pts[kb * 2 + 3];
+          const blx = bx1 - bx0,
+            blz = bz1 - bz0;
+          const d = alx * blz - alz * blx;
+          if (Math.abs(d) < 1e-9) continue; // parallel segments never cross at a point
+          const ua = ((bx0 - ax0) * blz - (bz0 - az0) * blx) / d;
+          const ub = ((bx0 - ax0) * alz - (bz0 - az0) * alx) / d;
+          if (ua < 0 || ua > 1 || ub < 0 || ub > 1) continue;
+          const lb = Math.hypot(blx, blz) || 1;
+          const uax = alx / la,
+            uaz = alz / la;
+          const ubx = blx / lb,
+            ubz = blz / lb;
+          let angleDeg = Math.acos(clamp(uax * ubx + uaz * ubz, -1, 1)) * 57.29577951308232;
+          if (angleDeg > 90) angleDeg = 180 - angleDeg;
+          out.push({
+            a,
+            b,
+            x: ax0 + alx * ua,
+            z: az0 + alz * ua,
+            ka,
+            kb,
+            ax: uax,
+            az: uaz,
+            bx: ubx,
+            bz: ubz,
+            angleDeg,
+            deviationDeg: Math.abs(90 - angleDeg),
+          });
         }
       }
     }

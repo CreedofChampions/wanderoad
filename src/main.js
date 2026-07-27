@@ -46,6 +46,7 @@ import { FuelGauge } from './ui/fuelGauge.js';
 import { Hud } from './ui/hud.js';
 import { Cinematic } from './game/cinematic.js';
 import { Menu } from './ui/menu.js';
+import { MusicPanel } from './ui/musicPanel.js';
 import { createTransport } from './net/transport.js';
 import { Remotes } from './net/remotes.js';
 import { identity } from './net/identity.js';
@@ -199,6 +200,12 @@ async function boot() {
   const streak = new Streak();
   let trail = null;
   const hud = new Hud();
+  /* Retired — operator: "Rope in back of car does not look good... use the bottom blue line
+   * instead." hud.js's #unlockBar is now the only streak readout; StreakTrail disables its own
+   * visual output unconditionally (see src/render/trail.js's file header), so it is still
+   * constructed and still wired into the frame loop below only because that is now provably
+   * inert and touching every call site in this shared, concurrently-edited file was not worth
+   * the risk for a purely cosmetic cleanup. */
   trail = new StreakTrail({ scene });
   const audio = new EngineAudio({ seed: SEED }); // seed: the ambience layer asks worldgen where the water and the woods are
 
@@ -219,14 +226,18 @@ async function boot() {
     onEnd: () => chase.reset(),
   });
 
-  /* Points of interest and the petrol stations. `solids` is handed over so the props that
-   * declare a collision radius stop the car exactly like a tree does; the ones that do not
-   * (benches, flower beds, fingerposts) stay drive-through on purpose. */
+  /* Points of interest, the petrol stations, and the floating fuel cans. `solids` is handed
+   * over so the props that declare a collision radius stop the car exactly like a tree does;
+   * the ones that do not (benches, flower beds, fingerposts) stay drive-through on purpose —
+   * cans are never solid, by the same logic: you collect one by driving through it. */
   const props = new Props({ seed: SEED, scene, solids });
-  /* Fuel reads the stations the props renderer has already loaded rather than re-deriving
-   * the road network — the pure lookup in world/props.js costs tens of milliseconds. */
+  /* Fuel reads the stations AND the cans the props renderer has already loaded rather than
+   * re-deriving the road network — the pure lookups in world/props.js cost tens of
+   * milliseconds. props.update() below is called with the car's own x/z every frame, so it
+   * already knows when the car is near a can; drainCollectedFuel() just asks what it found. */
   const fuel = new Fuel({
     findStation: (x, z) => props.nearestStation(x, z),
+    collectCans: () => props.drainCollectedFuel(),
     say: (t, s) => hud.say(t, s),
   });
   const fuelGauge = new FuelGauge(hud.root);
@@ -282,6 +293,11 @@ async function boot() {
   openHint.id = 'openMenu';
   openHint.textContent = 'ESC — garage';
   hud.root.appendChild(openHint);
+
+  /* The operator's playlist, in a small closable window — see src/ui/musicPanel.js. It is
+   * entirely self-contained (owns its own DOM, appended to <body>, and its own J-key listener)
+   * so this one line is the whole wire-up; nothing in the frame loop below needs to touch it. */
+  const musicPanel = new MusicPanel();
 
   /** Put the player back on the nearest road, facing along it.
    *
@@ -468,7 +484,7 @@ async function boot() {
      * with the garage, like the physics, so nobody is rescued while they are shopping. */
     if (!menu.open) rescue.update(dt, car, surf);
     streak.update(dt, car, surf);
-    trail.update(dt, car, streak.state);
+    trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
 
     /* place the model. car.roll and car.pitch are the whole body attitude now — the ground
        under the four wheels, the springs, and a rollover — so nothing gets added on top of

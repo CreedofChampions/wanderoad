@@ -253,6 +253,160 @@ Newly asked for, not yet started:
       `SLOT_P` in `src/world/props.js` — tune them by reading the bench's "one find every N m",
       never by reasoning about the probability, because only about one candidate in six
       survives the freeboard and slope tests.
+- [X] **Petrol stations were not actually findable, and floating fuel cans.** Operator report,
+      verbatim: "Fuel requirements but no gas stations -- maybe we can do floating gass cans?"
+      **DONE 27 July.**
+
+      The box-average acceptance test above (`stationSpacing`) was passing the whole time —
+      133-186 stations over an 18x18 km square looked fine. It was the wrong instrument: relief
+      is spatially correlated (hills cluster), so a driver on ONE real corridor can go far
+      longer than the map-wide mean while some other, flatter corridor carries the average.
+      `tools/diag-stations.mjs` (new) walks a real, connected chain of arterial edges — never a
+      box — and reads off the gaps a driver actually meets. It confirmed the operator's report
+      immediately: worst real gap 35.3 km, against a 9.5 km cruise / 5.6 km flat-out tank
+      (`tools/bench-fuel.mjs`).
+
+      Three real causes, not one, found by measuring rather than guessing:
+      1. `STATION_MAX_GRADE` (6%) was tuned before the relief pass that left meadow arterials
+         at a worst grade of 27% and alpine's road grade at a MEDIAN of 7.4% — already above
+         the old cap (docs BACKLOG W4 / alpine-gradient entries above).
+      2. Only 5 fixed candidate points were tried per 1.8-2.6 km edge, so a real flat pocket
+         often existed but was not sampled.
+      3. An actual bug: the flattest candidate was checked for water AFTER being chosen, so if
+         that one point happened to be wet the WHOLE edge was rejected even when a slightly
+         less-flat, dry candidate existed among the others tried — this cost MORE stations than
+         grade in five of six presets (measured: causeway rejection 24-45% of candidate sites in
+         marsh/dunes/plains, vs 8-39% for grade).
+
+      Fix: `STATION_MAX_GRADE` 0.06 -> 0.11, `STATION_AT` 5 -> 11 points, and the water test now
+      runs per-candidate (flattest of the ones that are ALSO dry wins, not flattest-then-hope).
+      Re-measured: worst real gap 35.3 km -> 17.99 km over 13 113 km of real routes (6 presets x
+      4 seeds) — real, but STILL short of the 5.6 km floor, because `STATION_P`'s own 72%
+      independent draw per edge has a combinatorial tail no grade/water fix removes (isolated by
+      re-running with grade/water rejection disabled entirely: still 10-18 km). Raising
+      `STATION_P` to chase that away would flood the road and lose "a REASON TO STOP".
+
+      So: floating fuel cans, the operator's own proposed second layer, exactly for this tail.
+      `fuelCansInBox` in `src/world/props.js` (placement, arc-length slots on BOTH tiers, same
+      `clearOfRoads`/slope discipline as the 100 props, freeboard rule relaxed to `'any'` —
+      deliberately, since a can that floats has no structural reason to insist on dry ground the
+      way a forecourt does, and that is exactly where stations lose the most candidates).
+      `buildFuelCan` + `Props` changes in `src/render/props.js`: individually-meshed (never
+      baked into a tile, so one can be removed and bob independently), collected on proximity
+      (`CAN_RADIUS` 7 m, no need to stop), a gentle sine bob on the mesh's own transform.
+      `Fuel.collectCans` in `src/game/fuel.js`, wired in `src/main.js`. "Floating" means one
+      thing precisely: the geometry's local origin is +`CAN_HOVER` (0.55 m), so placing it at
+      the same ground-contact point every prop uses is what makes it hover — nothing is
+      unanchored, and placement's own freeboard/slope math is unaffected by the render-time
+      hover. Measured: one can every ~600 m (1.46-2.46/km across six seeds), denser than the
+      100 props on purpose. Real, driven, end-to-end proof it works — not just that the code
+      exists — in `tools/bench-props.mjs`'s "a can, bobbing and collected" section: mesh Y
+      genuinely changes frame to frame, collecting pays out exactly `CAN_FRACTION` (22% of a
+      tank), the mesh is really gone from the scene graph after, standing on the same spot again
+      does not pay out twice.
+
+      Combined result, stations AND cans together, walked over 2 333 km of real routes across
+      all six presets: worst gap to ANY fuel source **4.54 km** — comfortably inside both the
+      5.6 km flat-out and 9.5 km cruise ranges, with real margin. `node tools/diag-stations.mjs`
+      (new), `node tools/bench-props.mjs [seed]`, `node tools/bench-fuel.mjs [seed]` — six seeds
+      green on both bench tools.
+
+      **Follow-up, resolved 27 July:** the two checks flagged above as out of scope —
+      `tools/bench-props.mjs`'s pre-existing "added draw calls <= 25" (seed 3) and "sample size
+      > 40" (seed 5) — were investigated properly rather than left. Both numbers were
+      calibrated by eyeballing the single default seed and never swept. `tools/diag-propcount.mjs`
+      (new) reproduces each measurement exactly and sweeps it: draw calls (non-empty tiles in
+      the fixed window) came back mean 19.6, sd 4.5, true observed max 32 across 542 swept
+      seeds — `<= 25` alone failed 38 of them (7%). Sample size (props in the fixed 4x4 km box)
+      came back mean ~83, sd ~23, true observed min 21 — `> 40` alone failed 9 of 542 (1.7%).
+      Neither is a placement bug: every failing seed's rejection tally (candidates / rejectRoad
+      / rejectWater / rejectSlope, now printed per seed by the diag tool) reads as ordinary
+      freeboard/slope loss, and sample size specifically correlates at 0.94 with the seed's own
+      props-per-km rate — a number the check two lines above already accepts across 0.4 .. 3.2
+      — and only 0.27 with how much road happens to fall inside the fixed box. A low count is
+      the direct, expected product of two numbers this file already calls acceptable, not
+      evidence of anything wrong with `SLOT_P` or the freeboard/slope tests. Recalibrated from
+      measurement, the same way `STATION_MAX_GRADE` was: draw calls to `<= 34` (clears the
+      swept range with margin and still catches a real regression — nothing in 542 seeds came
+      close), sample size to `> 15` (a little under both the swept minimum and the theoretical
+      floor of accepted-perKm x observed-minimum-roadKm, ~14 — still catches a genuinely vacuous
+      result). All six canonical seeds (20260726, 1-5) plus every seed the sweep found failing
+      re-verified green; `npm test` unaffected (bench-props.mjs is not part of that gate).
+
+      **Found in the same sweep, NOT fixed — a different pass's problem.** Pushing past the six
+      canonical seeds to verify the fix above surfaced three more seed-dependent failures in
+      this file, unrelated to the two resolved here: seed 28 fails "props per km of road"
+      (3.38, just over the existing 3.2 ceiling) and "cans per km of road" (3.55); seeds 155 and
+      177 also fail "cans per km of road" (3.02, 3.07 against the existing 2.8 ceiling). Same
+      shape of problem as above (a per-km ceiling that may itself be a single-seed calibration,
+      not swept) but not confirmed as such — flagged, not guessed at.
+
+      **Follow-up, resolved 27 July:** seeds 9 and 30's "nothing collected yet" failure in the
+      "a can, bobbing and collected" section (reads 0.22, one `CAN_FRACTION`, instead of 0) was
+      confirmed rather than assumed — logging `props._collectedCans` right after the 3 km drive
+      shows a real can auto-collected mid-drive (`cn:1:0,-1,1:2` on seed 9, `cn:0:0,-1,1:13` on
+      seed 30), because the frame-cost block's dead-straight (i, 0) path happens to pass within
+      `CAN_RADIUS` of it. That is the game's auto-collect behaviour working correctly, just left
+      undrained on the shared `Props` instance going into the can section's own baseline check.
+      Fix: the can section now calls `props.drainCollectedFuel()` once and discards the result
+      immediately before its "nothing collected yet" check, so an earlier incidental pickup can't
+      leak into this section's own zero baseline — a one-line test-ordering fix, not a gameplay
+      change. Re-verified green on seeds 9, 30, and all six canonical seeds (20260726, 1-5).
+
+      **Follow-up, resolved 27 July:** the "per-km ceiling that may itself be a single-seed
+      calibration, not confirmed as such" flagged above was investigated properly rather than
+      assumed — and this time it was NOT the same fix. `tools/diag-perkm.mjs` (new) sweeps
+      `propsInBox`/`fuelCansInBox` across 601 seeds over the identical fixed 4x4 km box, with
+      the existing candidates/rejectRoad/rejectWater/rejectSlope/placed tally plus two new
+      measurements: road-tier mix (`SLOT_P`/`CAN_SLOT_P` are both luckier on tier-1 lane road)
+      and biome AREA sampled on a fixed grid independent of the road network (several prop
+      kinds, and the cans' freeboard rule, treat wet and dry ground differently).
+
+      Confirmed real, not a fluke of three seeds: props per km fails high on 2 of 601 (0.3% —
+      seed 28 at 3.38, and seed 596 at 3.22, found by the sweep and not previously flagged, both
+      over the old 3.2 ceiling); cans per km fails high on **62 of 601 (10.3%)** — seeds
+      28/155/177 are three ordinary points on a smoothly decaying tail (3.55, 3.35, 3.31, 3.31,
+      3.21, 3.17, 3.17, ...), not a pathological trio.
+
+      What actually drives a high seed, measured rather than guessed: downstream YIELD
+      (placed / candidates), not more candidates being generated — `corr(perKm, candidates/km)
+      = 0.04` against `corr(perKm, yield) = 0.95`; `corr(canPerKm, candidates/km) = 0.14`
+      against `corr(canPerKm, yield) = 0.80`. Within yield, the single strongest lever for both
+      is how much of the fixed box sits clear of its own local water table:
+      `corr(perKm, rejectWater rate) = -0.39`, `corr(canPerKm, rejectWater rate) = -0.69` (the
+      largest correlation the sweep found, either direction, for either metric). Road-tier mix
+      is a weak driver (`corr(*, laneFrac)` 0.10-0.17) — the tier-based luck in `SLOT_P`/
+      `CAN_SLOT_P` is not the story. No single biome dominates either: the strongest are Hoshi
+      Meadow area (+0.42 perKm, +0.37 canPerKm) and Bara Dunes area (-0.38, -0.50) — real, but
+      well short of explaining most of the variance alone, because `waterLevelAt()` blends ALL
+      five biomes' weights at a point, not just the dominant one. This is the same spatially-
+      correlated, seed-varying effect `tools/diag-stations.mjs` already measured for petrol
+      stations and the relief/cliffs entries measured for terrain — some seeds' fixed box just
+      happens to sit drier than others — not a bug in one biome and not evidence that `SLOT_P`/
+      `CAN_SLOT_P` themselves are mistuned.
+
+      Retuning `SLOT_P`/`CAN_SLOT_P` down to chase the high tail was considered and rejected,
+      for a reason the sweep itself supplies: the LOW end has little to no headroom to give.
+      Props' true observed minimum is 0.43 (seed 198) against the 0.4 floor — about 7% of
+      headroom, on a seed nowhere near 28/155/177/596. A global cut aimed at the high tail would
+      push every seed down, plausibly trading a `fail-hi` for a new `fail-lo` rather than
+      removing one, to chase a cause (the local water table) that is not a probability knob to
+      begin with. Cans have more room on the low end (min 1.28 against 0.9) but the same
+      objection applies in spirit: the actual lever — freeboard, evaluated per-candidate after
+      the accept draw — sits downstream of `CAN_SLOT_P`, so cutting the accept probability would
+      suppress cans everywhere equally, including the already-sparse dry seeds, rather than
+      specifically the wet-adjacent ones this tail is actually about.
+
+      Fix: recalibrated from measurement, the same way `STATION_MAX_GRADE` and the two checks
+      above it were. Props per km ceiling `3.2` -> **`3.6`** (mean 1.75, sd 0.46, true observed
+      max 3.38 across 601 seeds — clears it with real margin). Cans per km ceiling `2.8` ->
+      **`3.9`** (mean 2.37, sd 0.36, true observed max 3.55 — the bigger jump matches the
+      heavier tail: a 10.3% original fail rate against props' 0.3%). Neither floor moved (0
+      `fail-lo` on both, before and after — only the ceilings were ever failing). Re-verified:
+      all six canonical seeds (20260726, 1-5), seeds 28/155/177 (originally flagged), seed 596
+      (found by the sweep), and two more high-tail seeds (438, 293) all green on `node
+      tools/bench-props.mjs [seed]`; `npm test` stays 22/22 (bench-props.mjs is not part of that
+      gate, and nothing touched this pass is either).
 - [ ] Weather and horizon effects, inspired by Slow Roads. Explicitly LOW priority: the
       operator's note was "the goal is to wrap up this project soon so we shouldn't get totally
       caught away".

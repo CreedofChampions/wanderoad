@@ -501,7 +501,55 @@ function waterOk(rule, y, wy) {
  * Spacing is the number that matters. `FuelTank` holds about six minutes of cruising, which
  * at 90 km/h is roughly 9 km, so a station every ~3 km of arterial means a tank covers two
  * or three of them and you are never hunting. Arterial edges run 1.8-2.6 km, so one station
- * per edge at p = 0.72 lands there.
+ * per edge at p = 0.72 lands there — IF the edge actually has somewhere flat enough. It does
+ * not always.
+ *
+ * STATION_MAX_GRADE and STATION_AT were tuned before the relief pass that raised meadow
+ * arterials to a worst grade of 27% and alpine to 53% (docs/BACKLOG.md, the W4 and
+ * alpine-gradient entries) — before that, a 6% cap and five fixed sample points along the
+ * edge were plenty. tools/diag-stations.mjs walks REAL connected chains of arterial (never a
+ * box average, which is what the old acceptance test measured and which stayed green through
+ * all of this) and reads off the gaps a driver actually meets:
+ *
+ *   preset    grade at 6%/5pt, worst real gap     candidate sites over cap    edges lost outright
+ *   meadow           14.0-27.5 km                          25%                      5%
+ *   rolling          13.1-33.6 km                          31%                      6%
+ *   alpine           13.5-18.8 km                          59%                     22%
+ *   plains           19.9-26.8 km                          19%                      3%
+ *   dunes            22.0-35.3 km                          22%                      4%
+ *   marsh            21.6-34.4 km                          18%                      3%
+ *
+ * A tank at cruise covers 9.5 km and 5.6 km flat out (tools/bench-fuel.mjs), so ANY of the
+ * above is "ran completely dry, in the open, with nothing in sight" — the exact experience
+ * behind the operator's report. And grade is not even the biggest single rejection reason in
+ * most presets: with only five fixed points along a 1.8-2.6 km edge, the flattest of the five
+ * is very often also sitting over water (the "no pumps on a causeway" rule, `waterOk`'s
+ * cousin below), which measured as costing MORE candidates than grade in five of six presets
+ * (only alpine's grade loss, 22% of edges, outweighs it). So this is not purely a grade
+ * problem: it is a SEARCH DENSITY problem that grade makes worse. The fix is both — more
+ * candidate points per edge, so a real flat-and-dry pocket that exists somewhere along a
+ * 2+ km edge is actually found instead of missed by unlucky fixed sampling, AND a higher cap,
+ * because alpine's own median road grade (7.4%, tools/diag-relief.mjs) already exceeds the
+ * old 6% ceiling — no amount of extra sampling finds a flat spot that is not there.
+ *
+ * Re-measured after (STATION_MAX_GRADE 0.06 -> 0.11, STATION_AT 5 -> 11 points, and the water
+ * test moved to run per-candidate instead of only on the single flattest one — see below):
+ * across all six presets, four seeds, ~545 km of real connected arterial each (13 113 km
+ * total), the worst real gap seen anywhere drops from 35.3 km to 17.99 km. Better, but STILL
+ * short of the 5.6 km flat-out floor on its own — see "why stations alone are not enough"
+ * below and the floating-can section further down, which is what actually closes it (worst
+ * gap to ANY fuel source, stations and cans together, over 2 333 km of real routes: 4.54 km,
+ * comfortably inside both the 5.6 km flat-out and 9.5 km cruise ranges). `node
+ * tools/diag-stations.mjs`.
+ *
+ * WHY STATIONS ALONE ARE NOT ENOUGH, even fixed: STATION_P is an independent 72% draw per
+ * arterial edge. Rejecting the diagnosis-first-then-fix-second questions honestly: with grade
+ * and water rejection isolated out entirely (STATION_MAX_GRADE raised to a number nothing can
+ * fail — a real experiment, not a guess), the worst real gap is STILL 10-18 km, because a
+ * sequence of unlucky 28%-fail draws in a row is not rare over hundreds of edges. Raising
+ * STATION_P to chase that away would either flood the road with stations (losing "a REASON TO
+ * STOP") or still not fully close it. That combinatorial tail is what the floating cans exist
+ * to backstop — see below.
  *
  * Unlike the props, this is a PURE function of the seed — no ground probe — because
  * src/game/fuel.js has to be able to ask "where is the nearest pump" from anywhere without
@@ -509,10 +557,15 @@ function waterOk(rule, y, wy) {
  * `edgeProfile` makes deterministic.
  */
 const STATION_P = [0.72, 0.1];
-/** Candidate positions along an edge, as fractions of its length. */
-const STATION_AT = [0.22, 0.36, 0.5, 0.64, 0.78];
-/** Steepest road a forecourt will be built beside, as a gradient. */
-const STATION_MAX_GRADE = 0.06;
+/** Candidate positions along an edge, as fractions of its length — kept off both ends, which
+ *  sit inside a junction's pinned ramp and are not representative of the road's own grade.
+ *  Eleven points rather than the original five: measured (tools/diag-stations.mjs) as the
+ *  difference between a real flat-and-dry pocket existing on an edge and it being FOUND. */
+const STATION_AT = [0.08, 0.16, 0.24, 0.32, 0.40, 0.48, 0.56, 0.64, 0.72, 0.80, 0.88];
+/** Steepest road a forecourt will be built beside, as a gradient. Was 0.06 — raised after the
+ *  relief pass left even alpine's MEDIAN road grade at 7.4%, above the old cap, so no amount
+ *  of extra search finds a legal spot on a preset whose typical ground already exceeds it. */
+export const STATION_MAX_GRADE = 0.11;
 /** Metres from the centreline to the middle of the forecourt. */
 export const STATION_OFFSET = 15.5;
 /** Within this of the pumps, stopped, and you are refuelling. */
@@ -531,81 +584,129 @@ function pureFns(seed) {
 }
 
 /**
- * Every petrol station whose forecourt centre lands inside the box.
- * Pure: same seed, same answer, no ground probe needed.
+ * Station outcome for ONE edge, independent of any query box. Factored out of stationsInBox
+ * so a route walk can ask about edges in DRIVEN ORDER (tools/diag-stations.mjs) rather than a
+ * box average — a box average is what the old acceptance test measured, and it is the wrong
+ * question: a driver experiences the GAPS along the road they are actually on, and relief
+ * (and therefore grade, and therefore where this function says no) is spatially correlated,
+ * so a box-wide mean can look fine while one real corridor through the hills goes station-to-
+ * station for three or four times the average.
+ *
+ * `stats`, if given, tallies WHY an edge did or did not get a station — candidate sites tried,
+ * how many of those were over STATION_MAX_GRADE, and whether the whole edge came up empty
+ * because of it. That is the only way this cap has ever been tuned instead of guessed at (see
+ * the SLOT_P comment above for the same argument applied to the props rarity dial).
  */
-export function stationsInBox(x0, z0, x1, z1, seed) {
-  const out = [];
+function stationForEdge(e, seed, stats = null) {
+  const tally = (k) => {
+    if (stats) stats[k] = (stats[k] || 0) + 1;
+  };
+  const ids = edgeIds(e);
+  const p = STATION_P[ids.tier] ?? 0;
+  tally(ids.tier === 0 ? 'arterialEdges' : 'laneEdges');
+  const rnd = rng(hash3i(ids.i * 4 + ids.dir * 2 + ids.tier, ids.j, 0x5a, seed ^ SALT_STATION));
+  if (rnd() >= p) return null;
+  tally(ids.tier === 0 ? 'arterialSelected' : 'laneSelected');
+
+  /* THE road elevation — the same one the terrain carves to and the ribbon is drawn on.
+   * This used to profile a private copy, because a RoadField's `y` was levelled against
+   * whatever else happened to be in ITS box and so was not a function of the edge alone;
+   * two clients querying different boxes put the forecourt at two different heights. That
+   * is fixed at the source now (see "one road, ONE height" in world/roads.js), and a
+   * private profile here would be a forecourt built on a road that is not where the road
+   * is. Memoised inside edgeProfile, so neighbouring tiles asking about the same arterial
+   * still pay for it once. */
   const { land, water } = pureFns(seed);
-  const edges = edgesInBox(x0 - 60, z0 - 60, x1 + 60, z1 + 60, seed, 20);
+  edgeProfile(e, seed, land, water);
+  const cum = arcTable(e);
+  const total = cum[cum.length - 1];
   const at = { x: 0, z: 0, tx: 1, tz: 0, k: 0, t: 0 };
 
-  for (const e of edges) {
-    const ids = edgeIds(e);
-    const p = STATION_P[ids.tier] ?? 0;
-    const rnd = rng(hash3i(ids.i * 4 + ids.dir * 2 + ids.tier, ids.j, 0x5a, seed ^ SALT_STATION));
-    if (rnd() >= p) continue;
-
-    /* THE road elevation — the same one the terrain carves to and the ribbon is drawn on.
-     * This used to profile a private copy, because a RoadField's `y` was levelled against
-     * whatever else happened to be in ITS box and so was not a function of the edge alone;
-     * two clients querying different boxes put the forecourt at two different heights. That
-     * is fixed at the source now (see "one road, ONE height" in world/roads.js), and a
-     * private profile here would be a forecourt built on a road that is not where the road
-     * is. Memoised inside edgeProfile, so neighbouring tiles asking about the same arterial
-     * still pay for it once. */
-    edgeProfile(e, seed, land, water);
-    const cum = arcTable(e);
-    const total = cum[cum.length - 1];
-
-    // Flattest of the candidates. Grade is measured over the polyline either side, which is
-    // ~150 m for an arterial — the length a forecourt and its two approaches actually need.
-    let best = null;
-    for (const f of STATION_AT) {
-      atArc(e, cum, f * total, at);
-      const k = at.k;
-      const run = Math.max(1, cum[Math.min(k + 1, cum.length - 1)] - cum[Math.max(k - 1, 0)]);
-      const rise = Math.abs(e.y[Math.min(k + 1, e.y.length - 1)] - e.y[Math.max(k - 1, 0)]);
-      const grade = rise / run;
-      if (grade > STATION_MAX_GRADE) continue;
-      if (!best || grade < best.grade) {
-        const roadY = e.y[k - 1] + (e.y[k] - e.y[k - 1]) * at.t;
-        best = { grade, x: at.x, z: at.z, tx: at.tx, tz: at.tz, y: roadY };
-      }
+  /* Flattest of the candidates that are ALSO not sitting over water — both tests apply to
+   * EACH candidate, not grade-first-then-water-on-whatever-won. That used to pick the single
+   * flattest point on the whole edge and only then ask whether it was dry; on the flat, wet
+   * presets (marsh, dunes, plains) the flattest point on an edge is disproportionately likely
+   * to be the low-lying wet one, so a denser, better grade search made the causeway rejection
+   * WORSE, not better — measured, tools/diag-stations.mjs: raising the candidate count alone
+   * pushed marsh's worst real gap from 34 km to 54 km. Testing both constraints together and
+   * keeping the flattest point that clears BOTH is what a "flattest AND dry" search actually
+   * means. Grade is measured over the polyline either side, which is ~150 m for an arterial —
+   * the length a forecourt and its two approaches actually need. */
+  let best = null;
+  for (const f of STATION_AT) {
+    atArc(e, cum, f * total, at);
+    tally('candidateSites');
+    const k = at.k;
+    const run = Math.max(1, cum[Math.min(k + 1, cum.length - 1)] - cum[Math.max(k - 1, 0)]);
+    const rise = Math.abs(e.y[Math.min(k + 1, e.y.length - 1)] - e.y[Math.max(k - 1, 0)]);
+    const grade = rise / run;
+    if (grade > STATION_MAX_GRADE) {
+      tally('rejectGrade');
+      continue;
     }
-    if (!best) continue;
+    const roadY = e.y[k - 1] + (e.y[k] - e.y[k - 1]) * at.t;
+    const w = water(at.x, at.z);
+    if (w !== null && roadY < w + 1.6) {
+      tally('rejectCauseway'); // no pumps on a causeway
+      continue;
+    }
+    if (!best || grade < best.grade) {
+      best = { grade, x: at.x, z: at.z, tx: at.tx, tz: at.tz, y: roadY, frac: f };
+    }
+  }
+  if (!best) {
+    tally('edgeEmpty');
+    return null;
+  }
 
-    const w = water(best.x, best.z);
-    if (w !== null && best.y < w + 1.6) continue; // no pumps on a causeway
+  const sideSign = rnd() < 0.5 ? 1 : -1;
+  // Same right-hand ground normal as propsInBox and render/road.js: (tz, -tx).
+  const rx = best.tz * sideSign;
+  const rz = -best.tx * sideSign;
+  const off = e.width * 0.5 + STATION_OFFSET;
+  const x = best.x + rx * off;
+  const z = best.z + rz * off;
+  tally('placed');
 
-    const sideSign = rnd() < 0.5 ? 1 : -1;
-    // Same right-hand ground normal as propsInBox and render/road.js: (tz, -tx).
-    const rx = best.tz * sideSign;
-    const rz = -best.tx * sideSign;
-    const off = e.width * 0.5 + STATION_OFFSET;
-    const x = best.x + rx * off;
-    const z = best.z + rz * off;
-    if (x < x0 || x >= x1 || z < z0 || z >= z1) continue;
+  return {
+    key: `st:${e.key}`,
+    x,
+    z,
+    // The forecourt is GRADED, exactly like the road it serves: it takes the road's own
+    // smoothed height, not the raw land's. A forecourt that followed the ground would tilt
+    // and the pumps would lean.
+    y: best.y,
+    roadX: best.x,
+    roadZ: best.z,
+    // Faces the road across the apron.
+    yaw: Math.atan2(-rx, -rz),
+    along: Math.atan2(best.tx, best.tz),
+    side: sideSign,
+    grade: best.grade,
+    // Fraction along the edge's own arc length, [0,1) — not used by the renderer, only by a
+    // route walk that needs to know WHERE in the edge the forecourt sits to add up real gaps.
+    edgeFrac: best.frac,
+  };
+}
 
-    out.push({
-      key: `st:${e.key}`,
-      x,
-      z,
-      // The forecourt is GRADED, exactly like the road it serves: it takes the road's own
-      // smoothed height, not the raw land's. A forecourt that followed the ground would tilt
-      // and the pumps would lean.
-      y: best.y,
-      roadX: best.x,
-      roadZ: best.z,
-      // Faces the road across the apron.
-      yaw: Math.atan2(-rx, -rz),
-      along: Math.atan2(best.tx, best.tz),
-      side: sideSign,
-      grade: best.grade,
-    });
+/**
+ * Every petrol station whose forecourt centre lands inside the box.
+ * Pure: same seed, same answer, no ground probe needed.
+ * `stats`, if given, is forwarded to stationForEdge — see it for what gets tallied.
+ */
+export function stationsInBox(x0, z0, x1, z1, seed, stats = null) {
+  const out = [];
+  const edges = edgesInBox(x0 - 60, z0 - 60, x1 + 60, z1 + 60, seed, 20);
+  for (const e of edges) {
+    const st = stationForEdge(e, seed, stats);
+    if (!st) continue;
+    if (st.x < x0 || st.x >= x1 || st.z < z0 || st.z >= z1) continue;
+    out.push(st);
   }
   return out;
 }
+
+export { stationForEdge };
 
 /**
  * The nearest station to a point, or null. Used by the fuel gauge to tell you which way to
@@ -637,4 +738,166 @@ export function stationSpacing(seed, halfSpan = 12000) {
   }
   const n = stationsInBox(-halfSpan, -halfSpan, halfSpan, halfSpan, seed).length;
   return { arterialMetres, stations: n, metresPerStation: n ? arterialMetres / n : Infinity };
+}
+
+/* ── floating fuel cans ──────────────────────────────────────────────────────
+ * A supplementary, easier-to-spot pickup, offered by the operator alongside the findability
+ * report: "fuel requirements but no gas stations -- maybe we can do floating gas cans?" A
+ * small can that hovers over the verge and gives a PARTIAL refuel — denser and more visible
+ * than a station, but still rare enough to feel like a find.
+ *
+ * They exist because stations alone, even after the STATION_MAX_GRADE and search-density fix
+ * above, still have a real worst-case gap: STATION_P is an independent 72% draw per arterial
+ * edge, and that alone has a combinatorial tail — tools/diag-stations.mjs, run with grade and
+ * water rejection effectively disabled to isolate it, still shows real routes going 10-18 km
+ * between stations purely from that draw. Raising STATION_P to chase that tail away would
+ * either flood the road with stations (losing the "a REASON TO STOP" specialness) or still
+ * not fully close it — a rare worst-case gap wants a denser SECOND layer, not a blunter first
+ * one, which is exactly what was proposed. See tools/diag-stations.mjs's combined-source
+ * section for the measured backstop.
+ *
+ * FLOATING, precisely: the can's geometry (src/render/props.js `buildFuelCan`) is modelled
+ * with its own base at +CAN_HOVER in LOCAL space, so it is blitted at the exact same (x, y, z)
+ * every other prop is — the same ground contact point this file works out for everything
+ * else, with the same freeboard and slope tests below. Nothing is unanchored: the can still
+ * rises over a hill and drops into a dip exactly like a fingerpost does: it is simply drawn
+ * hovering a fixed, constant height above wherever that ground point is. The bob the operator
+ * asked for ("bobs gently") is a further, tiny, TIME-based render-side wobble on top of that
+ * fixed hover — see Props._updateCans in src/render/props.js — it is not part of placement.
+ */
+const CAN_SLOT = 90;
+/** Candidate accept probability per slot, [arterial, lane]. Lanes a little luckier, same
+ *  reasoning as SLOT_P above. Tuned against tools/diag-stations.mjs's "combined" spacing,
+ *  not guessed: measured one can every ~600 m, denser than the 100 ambient props (~830 m) —
+ *  deliberately, because this layer exists to backstop STATION_P's rare double-digit-km
+ *  droughts (see above), and it has to be dense enough to reliably catch one of those, not
+ *  just common on average. See the numbers recorded next to STATION_MAX_GRADE above. */
+const CAN_SLOT_P = [0.35, 0.42];
+/** Metres above the sampled ground the can's origin sits at. A fixed constant — see the
+ *  file comment above for exactly what "floating" does and does not mean. */
+export const CAN_HOVER = 0.55;
+/** Stopped this close and it is collected. Bigger than a station's radius on purpose — a can
+ *  is meant to be grabbed without a precise parking manoeuvre. */
+export const CAN_RADIUS = 7;
+/** Fraction of a full tank one can restores. */
+export const CAN_FRACTION = 0.22;
+/** Footprint radius for clearance and freeboard purposes — small; it is a jerry can. */
+export const CAN_FOOT = 0.5;
+/** As cos(angle) — a can does not need a level floor to hover over, but should not be planted
+ *  on a cliff face, which would look wrong even hovering. Roughly the ROUGH tolerance above. */
+const CAN_SLOPE = 0.90;
+const SALT_CAN = 0x43414e31; // 'CAN1'
+/** How far a can may sit from the road it hangs off, and the query-box expansion. Cans stay
+ *  close to the verge on purpose — they are meant to be seen from the car in passing, not
+ *  hunted for in a field. */
+const CAN_MAX_OFFSET = 20;
+
+/**
+ * Every floating fuel can whose position lands inside the box. Same shape of call as
+ * propsInBox (arc-length slots along the road network, a ground probe the caller owns) with
+ * its own independent salt, slot length and probability — a can is not one of the 100 prop
+ * kinds and is never drawn into propsInBox's weighted catalogue, because it needs to be an
+ * individually removable, individually animated mesh once collected (src/render/props.js),
+ * which a prop baked into one static tile mesh cannot be.
+ *
+ * @param {object} probe same shape propsInBox takes: `.site(x,z)` and `.height(x,z)`.
+ * @param {object} [stats] optional rejection tally, same convention as propsInBox.
+ */
+export function fuelCansInBox(x0, z0, x1, z1, seed, probe, stats = null) {
+  const site = probe.site;
+  const height = probe.height || ((x, z) => probe.site(x, z).y);
+  const out = [];
+  const tally = (k) => {
+    if (stats) stats[k] = (stats[k] || 0) + 1;
+  };
+  const edges = edgesInBox(x0 - CAN_MAX_OFFSET, z0 - CAN_MAX_OFFSET, x1 + CAN_MAX_OFFSET, z1 + CAN_MAX_OFFSET, seed, 20);
+  const at = { x: 0, z: 0, tx: 1, tz: 0, k: 0, t: 0 };
+
+  for (const e of edges) {
+    const ids = edgeIds(e);
+    const cum = arcTable(e);
+    const total = cum[cum.length - 1];
+    const p = CAN_SLOT_P[ids.tier] ?? CAN_SLOT_P[0];
+    const half = e.width * 0.5;
+    const slots = Math.floor(total / CAN_SLOT);
+    const key0 = ids.i * 4 + ids.dir * 2 + ids.tier;
+
+    for (let s = 0; s < slots; s++) {
+      if (hash3i(key0, ids.j, s, seed ^ SALT_CAN) * F32 >= p) continue;
+      const rnd = rng(hash3i(key0, ids.j, s, seed ^ SALT_CAN ^ 0x2f6b1c9d));
+      tally('candidates');
+
+      atArc(e, cum, (s + 0.15 + rnd() * 0.7) * CAN_SLOT, at);
+      if (at.x < x0 - CAN_MAX_OFFSET || at.x > x1 + CAN_MAX_OFFSET) continue;
+
+      // Close to the verge and clear of the tarmac — the same floor propsInBox uses.
+      const sideSign = rnd() < 0.5 ? 1 : -1;
+      const minOff = half + VERGE_CLEAR + CAN_FOOT;
+      const off = minOff + rnd() * 7;
+      const rx = at.tz * sideSign;
+      const rz = -at.tx * sideSign;
+      const x = at.x + rx * off;
+      const z = at.z + rz * off;
+      if (x < x0 || x >= x1 || z < z0 || z >= z1) {
+        tally('outsideBox');
+        continue;
+      }
+
+      if (!clearOfRoads(edges, x, z, VERGE_CLEAR + CAN_FOOT)) {
+        tally('rejectRoad');
+        continue;
+      }
+
+      /* 'any' rather than 'dry': still a real freeboard test (only 0.2 m of allowed
+       * submersion, same as a fallen log or a prayer cairn elsewhere in this file), not a
+       * skipped one — but a can that floats has no structural reason to insist on dry ground
+       * the way a forecourt or a barn does, and measured (tools/diag-stations.mjs), marsh and
+       * dunes are exactly where stations lose the most candidates to the SAME 'dry' rule
+       * (24-45% of sites). Letting the can tolerate what the station cannot is what makes it
+       * a useful backstop specifically where stations are weakest, instead of failing for the
+       * same reason in the same place. */
+      const here = site(x, z);
+      if (!waterOk('any', here.y, here.wy)) {
+        tally('rejectWater');
+        continue;
+      }
+
+      const probeR = Math.max(CAN_FOOT * 1.15, 0.6);
+      const g = footprintGround(height, here.y, x, z, probeR);
+      if (g.hi - g.lo > Math.min(probeR * 2 * Math.tan(Math.acos(CAN_SLOPE)), 0.9)) {
+        tally('rejectSlope');
+        continue;
+      }
+
+      tally('placed');
+      out.push({
+        key: `cn:${e.key}:${s}`,
+        x,
+        z,
+        // Ground contact height — exactly what every other prop's `y` means. The renderer
+        // adds CAN_HOVER on top, in the geometry's own local space, not here.
+        y: g.lo - 0.02,
+        yaw: rnd() * TAU,
+        hue: rnd(),
+        dominant: here.dominant,
+      });
+    }
+  }
+  return out;
+}
+
+/** Mean metres of ANY road between candidate can slots, for the acceptance harness — the
+ *  same shape as stationSpacing but counting both tiers, since cans are placed on both. */
+export function canSpacing(seed, halfSpan = 12000) {
+  const edges = edgesInBox(-halfSpan, -halfSpan, halfSpan, halfSpan, seed, 0);
+  let roadMetres = 0;
+  for (const e of edges) {
+    const cum = arcTable(e);
+    roadMetres += cum[cum.length - 1];
+  }
+  const n = fuelCansInBox(-halfSpan, -halfSpan, halfSpan, halfSpan, seed, {
+    site: (x, z) => ({ y: 0, dominant: 0, wy: null }),
+    height: () => 0,
+  }).length;
+  return { roadMetres, cans: n, metresPerCan: n ? roadMetres / n : Infinity };
 }

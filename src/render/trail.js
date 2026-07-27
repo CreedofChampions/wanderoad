@@ -1,20 +1,28 @@
-/* Wanderoad — the streak trail.
+/* Wanderoad — the streak trail. RETIRED 2026-07-27, DISABLED IN PLACE — read this before
+ * touching the class below.
  *
- * A ribbon that pays out behind the car while a streak is alive. It is the game's only
- * scoreboard that lives in the world rather than on the glass: you can see how long you have
- * been going without looking away from the road, which is the whole point of a cozy game.
+ * The operator, verbatim: "Rope in back of car does not look good at all or make it clear --
+ * use the bottom blue line instead." The bottom unlock bar in src/ui/hud.js (#unlockBar) is
+ * now the sole streak readout; this file no longer draws anything.
  *
- * How it reads:
- *   - nothing at all for the first 100 m, so a short hop never trails anything
- *   - then a very pale blue thread that lengthens as the streak does
- *   - the blue DEEPENS with distance, on a log curve, so the first kilometre is a visible
- *     change and the tenth is a subtle one
- *   - the whole thing brightens gently while the streak is alive
- *   - when it breaks, it flashes red once and is reeled in rather than deleted
+ * It is disabled rather than deleted because src/main.js (and window.WANDEROAD, for any
+ * tooling/console use) still holds a live `trail` reference and calls `.update()`/`.reset()`
+ * on it every frame — see the constructor and those two methods below for exactly how the
+ * no-op is enforced. The class, geometry and shader are otherwise untouched, so a future "put
+ * it back" is a two-line revert, not a rewrite.
  *
- * The rope is a chain of points that follow the one in front with a spring and a little
- * gravity, which is what gives it weight through a corner instead of tracking the car like a
- * rigid stick. It is cosmetic: nothing here can touch the car.
+ * What it USED to draw, for context: a ribbon that paid out behind the car while a streak was
+ * alive —
+ *   - nothing at all for the first 100 m, so a short hop never trailed anything
+ *   - then a very pale blue thread that lengthened as the streak did
+ *   - the blue DEEPENED with distance, on a log curve, so the first kilometre was a visible
+ *     change and the tenth was a subtle one
+ *   - the whole thing brightened gently while the streak was alive
+ *   - when it broke, it flashed red once and was reeled in rather than deleted
+ *
+ * The rope was a chain of points that followed the one in front with a spring and a little
+ * gravity, which is what gave it weight through a corner instead of tracking the car like a
+ * rigid stick. It was cosmetic: nothing in it could touch the car.
  */
 
 import { BufferGeometry, BufferAttribute, Mesh, RawShaderMaterial, DoubleSide, Vector3 } from 'three';
@@ -135,7 +143,16 @@ export class StreakTrail {
     this.mesh.frustumCulled = false;
     this.mesh.name = 'streakTrail';
     this.mesh.renderOrder = 6;
-    scene.add(this.mesh);
+    /* DISABLED — see the file header. Deliberately never `scene.add(this.mesh)`: a mesh that
+     * is merely .visible = false is one stray line away from coming back (the exact gotcha
+     * this project has been burned by before — a flag being set is not a thing being
+     * invisible), but a mesh that was never attached to the scene graph cannot be drawn by any
+     * renderer.render(scene, camera) call, full stop, no matter what anything else does to
+     * `scene` or to this.mesh afterwards. update() below also returns before it would ever
+     * touch `visible` or rebuild the geometry, so this is belt and suspenders, not one flag.
+     * `scene` is still accepted (main.js still passes one) so the constructor signature, and
+     * therefore every existing call site, needs no changes. */
+    this.mesh.visible = false;
     this._prevDistance = 0;
   }
 
@@ -144,104 +161,20 @@ export class StreakTrail {
    * @param {Vehicle} car
    * @param {object} state the Streak's `state` object
    */
-  update(dt, car, state) {
-    const distance = state.distance || 0;
-
-    // Break detection: the streak was long, and now it is not.
-    if (this._prevDistance > START_AT && distance < this._prevDistance * 0.5) this.breakFlash = 1;
-    this._prevDistance = distance;
-    /* Decay over ~1.1 s rather than the old 0.6 s, so the red outlasts the reel-in (alive
-     * falls at 0.9/s) instead of going out while the rope is still on screen. A blip you can
-     * miss by blinking is a blip that did not happen. */
-    this.breakFlash = Math.max(0, this.breakFlash - dt * 0.9);
-
-    const wants = distance > START_AT;
-    this.alive = wants ? Math.min(1, this.alive + dt * 2.2) : Math.max(0, this.alive - dt * 0.9);
-
-    // How much rope is out: nothing until 100 m, then paying out over the first kilometre.
-    const payout = clamp01((distance - START_AT) / 900);
-    // Depth of blue on a log curve, so the first kilometre is a visible change and the tenth
-    // is a subtle one. Exponentially harder to move, exactly as asked.
-    this.depth = clamp01(Math.log10(1 + distance / 220) / Math.log10(1 + DEEPEST_AT / 220));
-
-    this.material.uniforms.uAlive.value = this.alive;
-    this.material.uniforms.uDepth.value = this.depth;
-    this.material.uniforms.uBreak.value = this.breakFlash;
-    if (this.alive < 0.005) {
-      this.mesh.visible = false;
-      return;
-    }
-    this.mesh.visible = true;
-
-    /* ── the rope ────────────────────────────────────────────────────────
-     * The head is pinned just behind the car; every other link chases the one in front,
-     * keeping a fixed spacing, with a little gravity so it sags. That is what makes it swing
-     * wide through a corner instead of following like a rigid stick. */
-    const back = 2.2;
-    const hx = car.x - Math.sin(car.yaw) * back;
-    const hz = car.z - Math.cos(car.yaw) * back;
-    const hy = car.y + 0.35;
-
-    if (!this.points.length) {
-      for (let i = 0; i < LINKS; i++) this.points.push({ x: hx, y: hy, z: hz });
-    }
-    this.points[0].x = hx;
-    this.points[0].y = hy;
-    this.points[0].z = hz;
-
-    const spacing = SPACING * (0.35 + 0.65 * payout);
-    for (let i = 1; i < LINKS; i++) {
-      const p = this.points[i];
-      const a = this.points[i - 1];
-      let dx = p.x - a.x;
-      let dy = p.y - a.y;
-      let dz = p.z - a.z;
-      const d = Math.hypot(dx, dy, dz) || 1e-5;
-      // Pull back to the correct distance behind the link in front.
-      const pull = (d - spacing) / d;
-      p.x -= dx * pull;
-      p.y -= dy * pull;
-      p.z -= dz * pull;
-      // A little sag, and a little damping towards the car's height so it never trails off
-      // into the ground or the sky.
-      p.y = lerp(p.y, a.y - 0.06, Math.min(1, dt * 6));
-    }
-
-    // Build the ribbon: each link becomes two vertices, offset perpendicular to the rope.
-    const width = lerp(0.10, 0.34, payout);
-    for (let i = 0; i < LINKS; i++) {
-      const p = this.points[i];
-      const q = this.points[Math.min(i + 1, LINKS - 1)];
-      const o = this.points[Math.max(i - 1, 0)];
-      let tx = q.x - o.x;
-      let tz = q.z - o.z;
-      const tl = Math.hypot(tx, tz) || 1;
-      tx /= tl;
-      tz /= tl;
-      const nx = tz * width;
-      const nz = -tx * width;
-      const k = i * 6;
-      this.pos[k] = p.x - nx;
-      this.pos[k + 1] = p.y;
-      this.pos[k + 2] = p.z - nz;
-      this.pos[k + 3] = p.x + nx;
-      this.pos[k + 4] = p.y;
-      this.pos[k + 5] = p.z + nz;
-    }
-    this.geometry.attributes.position.needsUpdate = true;
+  update(_dt, _car, _state) {
+    // DISABLED — see the file header. No mesh in the scene, so nothing here would ever be
+    // seen; skip the rope's spring simulation and ribbon rebuild entirely rather than spend a
+    // frame budget on geometry nobody can see. A real, immediate no-op (not a branch buried
+    // partway down) so every existing call site in src/main.js stays valid unchanged, and so a
+    // grep for `this.mesh.visible = true` in this file finds nothing — the original,
+    // now-dead physics body is preserved in git history, not as unreachable code here.
   }
 
-  /** Snap the rope to the car — after a teleport, so it does not stretch across the world. */
-  reset(car) {
-    const back = 2.2;
-    const hx = car.x - Math.sin(car.yaw) * back;
-    const hz = car.z - Math.cos(car.yaw) * back;
-    for (const p of this.points) {
-      p.x = hx;
-      p.y = car.y + 0.35;
-      p.z = hz;
-    }
-  }
+  /** Snap the rope to the car — after a teleport, so it does not stretch across the world.
+   *  DISABLED along with update() above — see the file header. `this.points` is never
+   *  populated any more, so this had already become a no-op in effect; it returns
+   *  immediately instead so that is true by construction, not by accident. */
+  reset(_car) {}
 
   dispose() {
     this.geometry.dispose();

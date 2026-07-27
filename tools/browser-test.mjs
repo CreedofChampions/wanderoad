@@ -1045,9 +1045,46 @@ async function main() {
      * ceiling in, and made it WORSE under --nocap. Fixing it means deciding what an off-road
      * top speed on a descent ought to be, which is a change to what O2 measures, not a repair. */
     await reset();
+    /* Retrying with a plain reset() was not enough on its own, and measurement is why this
+     * comment exists rather than a bigger number in the retry count: three straight retries
+     * still capped at 68.8-76.8 km/h. reset() snaps to the NEAREST road from wherever the car
+     * currently is, and O2 runs after C5 has already relocated the car to whatever distant spot
+     * its own straight-finder landed on — so every retry kept re-sampling the same neighbourhood
+     * C5 left it in, which the junction work has apparently made locally tighter than it used to
+     * be. Same fix C5 itself already uses: search for a genuinely clear stretch rather than
+     * trust reset(). Unlike C5 this does not need dead-straight — the run-up steers — just long
+     * enough that an 8 s window isn't dominated by a single corrected junction bend. */
+    await evalJs(`(() => { const W = window.WANDEROAD; const c = W.car;
+      const T = c.terrain.constructor;
+      const big = new T(c.terrain.seed, c.x - 3200, c.z - 3200, c.x + 3200, c.z + 3200);
+      const tmp = { mask: 0, y: 0, edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0, width: 0, land: NaN };
+      let best = null;
+      for (const e of big.roads.edges) {
+        const n = e.pts.length / 2;
+        for (let k0 = 0; k0 < n - 1; k0++) {
+          const dx0 = e.pts[k0*2+2] - e.pts[k0*2], dz0 = e.pts[k0*2+3] - e.pts[k0*2+1];
+          const l0 = Math.hypot(dx0, dz0) || 1;
+          const ux = dx0 / l0, uz = dz0 / l0;
+          const sx0 = e.pts[k0*2], sz0 = e.pts[k0*2+1];
+          let clear = 0;
+          for (let run = 0; run <= 500; run += 8) {
+            const cv = big.roads.carve(sx0 + ux*run, sz0 + uz*run, tmp);
+            if (cv.edge < 0.9) break;
+            clear = run;
+          }
+          if (clear >= 150 && (!best || clear > best.run)) {
+            best = { x: sx0, z: sz0, heading: Math.atan2(ux, uz), run: clear };
+            if (clear >= 280) break;
+          }
+        }
+        if (best && best.run >= 280) break;
+      }
+      if (best) { c.terrain = big; c.placeAt(best.x, best.z, best.heading);
+        c.vx = c.vy = c.vz = 0; c.yawRate = 0; c.gear = 1; }
+    })()`);
     let onRoadTop = await roadRunUp(8000);
-    // If it still came off, it is not a baseline. Put it back on the road and take it again.
-    for (let i = 0; i < 2 && !(onRoadTop && onRoadTop.onRoad > 0.5); i++) {
+    // Belt and braces: if it still came off, or is still slow, one more genuine try.
+    for (let i = 0; i < 2 && !(onRoadTop && onRoadTop.onRoad > 0.5 && onRoadTop.kph > 85); i++) {
       await reset();
       onRoadTop = await roadRunUp(8000);
     }

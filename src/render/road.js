@@ -30,7 +30,7 @@ import {
 } from 'three';
 import { vertHead, fragHead, GL_HASH, GL_NOISE, GL_SKY, GL_SHADOW, GL_LIGHT, glCloudField } from '../core/glsl.js';
 import { sharedUniforms } from './uniforms.js';
-import { RoadField, TIERS } from '../world/roads.js';
+import { RoadField, TIERS, findCrossings, outranks } from '../world/roads.js';
 import { Terrain, landFn, waterFn } from '../world/terrain.js';
 import { hash2i, clamp01, lerp } from '../core/math.js';
 import { RGB } from '../core/palette.js';
@@ -387,6 +387,162 @@ export function buildRibbon(edge, seed) {
   return { geometry: g, ring, half };
 }
 
+/* ── junctions ──────────────────────────────────────────────────────────────
+ *
+ * roads.js now bends a minor road's own centreline to square its crossings up towards 90
+ * degrees (see `squareCrossings`), but two ribbons swept independently still meet as two
+ * overlapping strips, not one surface. A junction patch fills that gap: a small paved area,
+ * drawn with the SAME road material every ribbon uses, that both roads visually flow into,
+ * plus give-way bars marking the minor road's approaches — the two things that make a crossing
+ * read as "a junction" instead of "two ribbons crossing".
+ *
+ * It is a second surface layered a few centimetres above the ribbons it overlaps rather than a
+ * hole cut into them, on purpose: trimming buildRibbon's own polyline to stop exactly at a
+ * junction boundary would mean re-deriving its already-tuned adaptive ring refinement (RING_TOL,
+ * RING_DEPTH) for a boundary case, for no benefit a cozy driving game needs. The extra lift is
+ * `JUNCTION_LIFT` — comfortably more than LIFT alone, so the two surfaces never z-fight — and
+ * every vertex height still comes from `Terrain.height()`, the SAME function the ribbons and the
+ * car's wheels read: a junction is exactly the kind of place two independent elevation opinions
+ * used to disagree by tens of metres (gotcha 6), and this file does not get to have one again.
+ */
+
+/** Extra lift, ON TOP OF `LIFT`, for the junction overlay. */
+const JUNCTION_LIFT = LIFT + 0.03;
+/** Subdivisions across the paved patch, so it can follow a little of the ground's own slope
+ *  through a junction rather than being one dead-flat quad. */
+const JUNCTION_GRID = 4;
+/** How far the patch reaches past the OTHER road's half-width along each road's own tangent,
+ *  so it always overlaps the approaching ribbons with room to spare. */
+const JUNCTION_MARGIN = 1.6;
+/** Metres between the patch's own edge and a give-way bar on the minor road's approach. */
+const GIVE_WAY_GAP = 1.0;
+/** Metres a give-way bar is thick, along the road — reads as a stop line from the driver's
+ *  seat without looking like a slab dropped across the lane. */
+const GIVE_WAY_THICK = 0.55;
+/** `aCross` values that make the EXISTING ROAD_FS shader paint solid tarmac (no line) or a
+ *  solid white bar, without a single change to that shader: 0.4 sits well clear of both the
+ *  centre-dash band (~0.055) and the edge-line band (0.80-0.90); 0.85 sits in the middle of
+ *  the edge-line band, so `edge` reads 1 across the WHOLE quad it is applied to instead of
+ *  just a thin stripe. Reusing the shader's own painted-line detection is the point — see the
+ *  task note on reusing the existing road material rather than inventing a new one. */
+const AC_PLAIN = 0.4;
+const AC_LINE = 0.85;
+
+/**
+ * Push a quad (four existing vertex indices, in ring order) as two triangles, winding each one
+ * so its geometric normal faces +Y — checked from the actual (x, z) positions rather than
+ * assumed, because a junction quad's two edges are two DIFFERENT roads' tangents, not one
+ * road's tangent and its own right-hand normal the way a ribbon's cross-section always is, so
+ * there is no single fixed winding rule to copy from buildRibbon's ring/across pattern.
+ */
+function pushQuadUp(position, index, a, b, c, d) {
+  const tri = (p0, p1, p2) => {
+    const x0 = position[p0 * 3],
+      z0 = position[p0 * 3 + 2];
+    const x1 = position[p1 * 3],
+      z1 = position[p1 * 3 + 2];
+    const x2 = position[p2 * 3],
+      z2 = position[p2 * 3 + 2];
+    // Y-component of (p1-p0) x (p2-p0), restricted to the XZ plane: positive means the
+    // triangle (p0,p1,p2) already winds counter-clockwise viewed from above, i.e. front-facing
+    // for a +Y normal under three.js's default CCW-front convention.
+    const up = (z1 - z0) * (x2 - x0) - (x1 - x0) * (z2 - z0);
+    if (up >= 0) index.push(p0, p1, p2);
+    else index.push(p0, p2, p1);
+  };
+  tri(a, b, c);
+  tri(a, c, d);
+}
+
+/**
+ * One junction's geometry: the paved patch plus give-way bars on the MINOR road's two
+ * approaches (see `outranks` — the same priority rule roads.js already uses to decide who
+ * yields height and angle decides who yields the right of way here too). Returns a
+ * BufferGeometry meant to be drawn with the SAME road material every ribbon uses.
+ *
+ * Exported for tools/diag-junction-geom.mjs, the same reason buildRibbon and ribbonEdges are:
+ * a diagnostic has to drive the exact geometry the game draws, not a description of it.
+ */
+export function buildJunction(c, seed) {
+  const s = seed >>> 0;
+  const major = outranks(c.a, c.b) ? c.a : c.b;
+  const minor = major === c.a ? c.b : c.a;
+  const majorTx = major === c.a ? c.ax : c.bx;
+  const majorTz = major === c.a ? c.az : c.bz;
+  const minorTx = minor === c.a ? c.ax : c.bx;
+  const minorTz = minor === c.a ? c.az : c.bz;
+
+  // Patch half-extent along EACH road's own tangent is half the OTHER road's width plus a
+  // margin — the overlap of the two carriageways for a square crossing, generous enough to
+  // stay true where squareCrossings could only partly reach 90 degrees.
+  const halfAlongMajor = minor.width * 0.5 + JUNCTION_MARGIN;
+  const halfAlongMinor = major.width * 0.5 + JUNCTION_MARGIN;
+  const reach = Math.max(halfAlongMajor, halfAlongMinor) + GIVE_WAY_GAP + GIVE_WAY_THICK + 4;
+
+  const terr = new Terrain(s, c.x - reach, c.z - reach, c.x + reach, c.z + reach, 48);
+  const h = (x, z) => terr.height(x, z) + JUNCTION_LIFT;
+
+  const position = [];
+  const normal = [];
+  const across = [];
+  const index = [];
+  const pushVert = (x, z, ax, az) => {
+    const idx = position.length / 3;
+    position.push(x, h(x, z), z);
+    normal.push(0, 1, 0);
+    across.push(ax, az);
+    return idx;
+  };
+
+  // ── the paved patch: a small grid spanning the major tangent (u) and minor tangent (v) ──
+  const grid = [];
+  for (let i = 0; i <= JUNCTION_GRID; i++) {
+    const u = (i / JUNCTION_GRID) * 2 - 1; // -1..1 along the major road
+    const row = [];
+    for (let j = 0; j <= JUNCTION_GRID; j++) {
+      const v = (j / JUNCTION_GRID) * 2 - 1; // -1..1 along the minor road
+      const x = c.x + majorTx * u * halfAlongMajor + minorTx * v * halfAlongMinor;
+      const z = c.z + majorTz * u * halfAlongMajor + minorTz * v * halfAlongMinor;
+      // Away from the dead centre of either detection band, so the shader's own wear/chip
+      // surface treatment shows through with no accidental line or dash.
+      row.push(pushVert(x, z, AC_PLAIN, 0));
+    }
+    grid.push(row);
+  }
+  for (let i = 0; i < JUNCTION_GRID; i++) {
+    for (let j = 0; j < JUNCTION_GRID; j++) {
+      pushQuadUp(position, index, grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]);
+    }
+  }
+
+  // ── give-way bars on the minor road's two approaches ──
+  const barDist = halfAlongMinor + GIVE_WAY_GAP;
+  const nx = -minorTz,
+    nz = minorTx; // a perpendicular to the minor road, in the ground plane — either sign
+  // does, since the bar is symmetric across it and pushQuadUp fixes the winding regardless.
+  const half = minor.width * 0.5;
+  const t = GIVE_WAY_THICK * 0.5;
+  for (const side of [1, -1]) {
+    const bx = c.x + minorTx * side * barDist;
+    const bz = c.z + minorTz * side * barDist;
+    const tx = minorTx * side * t,
+      tz = minorTz * side * t;
+    const p1 = pushVert(bx + nx * half - tx, bz + nz * half - tz, AC_LINE, 0);
+    const p2 = pushVert(bx - nx * half - tx, bz - nz * half - tz, AC_LINE, 0);
+    const p3 = pushVert(bx - nx * half + tx, bz - nz * half + tz, AC_LINE, 0);
+    const p4 = pushVert(bx + nx * half + tx, bz + nz * half + tz, AC_LINE, 0);
+    pushQuadUp(position, index, p1, p2, p3, p4);
+  }
+
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(new Float32Array(position), 3));
+  geo.setAttribute('normal', new BufferAttribute(new Float32Array(normal), 3));
+  geo.setAttribute('aCross', new BufferAttribute(new Float32Array(across), 2));
+  geo.setIndex(index);
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 /**
  * Roadside furniture for one edge: marker posts down both shoulders, and a chevron board on
  * the outside of any bend tight enough to need warning. Real roads warn you before a corner;
@@ -495,12 +651,13 @@ export class Roads {
     this.furniture = buildFurnitureGeometry();
 
     this.live = new Map(); // edge key -> { mesh, posts, chevrons }
+    this.junctions = new Map(); // crossing key -> { mesh }
     this._lastX = Infinity;
     this._lastZ = Infinity;
     // No private land/water functions any more: ribbonEdges() builds the same RoadField the
     // terrain does, and a second height source next to it is exactly how this file drifted
     // 24 m away from the ground in the first place.
-    this.stats = { edges: 0, tris: 0 };
+    this.stats = { edges: 0, tris: 0, junctions: 0 };
   }
 
   /** Rebuild the window when the car has moved far enough to need new road. */
@@ -563,6 +720,39 @@ export class Roads {
       this.live.delete(key);
     }
     this.stats.edges = this.live.size;
+
+    /* Junctions: one crossing detector (`findCrossings`, the same one roads.js uses to square
+     * angles in the first place — see its own doc comment) run over exactly the edges just
+     * drawn, so a junction patch only ever appears where a ribbon actually does. Keyed by both
+     * edges' keys plus the crossing's own rounded position, because two edges occasionally
+     * cross more than once (the winding can carry a lane back and forth over a road it is
+     * near), and each such point needs its own patch. */
+    const wantedJ = new Set();
+    for (const c of findCrossings(edges)) {
+      const lo = c.a.key < c.b.key ? c.a.key : c.b.key;
+      const hi = c.a.key < c.b.key ? c.b.key : c.a.key;
+      const jkey = `${lo}~${hi}~${Math.round(c.x)},${Math.round(c.z)}`;
+      wantedJ.add(jkey);
+      if (this.junctions.has(jkey)) continue;
+
+      const geometry = buildJunction(c, ctx);
+      const mesh = new Mesh(geometry, this.material);
+      mesh.frustumCulled = true;
+      mesh.matrixAutoUpdate = false;
+      // Drawn after the ribbons (renderOrder 1) it overlaps; the real separation that stops
+      // z-fighting is JUNCTION_LIFT's few extra centimetres of height, not draw order, but
+      // there is no reason to leave the tie-break to chance.
+      mesh.renderOrder = 2;
+      this.group.add(mesh);
+      this.junctions.set(jkey, { mesh });
+    }
+    for (const [key, rec] of this.junctions) {
+      if (wantedJ.has(key)) continue;
+      this.group.remove(rec.mesh);
+      rec.mesh.geometry.dispose();
+      this.junctions.delete(key);
+    }
+    this.stats.junctions = this.junctions.size;
   }
 
   dispose() {
@@ -570,6 +760,10 @@ export class Roads {
       rec.mesh.geometry.dispose();
       for (const im of rec.instanced) im.dispose();
       this.live.delete(k);
+    }
+    for (const [k, rec] of this.junctions) {
+      rec.mesh.geometry.dispose();
+      this.junctions.delete(k);
     }
     this.material.dispose();
   }

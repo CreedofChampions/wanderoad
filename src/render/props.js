@@ -26,7 +26,7 @@ import { Mesh, Object3D } from 'three';
 import { PB, pv, pq, pbox, pcyl, proof, pquad, finishPainted, createPaintedMaterial, MAT, LC, tint, mixc } from './painted.js';
 import { Terrain } from '../world/terrain.js';
 import { waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
-import { propsInBox, stationsInBox, PROP_BY_ID, PROP_IDS } from '../world/props.js';
+import { propsInBox, stationsInBox, fuelCansInBox, PROP_BY_ID, PROP_IDS, CAN_HOVER, CAN_RADIUS, CAN_FRACTION } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp } from '../core/math.js';
 
 /* ── window ───────────────────────────────────────────────────────────────── */
@@ -47,6 +47,11 @@ const RANGE = 1180;
 const SKIP_FRAME = 1 / 45;
 /** How many petrol stations a session remembers. 192 covers roughly a 40 km drive. */
 const KNOWN_STATIONS = 192;
+/** The gentle bob a floating can does — "cozy, not garish": a few centimetres, a little
+ *  under one cycle every two seconds. Applied to the finished mesh's own transform each
+ *  frame, on top of its baked, already-hovering (+CAN_HOVER) position — see buildFuelCan. */
+export const CAN_BOB_AMP = 0.055;
+const CAN_BOB_HZ = 0.52;
 
 /* ── palette shortcuts ────────────────────────────────────────────────────────
  * Everything is a linear triple from src/core/palette.js. Props that need a colour the
@@ -1124,6 +1129,38 @@ export function buildStation(M, r, skirt) {
   pcyl(M, [-AW + 1.2, 1.1, 1.2], [-AW + 1.2, 1.35, 1.2], 0.1, 0.08, 6, CHROME, MAT.METAL, false, true);
 }
 
+/* ── the floating fuel can ────────────────────────────────────────────────────
+ * A small, warm, easy-to-spot pickup — a supplementary, denser layer to `stationsInBox`
+ * above, placed by `fuelCansInBox` in src/world/props.js. See that file's comment for why it
+ * exists and exactly what "floating" means: this local-space geometry is modelled with its
+ * OWN base at +CAN_HOVER, so placing it at a can's world (x, y, z) — the same ground-contact
+ * point every other prop uses — is what makes it read as hovering. Nothing downstream of this
+ * function needs to know that; it is just where the vertices start.
+ *
+ * The gentle bob (`Props._updateCans` below) is a SEPARATE, tiny, time-based wobble applied
+ * to the finished mesh's own transform every frame — it is not part of this geometry at all,
+ * which is what keeps the placement math in world/props.js honestly "on the ground" for its
+ * own freeboard and slope tests.
+ */
+function buildFuelCan(M, r) {
+  const y0 = CAN_HOVER;
+  const body = mixc(RED, INK, 0.1);
+  const panel = mixc(body, CREAM, 0.3);
+  // squat body, narrower at the neck — reads as a jerry can at a glance, not a box
+  pbox(M, 0, y0 + 0.16, 0, 0.14, 0.16, 0.095, 0, body, MAT.MATTE);
+  pbox(M, 0, y0 + 0.16, 0.096, 0.095, 0.11, 0.005, 0, panel, MAT.MATTE); // embossed panel, front
+  pbox(M, 0, y0 + 0.16, -0.096, 0.095, 0.11, 0.005, 0, panel, MAT.MATTE); // and back
+  pcyl(M, [0, y0 + 0.32, 0.015], [0, y0 + 0.4, 0.015], 0.04, 0.035, 6, body, MAT.MATTE, true, false);
+  pcyl(M, [0, y0 + 0.4, 0.015], [0, y0 + 0.44, 0.015], 0.044, 0.044, 6, CREAM, MAT.MATTE, true, true);
+  // carrying handle: a thin loop over the top
+  pbox(M, 0, y0 + 0.35, -0.045, 0.075, 0.018, 0.018, 0, body, MAT.MATTE);
+  for (const sx of [-1, 1]) pcyl(M, [sx * 0.075, y0 + 0.24, -0.045], [sx * 0.075, y0 + 0.35, -0.045], 0.013, 0.013, 4, body, MAT.MATTE, true, true);
+  // a warm glint on the panel — EMIT, the same trick a lantern's fire window uses, so a can
+  // reads from further away than its size alone would carry.
+  pbox(M, 0, y0 + 0.17, 0.099, 0.045, 0.045, 0.003, 0, GLOW, MAT.EMIT);
+  if (r() < 0.5) pball(M, 0.02, y0 + 0.02, 0.06, 0.05, 0.02, 0.05, mixc(body, INK, 0.4), MAT.MATTE, 6, 3); // a puddle-shaped drip, half the time
+}
+
 /* ── the scene-side manager ───────────────────────────────────────────────── */
 
 /**
@@ -1164,7 +1201,23 @@ export class Props {
      * nearest pump was for most of a tank. Capped, dropping the furthest, so a long drive
      * cannot grow it without bound. */
     this.known = new Map();
-    this.stats = { tiles: 0, props: 0, stations: 0, verts: 0, tris: 0, buildMs: 0, backlog: 0 };
+    /* Fuel cans, key -> { mesh, x, z, phase, tile }. Unlike props and stations these are
+     * INDIVIDUAL meshes, never baked into a tile's shared geometry: a can has to disappear
+     * the instant it is collected and has to bob every frame, and a static bake can do
+     * neither without rebuilding the whole tile for one object. There are few enough of them
+     * live at once (measured, tools/bench-props.mjs: about a can every 600 m) that one draw
+     * call each is cheap. */
+    this.cans = new Map();
+    /* Collected this session, by the can's own key (`cn:${edgeKey}:${slot}`, world/props.js).
+     * A can is a pure function of the seed like everything else here, so if a tile leaves the
+     * window and comes back, fuelCansInBox would hand back the SAME can — this is what stops
+     * it reappearing after it has been taken. Session-only, same as `known` never persists:
+     * the world regenerates from the seed, "already collected" is play-session state. */
+    this._collectedCans = new Set();
+    /** Fuel gained by collecting a can since the last drainCollectedFuel() call. */
+    this._pendingFuel = 0;
+    this._bobT = 0;
+    this.stats = { tiles: 0, props: 0, stations: 0, cans: 0, verts: 0, tris: 0, buildMs: 0, backlog: 0 };
     this._scratchW = new Float32Array(BIOME_COUNT);
   }
 
@@ -1191,6 +1244,45 @@ export class Props {
       this._reshape(camX, camZ);
     }
     this._drain(dt);
+    // Every frame, tile change or not: the bob has to keep moving and a can has to be
+    // collectible the instant the car is close enough, not just when a tile boundary crosses.
+    this._updateCans(dt, camX, camZ);
+  }
+
+  /**
+   * Bob every live can and collect any within CAN_RADIUS of (camX, camZ) — main.js calls
+   * update() with the car's own x/z (see nearestStation's own comment above for the same
+   * point about station distance), so this is the car's real position, not the camera's.
+   */
+  _updateCans(dt, camX, camZ) {
+    this._bobT += dt;
+    for (const [key, c] of this.cans) {
+      const d = Math.hypot(c.x - camX, c.z - camZ);
+      if (d <= CAN_RADIUS) {
+        this.group.remove(c.mesh);
+        c.mesh.geometry.dispose();
+        this.cans.delete(key);
+        this._collectedCans.add(key);
+        this._pendingFuel += CAN_FRACTION;
+        continue;
+      }
+      // The can's geometry is already baked hovering at +CAN_HOVER above the ground (see
+      // buildFuelCan); this is a SEPARATE, tiny delta on the mesh's own transform on top of
+      // that, never touching the baked vertices.
+      c.mesh.position.y = Math.sin(this._bobT * CAN_BOB_HZ * TAU + c.phase) * CAN_BOB_AMP;
+      c.mesh.updateMatrix();
+    }
+  }
+
+  /**
+   * Fuel gained from cans collected since the last call, as a fraction of a tank (0 if none).
+   * Pull-based so game/fuel.js needs nothing about this class beyond one callback — see the
+   * findStation wiring in main.js, which this mirrors.
+   */
+  drainCollectedFuel() {
+    const f = this._pendingFuel;
+    this._pendingFuel = 0;
+    return f;
   }
 
   /** Decide which tiles should exist, queue the missing ones, drop the far ones. */
@@ -1306,6 +1398,10 @@ export class Props {
         job.stations = stationsInBox(ox, oz, ox + size, oz + size, this.seed);
         job.phase = 3;
         return;
+      case 3:
+        job.cans = fuelCansInBox(ox, oz, ox + size, oz + size, this.seed, job.probe);
+        job.phase = 4;
+        return;
       default:
         this._bake(job);
         this._job = null;
@@ -1314,7 +1410,7 @@ export class Props {
 
   /** Turn one tile's queried props into one geometry, one mesh and one solids block. */
   _bake(job) {
-    const { key, props, stations } = job;
+    const { key, props, stations, cans } = job;
     const height = job.probe.height;
     const M = PB();
     for (const p of props) {
@@ -1374,7 +1470,38 @@ export class Props {
     }
     if (this.known.size > KNOWN_STATIONS) this._forgetFurthest();
 
-    this.live.set(key, { mesh, props, stations, verts: M.n, tris: M.idx.length / 3 });
+    /* Fuel cans: one small mesh EACH, never folded into M above — see the constructor's
+     * comment on why a can cannot be a static bake. Skips anything already in
+     * `_collectedCans`, which is what stops a taken can reappearing when its tile reloads —
+     * fuelCansInBox itself does not know about collection, by design (it is a pure function
+     * of the seed, same as every other placement query in this file). */
+    const canKeys = [];
+    for (const c of cans) {
+      if (this._collectedCans.has(c.key)) continue;
+      const L = PB();
+      buildFuelCan(L, rng(hash3i(Math.round(c.x * 4), Math.round(c.z * 4), 0x6a17, this.seed)));
+      const CM = PB();
+      blit(CM, L, c.x, c.y, c.z, c.yaw, 1);
+      const cgeom = finishPainted(CM);
+      const cmesh = new Mesh(cgeom, this.material);
+      cmesh.frustumCulled = true;
+      cmesh.matrixAutoUpdate = false;
+      cmesh.updateMatrix();
+      cmesh.renderOrder = 2;
+      this.group.add(cmesh);
+      this.cans.set(c.key, {
+        mesh: cmesh,
+        x: c.x,
+        z: c.z,
+        // Own bob phase per can, keyed on position like the props' own sway phase above, so
+        // it is stable across a tile rebuild rather than jumping when build order changes.
+        phase: rng(hash3i(Math.round(c.x * 4), Math.round(c.z * 4), 0x6a18, this.seed))() * TAU,
+        tile: key,
+      });
+      canKeys.push(c.key);
+    }
+
+    this.live.set(key, { mesh, props, stations, cans: canKeys, verts: M.n, tris: M.idx.length / 3 });
     this._recount();
   }
 
@@ -1385,6 +1512,13 @@ export class Props {
     }
     if (this.solids) this.solids.removeChunk(`prop:${key}`);
     if (rec.stations.length) this.stations = this.stations.filter((s) => s.tile !== key);
+    for (const ck of rec.cans || []) {
+      const c = this.cans.get(ck);
+      if (!c) continue; // already collected, and therefore already removed by _updateCans
+      this.group.remove(c.mesh);
+      c.mesh.geometry.dispose();
+      this.cans.delete(ck);
+    }
     this.live.delete(key);
     this._recount();
   }
@@ -1411,6 +1545,7 @@ export class Props {
     this.stats.tiles = this.live.size;
     this.stats.props = props;
     this.stats.stations = this.stations.length;
+    this.stats.cans = this.cans.size;
     this.stats.verts = verts;
     this.stats.tris = tris;
   }

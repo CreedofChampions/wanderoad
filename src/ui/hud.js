@@ -11,10 +11,23 @@
  * nobody ever noticed — behind the debug overlay, at 0.42 opacity, next to nothing. So the
  * streak now gets the bottom centre of the screen: a big distance, one line of plain English
  * saying what the number means, and a bar across the very bottom showing which car it is
- * buying and how far away that car is. Calm, but impossible to miss.
+ * buying and how far away that car is. Calm, but impossible to miss. It used to also have a
+ * companion: a 3D "rope" trailing behind the car in the world (src/render/trail.js). The
+ * operator called that out directly — "does not look good at all or make it clear... use the
+ * bottom blue line instead" — so this bar is now the ONLY streak readout, and trail.js draws
+ * nothing any more (see its own file header).
+ *
+ * The bar carries two independent readouts, both riding the same track:
+ *   - the FILL/GLOW/MARK, unchanged: this run against the next car's unlock threshold.
+ *   - MILESTONE DOTS (new): small fixed waypoints — 1, 3, 6, 10, 20 km and on — laid out along
+ *     the same track and coloured passed / current / upcoming as the streak grows. These are
+ *     not the car-unlock ladder (src/game/garage.js keeps its own numbers and is untouched);
+ *     they are a second, longer-range sense of distance that keeps meaning something long
+ *     after "every car unlocked" stops moving. See MILESTONES_KM below for the exact list and
+ *     why it continues the way it does.
  *
  * Layout, bottom of the screen upward:
- *     [ track ]          the full-width unlock bar, at y = 0
+ *     [ · · ·|· · · · ]  the full-width unlock bar at y = 0 — fill/glow plus milestone dots
  *     Rally · 7.6 km to go
  *     2.14 km  ×1.42     the big figure
  *     without leaving the road
@@ -54,6 +67,33 @@ function el(tag, idOrClass, text) {
   return n;
 }
 
+/* Distance waypoints for the unlock bar's milestone dots — independent of the car-unlock
+ * ladder in src/game/garage.js (Estate 0, Hatch 1 km, Coupe 3, Sedan 8, Rally 20, Taxi 45,
+ * Patrol 100), which keeps its own numbers untouched. Also a different thing from the
+ * `ev.kind === 'milestone'` one-shot toasts drained from the streak a little further down in
+ * this file — those fire once off src/game/streak.js's own multiplier-ladder thresholds
+ * (1, 2.5, 5, 10, 20, 40, 80 km) and then never again; these dots are a persistent, always-on
+ * readout on the bar itself, off a separate, longer list.
+ *
+ * The operator's own list — "1 km 3 km 6 km 10 km 20 km 40 km etc" — steps by roughly x3,
+ * x2, x1.7, x2, x2. There is no natural end to "etc", so the sequence keeps the same ~x2
+ * cadence past 40: 80, 150, 300. Exported so tools/diag-hud.mjs checks the real list rather
+ * than a hand-copied one.
+ */
+export const MILESTONES_KM = [1, 3, 6, 10, 20, 40, 80, 150, 300];
+
+/* Where a waypoint sits along the bar, 0–100. Log-scaled: linear would put 1 km and 3 km in
+ * the first percent of the bar and leave 300 km alone at the far right, which fails exactly
+ * the "legible at both ends" requirement this exists to meet. Only the DOT LAYOUT is
+ * log-scaled — the streak figure itself (streakKm, below) is always the exact metre/kilometre
+ * value; nothing about the number display is non-linear. Padding on each side (half the first
+ * waypoint, 30% past the last) keeps the end dots off the very edge of the bar. */
+function milestoneX(km) {
+  const lo = Math.log10(MILESTONES_KM[0] * 0.5);
+  const hi = Math.log10(MILESTONES_KM[MILESTONES_KM.length - 1] * 1.3);
+  return clamp01((Math.log10(km) - lo) / (hi - lo)) * 100;
+}
+
 export class Hud {
   constructor() {
     this.root = document.getElementById('hud');
@@ -80,6 +120,17 @@ export class Hud {
     this.barMark = el('div', '.mark');
     this.barTrack.appendChild(this.barFill);
     this.barTrack.appendChild(this.barMark);
+    /* Milestone dots. Built once, on the same track and the same 0–100% coordinate space as
+     * the fill and the mark above (so `left: X%` means the same thing for all three) — only
+     * their passed/current class changes per frame, never their position or their count. Added
+     * after the fill and the mark so they draw on top of both. */
+    this.milestoneEls = MILESTONES_KM.map((km) => {
+      const d = el('div', '.milestone');
+      d.dataset.km = String(km);
+      d.style.left = `${milestoneX(km).toFixed(2)}%`;
+      this.barTrack.appendChild(d);
+      return { km, el: d };
+    });
     this.bar.appendChild(this.barNext);
     this.bar.appendChild(this.barTrack);
     this.root.appendChild(this.bar);
@@ -219,6 +270,23 @@ export class Hud {
       this.barFill.style.width = '100%';
       this.barMark.classList.remove('on');
       this.barNext.textContent = 'every car unlocked';
+    }
+
+    /* ── milestone dots ──────────────────────────────────────────────
+     * A second readout on the same bar, independent of the car it is buying: fixed distance
+     * waypoints rather than the unlock ladder. Tracks the live run while one is happening, so
+     * a dot lights up the instant you cross it, and falls back to the all-time best at rest —
+     * the same live-vs-best rule streakKm itself already used a few lines up, so the two
+     * numbers on screen never disagree. The first not-yet-passed waypoint is "current"; there
+     * may be none once every waypoint is behind you, which is a fine resting state. */
+    const milestoneKm = (live ? s.distance : s.best) / 1000;
+    let milestoneCurrentSet = false;
+    for (const m of this.milestoneEls) {
+      const passed = milestoneKm >= m.km;
+      m.el.classList.toggle('passed', passed);
+      const current = !passed && !milestoneCurrentSet;
+      m.el.classList.toggle('current', current);
+      if (current) milestoneCurrentSet = true;
     }
 
     /* Earning a car. nextUnlock() moving on is the signal, but it also moves when cheat mode

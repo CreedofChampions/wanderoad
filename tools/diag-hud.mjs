@@ -2,19 +2,29 @@
  *
  * The rule here is gotcha 3: a flag being set is not a thing being visible. A browser is the
  * only place you can truly measure a rendered box, and the browser suite is run centrally —
- * so this tool does the two things that CAN be proved offline, and does them properly:
+ * so this tool does the things that CAN be proved offline, and does them properly:
  *
  *   1. THE STRINGS ARE REAL. It stands up a stub DOM, builds the actual Hud from src/ui/hud.js,
  *      drives the actual Streak from src/game/streak.js, and reads back the exact text that
  *      lands in each element. The next-unlock line is then checked against the actual fleet
  *      ladder in src/game/garage.js, rung by rung — no hand-copied table to drift.
  *
- *   2. THE MARKUP PASSES BY CONSTRUCTION. It parses src/ui/style.css and holds every rule that
+ *   2. THE MILESTONE DOTS ARE REAL. Same idea, applied to hud.js's MILESTONES_KM waypoints:
+ *      the real dot elements the real Hud built are read back — position, order, and which
+ *      ones are marked passed/current/upcoming — at a handful of real streak distances.
+ *
+ *   3. THE MARKUP PASSES BY CONSTRUCTION. It parses src/ui/style.css and holds every rule that
  *      touches a claimed element to tools/browser-test.mjs's VISIBLE standard — display not
  *      none, visibility not hidden, opacity well clear of zero IN EVERY STATE INCLUDING MID-
  *      KEYFRAME, and a non-zero box. Then it resolves the clamp()s at real viewport sizes and
  *      prints the pixel geometry, and checks the block cannot collide with the speedo or the
  *      place name at any of them.
+ *
+ *   4. THE RETIRED ROPE TRAIL STAYS RETIRED. src/render/trail.js's StreakTrail is built for
+ *      real, driven hard (hundreds of frames, a reset, an absurd distance), and its exported
+ *      geometry is checked to confirm nothing was ever attached to a scene graph — not just
+ *      that a `visible` flag reads false, which is the exact gotcha-3 trap this project has
+ *      been burned by before.
  *
  *   node tools/diag-hud.mjs
  *
@@ -76,9 +86,10 @@ globalThis.localStorage = {
 };
 globalThis.location = { search: '' };
 
-const { Hud } = await import('../src/ui/hud.js');
+const { Hud, MILESTONES_KM } = await import('../src/ui/hud.js');
 const { Streak, fmtDistance } = await import('../src/game/streak.js');
 const { FLEET, fmtUnlock } = await import('../src/game/garage.js');
+const { StreakTrail } = await import('../src/render/trail.js');
 
 /* ── 1. the strings ──────────────────────────────────────────────────────── */
 
@@ -162,6 +173,80 @@ check(
   `fill ${fresh.fill}, best notch at ${fresh.mark}`
 );
 
+/* ── 1b. the milestone dots ──────────────────────────────────────────────── */
+
+console.log('\nmilestone dots — waypoints on the same bar, independent of the car-unlock ladder:\n');
+check(
+  'the milestone list is the one the operator asked for, continued sensibly',
+  MILESTONES_KM.join(',') === '1,3,6,10,20,40,80,150,300',
+  `${MILESTONES_KM.join(', ')} km`
+);
+check(
+  'one dot exists per waypoint, built once in the constructor, in order',
+  hud.milestoneEls.length === MILESTONES_KM.length && hud.milestoneEls.every((m, i) => m.km === MILESTONES_KM[i]),
+  `${hud.milestoneEls.length} dots: ${hud.milestoneEls.map((m) => m.km).join(', ')}`
+);
+
+const mLefts = hud.milestoneEls.map((m) => parseFloat(m.el.style.left));
+check(
+  'every dot has a real, in-range position',
+  mLefts.every((x) => Number.isFinite(x) && x >= 0 && x <= 100),
+  mLefts.map((x) => x.toFixed(1)).join(', ')
+);
+check(
+  'the dots are laid out in ascending order, left to right, matching km order',
+  mLefts.every((x, i) => i === 0 || x > mLefts[i - 1]),
+  mLefts.map((x) => x.toFixed(1)).join(' < ')
+);
+check('the low end is not crushed against the edge — log scale, not linear', mLefts[0] > 4 && mLefts[0] < 35, `1 km sits at ${mLefts[0].toFixed(1)}%`);
+check(
+  'the high end is not glued to the edge either',
+  mLefts[mLefts.length - 1] > 60 && mLefts[mLefts.length - 1] < 99,
+  `${MILESTONES_KM[MILESTONES_KM.length - 1]} km sits at ${mLefts[mLefts.length - 1].toFixed(1)}%`
+);
+
+console.log('   streak      passed                              current   upcoming');
+const milestoneState = () => ({
+  passed: hud.milestoneEls.filter((m) => m.el.classList.contains('passed')).map((m) => m.km),
+  current: hud.milestoneEls.filter((m) => m.el.classList.contains('current')).map((m) => m.km),
+  upcoming: hud.milestoneEls.filter((m) => !m.el.classList.contains('passed') && !m.el.classList.contains('current')).map((m) => m.km),
+});
+const probeMilestones = (km, expectPassed, expectCurrent) => {
+  streak.distance = km * 1000;
+  streak.best = km * 1000;
+  hud.update(DT, { car, streak, surface: ON });
+  const { passed, current, upcoming } = milestoneState();
+  console.log(
+    `   ${String(km).padStart(7)} km  [${passed.join(',').padEnd(20)}]  ${String(current[0] ?? '—').padStart(6)}   [${upcoming.join(',')}]`
+  );
+  check(`${km} km streak — passed = [${expectPassed.join(',')}]`, passed.join(',') === expectPassed.join(','), `got [${passed.join(',')}]`);
+  check(
+    `${km} km streak — current = ${expectCurrent[0] ?? '(none — every dot passed)'}`,
+    current.join(',') === expectCurrent.join(','),
+    `got ${current.join(',') || '(none)'}`
+  );
+};
+probeMilestones(0.5, [], [1]);
+probeMilestones(2, [1], [3]);
+probeMilestones(7, [1, 3, 6], [10]);
+probeMilestones(15, [1, 3, 6, 10], [20]);
+probeMilestones(50, [1, 3, 6, 10, 20, 40], [80]);
+// Past the last waypoint: everything passed, nothing current — a legitimate resting state,
+// the same shape as the unlock bar's own "every car unlocked".
+probeMilestones(400, MILESTONES_KM, []);
+
+/* at rest (no live streak) the dots read off the all-time best, not a distance that just
+ * reset to zero — the same live-vs-best rule streakKm itself already follows. */
+streak.distance = 0;
+streak.best = 15000;
+hud.update(DT, { car, streak, surface: ON });
+const atRest = milestoneState();
+check(
+  'at rest, the dots read off the all-time best rather than a reset-to-zero distance',
+  atRest.passed.join(',') === '1,3,6,10' && atRest.current.join(',') === '20',
+  `passed [${atRest.passed.join(',')}], current ${atRest.current.join(',') || '(none)'}`
+);
+
 /* ── 2. the ladder ───────────────────────────────────────────────────────── */
 
 console.log('\nthe unlock line against the fleet ladder in src/game/garage.js:\n');
@@ -232,7 +317,7 @@ const decl = (body, prop) => {
   return m ? m[1].trim() : null;
 };
 
-const CLAIMED = ['#streak', '#streakKm', '#unlockBar', '#unlockBar .track', '#unlockBar .fill', '#unlockBar #unlockNext'];
+const CLAIMED = ['#streak', '#streakKm', '#unlockBar', '#unlockBar .track', '#unlockBar .fill', '#unlockBar #unlockNext', '#unlockBar .milestone'];
 const all = rules(css);
 // A stray brace turns every rule after it into nonsense and the whole HUD silently loses its
 // styling. Cheaper to catch here than in a screenshot.
@@ -262,6 +347,15 @@ for (const r of touching) {
 }
 visOk = bad.length === 0;
 check('no rule hides or near-hides a claimed element', visOk, bad.join('; ') || 'every state opacity >= 0.5');
+
+// Specifically (not just via the aggregate count above) — a typo'd selector could otherwise
+// hide behind other, unrelated rules padding out `touching.length`.
+const milestoneRuleSels = touching.filter((r) => r.sel.trim().startsWith('#unlockBar .milestone')).map((r) => r.sel.trim());
+check(
+  'the milestone dot, passed, and current states are each really styled',
+  ['#unlockBar .milestone', '#unlockBar .milestone.passed', '#unlockBar .milestone.current'].every((sel) => milestoneRuleSels.includes(sel)),
+  milestoneRuleSels.join(', ')
+);
 
 // The keyframe animation must not touch opacity: a screenshot lands on an arbitrary frame.
 const kf = all.filter((r) => r.at.includes('@keyframes streakBreathe'));
@@ -346,6 +440,46 @@ for (const [vw, vh, label] of [
 }
 check('the streak figure is big at every viewport', geomOk, 'figure >= 30 px, track >= 4 px, unlock line >= 10 px');
 check('nothing in the streak column collides with the speedo', collisions.length === 0, collisions.join('; ') || '5 viewports, phone to 1080p');
+
+/* ── 5. the retired rope trail ───────────────────────────────────────────── */
+
+console.log('\nthe rope trail (src/render/trail.js) — proving it is disabled, not just "visible: false":\n');
+{
+  // A static check first: no LIVE `scene.add(...)` call left in the source at all — comments
+  // (where the file explains the decision, and mentions the call by name) do not count.
+  const trailSrc = readFileSync(resolve(ROOT, 'src/render/trail.js'), 'utf8');
+  const trailSrcCode = trailSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  check(
+    'no live scene.add(...) call remains in trail.js (comments do not count)',
+    !/scene\s*\.\s*add\s*\(/.test(trailSrcCode),
+    /scene\s*\.\s*add\s*\(/.test(trailSrc) ? 'present, but only inside a comment' : 'no match anywhere in the file'
+  );
+
+  // Then the behavioural proof — gotcha 3: a flag is not the same as nothing being drawn, so
+  // this drives the REAL class hard (hundreds of frames, a reset, and a distance that used to
+  // force `alive` to 1 and `mesh.visible` to true) against a scene stub that records whether
+  // `.add` was ever called, and inspects the real mesh's real `.parent`.
+  let addCalled = false;
+  const fakeScene = { add: () => { addCalled = true; }, children: [] };
+  const trail = new StreakTrail({ scene: fakeScene });
+  const trailCar = { x: 10, y: 2, z: -30, yaw: 0.4 };
+  for (let i = 0; i < 600; i++) trail.update(1 / 60, trailCar, { distance: i * 100 });
+  trail.reset(trailCar);
+  trail.update(1 / 60, trailCar, { distance: 5_000_000 }); // absurd — would have forced visible:true
+
+  check('StreakTrail never calls scene.add — nothing was ever attached to the scene graph', addCalled === false);
+  check('its mesh has no parent — a renderer cannot traverse to it from any scene, full stop', trail.mesh.parent === null);
+  check('its mesh is not flagged visible either — belt and suspenders, not one flag', trail.mesh.visible === false);
+
+  let disposeOk = false;
+  try {
+    trail.dispose();
+    disposeOk = true;
+  } catch {
+    disposeOk = false;
+  }
+  check('dispose() still runs cleanly — the module stays fully importable', disposeOk);
+}
 
 console.log('\n' + '-'.repeat(70));
 console.log(failed ? `${failed} CHECK(S) FAILED` : 'all checks passed');

@@ -30,7 +30,7 @@ node -e "const fs=require('fs');const bad=[];(function w(d){if(!fs.existsSync(d)
 |---|---|---|
 | "Hoshi-no-Tani — The Valley of Stars" CodePen | Provided by the operator as the visual reference for this project. | The palette, lighting model (`paint()`), sky, post chain, grass, water, cloud and painted-solid pipelines derive from it. It is the reason the game looks the way it does and it should be credited wherever the game is presented. |
 | [Quaternius](https://quaternius.com/packs/cars.html) car models — 7 GLBs in `public/models/cars/` | **CC0 1.0 Universal** (public domain). Attribution not required; given anyway. | Fetched anonymously over plain HTTP from [Poly Pizza](https://poly.pizza). Untextured, so the game re-materials them into its own painted shader. Full text in `public/models/cars/LICENCE.txt`. |
-| The 100 roadside props and the petrol stations — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | See the note below. |
+| The 100 roadside props, the petrol stations, and the floating fuel cans — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | See the note below. The fuel can (added 27 July, alongside a fix to petrol-station findability — docs/BACKLOG.md) is built with the same painted primitives as everything else here, so it needs no separate entry beyond this one. |
 
 ### The 100 points of interest — why nothing was downloaded
 

@@ -18,7 +18,7 @@
 import { Vehicle } from '../src/car/vehicle.js';
 import { PHYSICS_DT } from '../src/car/tuning.js';
 import { Fuel, TANK_SECONDS, CRUISE_V, CRUISE_THROTTLE } from '../src/game/fuel.js';
-import { STATION_RADIUS, nearestStation } from '../src/world/props.js';
+import { STATION_RADIUS, nearestStation, CAN_FRACTION } from '../src/world/props.js';
 
 const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 
@@ -193,6 +193,70 @@ console.log('\n── refuelling at a real station ─────────�
     fuel2.update(DT, car2);
   }
   check(fuel2.fraction < 0.5, 'driving through a forecourt does not refuel', `${(fuel2.fraction * 100).toFixed(1)}%`, '< 50%');
+}
+
+console.log('\n── a floating can, collected ──────────────────────────────────────────────');
+{
+  /* collectCans is pull-based: render/props.js's Props class detects proximity itself (it
+   * already gets the car's position every frame) and hands back the total fraction gained
+   * since the last call. This stubs that contract directly, the same way the station test
+   * above stubs findStation, so the question asked is "does Fuel apply what it is handed",
+   * not "does Props detect proximity" — that is proven separately, with a real Props
+   * instance, in tools/bench-props.mjs's "a can, bobbing and collected" section. */
+  const DT = 1 / 60;
+  const said = [];
+  const car = fresh();
+  const fuel = new Fuel({ start: 0.5, say: (t) => said.push(t), collectCans: () => 0 });
+  fuel.update(DT, car);
+  // Not exactly 0.5: idling still burns (IDLE = 0.14 of the rate, applied for one frame),
+  // the same tiny amount it would with no can system involved at all — 0.01 comfortably
+  // covers one frame of it and nothing more.
+  check(Math.abs(fuel.fraction - 0.5) < 0.01, 'nothing gained while collectCans reports 0', fuel.fraction.toFixed(4), '~0.5');
+
+  let paid = false;
+  fuel.collectCans = () => {
+    if (paid) return 0;
+    paid = true;
+    return CAN_FRACTION;
+  };
+  const before = fuel.seconds;
+  fuel.update(DT, car);
+  // Within 0.01 s rather than exact: the top-up and that same frame's own idle burn both
+  // happen inside this one update() call, in that order, so the net gain is CAN_FRACTION of
+  // a tank minus a fraction of a frame's idle burn, not CAN_FRACTION to the last digit.
+  check(Math.abs(fuel.seconds - (before + TANK_SECONDS * CAN_FRACTION)) < 0.01,
+    'a collected can adds CAN_FRACTION of a tank', fuel.seconds.toFixed(2), `~${(before + TANK_SECONDS * CAN_FRACTION).toFixed(2)}`);
+  check(fuel.stats.cansCollected === 1, 'counted as one can', fuel.stats.cansCollected, '1');
+  check(said.some((s) => /can/i.test(s)), 'said something about it', said.join(' | '), 'mentions "can"');
+
+  // A can found on a near-full tank must cap at TANK_SECONDS, exactly like a pump would.
+  const car2 = fresh();
+  const fuel2 = new Fuel({ start: 0.95, collectCans: () => 0.5 });
+  fuel2.update(DT, car2);
+  check(fuel2.seconds <= TANK_SECONDS + 1e-6, 'a can cannot overfill the tank', fuel2.seconds.toFixed(2), `<= ${TANK_SECONDS}`);
+  check(Math.abs(fuel2.seconds - TANK_SECONDS) < 0.01, 'and tops out at a full tank', fuel2.seconds.toFixed(2), `~${TANK_SECONDS}`);
+
+  // Running dry, then a can arrives: power must recover immediately, the same as a pump does.
+  const car3 = fresh();
+  const fuel3 = new Fuel({ start: 0.001, collectCans: () => 0 });
+  const ctl = cruiseController(95);
+  for (let k = 0; k < 60 * 20 && fuel3.seconds > 0; k++) {
+    fuel3.update(DT, car3);
+    car3.update(DT, fuel3.gate({ steer: 0, throttle: ctl(car3, DT), brake: 0, handbrake: 0, analogue: true }));
+  }
+  check(fuel3.dry, 'ran dry as set up', fuel3.dry, 'true');
+  const powerAtEmpty = fuel3.power;
+  fuel3.collectCans = () => 0.3;
+  fuel3.update(DT, car3);
+  check(!fuel3.dry, 'a can clears the dry state on the very frame it lands, like a pump', fuel3.dry, 'false');
+  // Power itself ramps back up over about a second (damp(power, 1, 4, dt)) rather than
+  // snapping — "the engine picks back up rather than snapping on", the same phrase this
+  // file already uses for a rescue — so the check is a couple of seconds later, not this
+  // same frame.
+  fuel3.collectCans = () => 0;
+  for (let k = 0; k < 120; k++) fuel3.update(DT, car3);
+  check(fuel3.power > powerAtEmpty, 'power is climbing, not snapped, right after the can lands', `${powerAtEmpty.toFixed(3)} -> ${fuel3.power.toFixed(3)}`, 'higher');
+  check(fuel3.power > 0.95, 'and is most of the way back after driving on for 2 s', fuel3.power.toFixed(3), '> 0.95');
 }
 
 console.log('\n── running dry is gentle and always recoverable ──────────────────────────');
