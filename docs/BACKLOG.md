@@ -10,9 +10,45 @@ technically better.
 
 ---
 
+## How this ships — PUBLISH CHECKPOINTS (operator instruction, 27 July 2026)
+
+The operator's words: *"You should be constantly publishing your work. so that I can constantly
+test and give you feedback rather than doing it all in one big go... Setup checkpoints."*
+
+**The rule from here on: one item, one deploy.** Not one round, one deploy. Every item below ships
+to https://crumbtown.org/wanderoad/ on its own, the moment it is green, so the operator can play
+it and react before the next thing lands on top of it. A batch of ten fixes shipped together is
+ten things he cannot give separate feedback on, and if one of them is wrong it contaminates his
+read of the other nine.
+
+**The gate at every checkpoint, no exceptions:**
+1. `npm test` green.
+2. `npm run test:browser` 40/40 and "THE GAME WORKS".
+3. `npm run ship`, then `npm run test:live` 40/40 — **live is the gate, not localhost.** Learned
+   the hard way: a startup-fps regression passed localhost 40/40 and failed live at 22.8 fps
+   three runs running, because localhost serves fast enough to hide a startup burst.
+4. Commit + push with the real numbers in the message. Tick the item here.
+5. If anything regressed: do NOT deploy. Commit with the regression named, put it at the top of
+   this list.
+
+**Anything touching a shader also has to pass a real GPU compile** — `npm run test:browser`, never
+static analysis. A GLSL reserved word (`patch`) once turned the whole game black while passing
+every node-side check that was run against it.
+
+---
+
 ## Now — the failing requirements, worst first
 
-- [ ] **BLOCKING — startup frame rate regressed on the LIVE build.** `npm run test:live` reports
+- [x] **RESOLVED — startup frame rate regressed on the LIVE build.** Now **60 fps across three
+      consecutive live runs**, 40/40 each. Fixed as a SIDE EFFECT of the water grading pass, not
+      by deliberate perf work: that pass cut the shore foam's depth reach from 1.25 m to 0.40 m,
+      gated caustics to 240 m, and moved the distance flatten earlier — all real fragment-shader
+      savings, and the suite's spawn sits beside water. Recorded rather than deleted because the
+      diagnosis below is still the right method if it recurs, and because "an aesthetic change
+      fixed a perf bug" is exactly the kind of coincidence that misleads later. The original
+      symptom follows.
+
+      `npm run test:live` reported
       **22.8 / 23.8 / 22.9 fps** across three consecutive runs at the "running at a playable rate
       once warm" check (bar is 24), where it was 40/40 green before the second playtest round.
       Reproducible, not variance.
@@ -40,7 +76,20 @@ technically better.
       came back, and the game is playable throughout (23 fps briefly, then 60). Recorded here as
       the top item rather than left to be rediscovered.
 
-- [ ] **Valley mist is written and reverted — it fails GPU program validation.** The operator
+- [x] **RESOLVED — valley mist now ships and works.** The cause was neither a SwiftShader limit,
+      nor uniform counts, nor the cloud-material chunk interaction — every one of those theories
+      was wrong. The captured GPU compile log named it directly:
+      `ERROR: 'patch' : Illegal use of reserved word`. The mist layering variable was called
+      `patch`, which is **reserved in GLSL ES 3.00**, and it lived in the chunk every material
+      concatenates, so all eleven programs failed at once and the game rendered black. Renamed to
+      `mstPatch`. Live at 40/40 with mist on and no console errors.
+
+      **Keep the lesson, it cost a full revert:** no node-side static check can see a reserved
+      word — not bracket balance, not symbol resolution, not chunk-combination assembly, all of
+      which the original author ran and passed. Only a real GPU compile catches it. Shader work
+      is gated on `npm run test:browser`, never on static analysis. The original write-up follows.
+
+      The operator
       asked for the original scene's valley mist. It was implemented (analytic exponential-density
       integral inside `aerial()`, a `uMist` uniform in GL_UNI, a matching horizon band in
       `skyDome`/`skyDomeLite`, and its own `mstHash`/`mstNoise` in GL_LIGHT) and it broke the
