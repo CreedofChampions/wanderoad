@@ -696,7 +696,11 @@ export class Vehicle {
        * every landing bought the next take-off. 0.8 m/s re-launches 3 cm, which the suction
        * band swallows. Crest LAUNCHES are unaffected: they carry ground-shape velocity upward
        * before contact ends, not spring rebound after it resumes. */
-      if (this.vy > 0.8) this.vy = 0.8;
+      /* 2 m/s, restored. Cutting this to 0.8 helped the descent pogo but also stopped the car
+       * rebounding out of WATER, so the boat barrier let it reach 1.12 m deep against a 1.0 m
+       * bar. The airtime-gated suction above fixes the bounce without touching the rebound a
+       * landing (or a splash) is allowed. */
+      if (this.vy > 2) this.vy = 2;
     }
     this.y += this.vy * dt;
     if (this.y < rideYTip - SUSPENSION.travel) {
