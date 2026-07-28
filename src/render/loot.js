@@ -59,6 +59,12 @@ const COIN_SPIN_RATE = 2.2; // rad/s
 const GEM_BOB_AMP = 0.2;
 const GEM_BOB_HZ = 0.38;
 const GEM_SPIN_RATE = 1.1; // rad/s
+/* A gentle scale pulse, ON TOP of the bob/spin above rather than replacing either — a second,
+ * slow "breathing" cue that helps a gem separate from a static scribble on the water even
+ * before its colour or size does the rest of the work. ±8% at ~0.5 Hz, per-gem phase so a
+ * cluster does not pulse in lockstep. */
+const GEM_PULSE_AMP = 0.08;
+const GEM_PULSE_HZ = 0.5;
 
 /* ── geometry, built once per item, in LOCAL space centred on its own origin ────────────────
  * Nothing here is blitted at a world position — see the file header for why: the mesh's own
@@ -77,8 +83,15 @@ function buildCoin(M) {
   pcyl(M, [-COIN_THICK * 0.5, 0, 0], [COIN_THICK * 0.5, 0, 0], COIN_R, COIN_R, 10, COIN_COL, MAT.METAL, true, true);
 }
 
-const GEM_SCALE = 0.8;
-const GEM_COL = mixc(LC('glass'), LC('wSpark'), 0.4);
+// 1.5x the original 0.8 — playtest report: "diamonds invisible against the new pale foam
+// water" was partly a size problem too, not only colour.
+const GEM_SCALE = 1.2;
+// Was mixc(glass, wSpark, 0.4) — a pale, near-white blend that all but vanished against the
+// foam drawings' own near-white ${C.wFoam} strokes (playtest report, verbatim). paintC mixed
+// TOWARD glass instead: a saturated, deep cyan-blue, darker and bluer than any foam on this
+// water, so a gem reads as a gem against the white scribbles rather than disappearing into
+// them.
+const GEM_COL = mixc(LC('paintC'), LC('glass'), 0.35);
 
 /** An octahedron: two four-sided pyramids joined base to base. `painted.js` has no built-in
  *  octahedron primitive (pbox/pcyl/proof cover the pen's own catalogue, which never needed
@@ -347,6 +360,8 @@ export class Loot {
       const bob = Math.sin(t * GEM_BOB_HZ * TAU + g.phase) * GEM_BOB_AMP;
       g.mesh.position.set(g.x, g.y + bob, g.z);
       g.mesh.rotation.y = (t + g.phase) * GEM_SPIN_RATE;
+      const pulse = 1 + Math.sin(t * GEM_PULSE_HZ * TAU + g.phase) * GEM_PULSE_AMP;
+      g.mesh.scale.setScalar(pulse);
       g.mesh.updateMatrix();
     }
   }

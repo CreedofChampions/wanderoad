@@ -214,13 +214,27 @@ function buildBoat(M, spec) {
     pbox(M, c[0], c[1], c[2], B * 0.30, H * 0.36, L * 0.15, yaw, cabinCol, MAT.MATTE);
   }
   if (hasMast) {
-    const base = P(0, gun, -L * 0.05);
-    const top = P(0, gun + L * 0.6, -L * 0.05);
+    // `spec.mastH`/`spec.mastZ`, if present, PIN the mast the same way `spec.L`/`spec.hullCol`
+    // pin the hull above, rather than deriving it from `L`/the stern offset below. Nothing sets
+    // either any more (buildPlayerBoat() dropped its own mast entirely — see that function's
+    // own comment: a masthead sits on the local X=0 centreline no matter where along Z it is
+    // pinned, and the chase camera sits dead astern of exactly that centreline, so no Z-only
+    // pin could ever have fixed the mast splitting its view). Left in place as generic pinning
+    // capability, unused today, rather than stripped: every anchored ship (evaluateShipSite's
+    // own specs) never sets either field, so this is a pure addition on that path either way —
+    // the fleet's own L*0.6 mast a metre and a half above deck, near the stern, is untouched.
+    const mastH = spec.mastH != null ? spec.mastH : L * 0.6;
+    const mastZ = spec.mastZ != null ? spec.mastZ : -L * 0.05;
+    const base = P(0, gun, mastZ);
+    const top = P(0, gun + mastH, mastZ);
     pcyl(M, base, top, L * 0.013, L * 0.007, 5, MAST_COL, MAT.MATTE, true, false);
-    // a small pennant near the masthead, big enough to read as motion when it slowly swings
-    const pA = P(0, gun + L * 0.56, -L * 0.05);
-    const pB = P(L * 0.11, gun + L * 0.50, -L * 0.05);
-    const pC = P(0, gun + L * 0.47, -L * 0.05);
+    // a small pennant near the masthead, big enough to read as motion when it slowly swings —
+    // same fractions of the mast's own height as before (0.56/0.6, 0.50/0.6, 0.47/0.6), so a
+    // shorter pinned mast keeps the same proportioned flag rather than a fixed offset sliding
+    // off a shorter pole.
+    const pA = P(0, gun + mastH * 0.933, mastZ);
+    const pB = P(L * 0.11, gun + mastH * 0.833, mastZ);
+    const pC = P(0, gun + mastH * 0.783, mastZ);
     ptri(M, pA, pB, pC, hullCol, MAT.MATTE);
   }
 }
@@ -233,17 +247,69 @@ export const PLAYER_BOAT_LENGTH = 5.2;
  *  (not 0, not 1 — the midpoint blend of wallA/wallB) is honester than dressing up one number
  *  as if it were still a draw. */
 const PLAYER_TRIM_T = 0.5;
+/** Player flagstaff height, metres — REPLACES the player boat's own pinned mast (removed; see
+ *  addFlagstaff()'s own comment for why moving a mast along the boat's LENGTH could never have
+ *  fixed the chase camera splitting on it: a mast anywhere on the local X=0 centreline still
+ *  sits dead ahead of a camera that itself sits dead astern on that same centreline — measured,
+ *  NDC x = 0.000 regardless of how far up/down the hull it was pinned. Only a LATERAL offset
+ *  moves it off screen centre, hence a corner flagstaff rather than a shorter/repositioned
+ *  mast). Short: a flagstaff, not a mast — "a cozy little motor-launch with a flag". */
+const PLAYER_FLAGSTAFF_H = 0.9;
+
+/**
+ * Player-only: a short flagstaff at the PORT STERN CORNER of the transom, with a small
+ * triangular pennant — see PLAYER_FLAGSTAFF_H's own comment for why a lateral (X) offset, not
+ * a fore-aft (Z) one, is what actually clears the chase camera. Same low-poly cylinder +
+ * triangle shapes buildBoat()'s own `hasMast` block draws for the fleet, just placed off to one
+ * side instead of on the centreline. `buildBoat()` is not reused directly here (it has no hook
+ * for an off-centreline extra) — small enough, and specific enough to the one player boat, that
+ * a dedicated function reads clearer than threading a new option through the fleet's own path.
+ *
+ * `cx`/`cy`/`cz`/`ca`/`sa` are threaded through like addHull()'s own `P()` even though
+ * buildPlayerBoat() below only ever calls this at the local origin with no rotation — the same
+ * "no silent trap for a future non-origin caller" reasoning addHull() already follows.
+ */
+function addFlagstaff(M, cx, cy, cz, ca, sa, L, B, H, col) {
+  const P = (lx, ly, lz) => {
+    const [x, z] = rotY(lx, lz, ca, sa);
+    return [cx + x, cy + ly, cz + z];
+  };
+  const gun = H * 0.58; // addHull()'s own gunwale height (H*0.58), duplicated — buildBoat()
+  // keeps that figure private to its own closure, and this is the only other place in the file
+  // that needs deck height for a boat it did not itself build.
+  // PORT (local -X, matching addHull()'s own port/starboard labelling) STERN (local -Z, the
+  // transom end) corner, inset a little off the exact edge so the staff reads as standing ON
+  // the boat rather than skewered through its own silhouette.
+  const fx = -B * 0.5 * 0.82;
+  const fz = -L * 0.5 * 0.82;
+  const base = P(fx, gun, fz);
+  const top = P(fx, gun + PLAYER_FLAGSTAFF_H, fz);
+  pcyl(M, base, top, L * 0.01, L * 0.005, 5, MAST_COL, MAT.MATTE, true, false);
+  // Pennant near the top, flying outboard (further to port, away from the hull) — same
+  // top-of-pole fractions buildBoat()'s own fleet pennant uses (0.933/0.833/0.783 of the
+  // pole's own height), so a much shorter staff still reads as a proportioned little flag
+  // rather than a fixed offset sliding off the end of it.
+  const pA = P(fx, gun + PLAYER_FLAGSTAFF_H * 0.933, fz);
+  const pB = P(fx - L * 0.09, gun + PLAYER_FLAGSTAFF_H * 0.833, fz);
+  const pC = P(fx, gun + PLAYER_FLAGSTAFF_H * 0.783, fz);
+  ptri(M, pA, pB, pC, col, MAT.MATTE);
+}
 
 /**
  * The player's own boat — built once (main.js constructs it lazily, the first time
  * `wallet.boatUnlocked` goes true) and repositioned every frame like the car model is,
  * never rebuilt. Same low-poly hull `buildBoat()` above draws for the anchored fleet, pinned
- * to car-scale (`PLAYER_BOAT_LENGTH`) with the cabin and the mast+pennant always present —
- * the anchored fleet only has them SOMETIMES (hasCabin/hasMast are rng draws over dozens of
- * hulls); the one boat the player actually drives should always read as a complete little
- * boat, not the stripped-down rowing-skiff end of that draw. Hull colour is `paintC`, the
- * fleet's own trim colour (car/model.js's PAINTS), so the boat reads as "your car's own boat"
- * rather than a piece of anchored scenery.
+ * to car-scale (`PLAYER_BOAT_LENGTH`) with the cabin always present — the anchored fleet only
+ * has it SOMETIMES (hasCabin is an rng draw over dozens of hulls); the one boat the player
+ * actually drives should always read as a complete little boat, not the stripped-down
+ * rowing-skiff end of that draw. Hull colour is `paintC`, the fleet's own trim colour
+ * (car/model.js's PAINTS), so the boat reads as "your car's own boat" rather than a piece of
+ * anchored scenery.
+ *
+ * NO MAST (fix round 2): `hasMast` is off here, and an addFlagstaff() call below adds a short
+ * flagstaff at the port stern corner instead — see PLAYER_FLAGSTAFF_H's and addFlagstaff()'s
+ * own comments for why a masthead on the hull's own centreline can never clear the chase
+ * camera, which sits on that same centreline, no matter how it is pinned along the length.
  *
  * Built at the local origin with yaw 0, exactly like car/model.js's buildCar() — main.js
  * positions and rotates the returned Mesh's own `.position`/`.rotation` every frame instead
@@ -267,8 +333,9 @@ export function buildPlayerBoat(material = createPaintedMaterial()) {
     hullCol: LC('paintC'),
     trimT: PLAYER_TRIM_T,
     hasCabin: true,
-    hasMast: true,
+    hasMast: false,
   });
+  addFlagstaff(M, 0, 0, 0, 1, 0, PLAYER_BOAT_LENGTH, PLAYER_BOAT_LENGTH * 0.33, PLAYER_BOAT_LENGTH * 0.17, LC('paintC'));
   const geom = finishPainted(M);
   const mesh = new Mesh(geom, material);
   mesh.name = 'playerBoat';

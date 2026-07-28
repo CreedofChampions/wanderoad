@@ -2,24 +2,48 @@
  *
  *   node tools/bench-boat.mjs
  *
- * Two questions, both against the REAL Vehicle solver and a REAL Terrain sampler on the
+ * Four questions, all against the REAL Vehicle solver and a REAL Terrain sampler on the
  * shipped seed — nothing here is simulated twice:
  *
  *   1. LOCKED: driving flat-out at a lakeshore with no boat, does the car actually stop
  *      short of the water rather than wallowing in it — no rescue-teleport needed at all.
- *   2. UNLOCKED: does the boat actually engage, actually cover real ground on open water, and
+ *   2. LOCKED + A REAL RESCUE: the same question again, but with a genuine src/game/rescue.js
+ *      Rescue instance wired in exactly as main.js wires it — the playtest blocker this file
+ *      exists to close ("locked water barrier still rescue-teleports on steep banks") was never
+ *      visible to section 1 above, because section 1 has no Rescue object to teleport with at
+ *      all; it could only ever prove the barrier's own numbers looked fine in isolation.
+ *   3. UNLOCKED: does the boat actually engage, actually cover real ground on open water, and
  *      actually hand back a normal, drivable car on the way out.
+ *   4. CONTROL RETENTION: nose the boat into the SAME steep bank section 2 uses and let the
+ *      exit test decline it — does the one-shot pushback (src/game/boat.js's `_stepActive`, fix
+ *      round 2) actually give the wheel back afterwards, or does it re-eat every frame of input
+ *      the way the bug report described ("the boat freezes at any steep shoreline nose-in, no
+ *      input works")? Sections 1-3 never drove a boat AT a steep bank from open water — section
+ *      1/2's car never gets there (the barrier stops it before the shore), and section 3's own
+ *      UNLOCKED shore is deliberately gentle (findLakesideRoad()'s own hasGentleLanding() gate)
+ *      — so this is the one section that actually exercises the bounce path at all.
  *
- * The lakeside fixture is FOUND BY SEARCH, the same discipline tools/bench-rescue.mjs already
+ * The lakeside fixtures are FOUND BY SEARCH, the same discipline tools/bench-rescue.mjs already
  * uses and for the same reason stated there: a hard-coded coordinate silently rots the moment
- * the world generator changes, and four failing checks that all read "0.00" look like a broken
- * feature when the fixture, not the feature, is what broke.
+ * the world generator changes, and failing checks that all read "0.00" look like a broken
+ * feature when the fixture, not the feature, is what broke. Sections 2 and 4 reuse
+ * tools/diag-playtest-fixtures.mjs's own finder rather than this file's own findLakesideRoad()
+ * below — that finder additionally proves out a nearby gem and a dry road, which neither section
+ * needs, but it is the SAME fixture the browser playtest (tools/diag-playtest-boat.mjs) drives
+ * against, so a bank steep enough to have tripped the old rescue-teleport bug there (section 2)
+ * is steep enough to be worth testing the new bounce-and-recover path against too (section 4).
+ * That finder's own `road`/`water`/`headingOut`/`shoreProfile` are untouched by its OWN fix
+ * round 2 (a separate `beachHome` field was added instead, for testVoyage's own sail-home leg —
+ * see that file's own comment), so this stays the same steep shore both sections have always
+ * used.
  */
 
 import { Terrain, isDryAt } from '../src/world/terrain.js';
 import { BIOME_COUNT, waterLevelAt } from '../src/world/biomes.js';
 import { Vehicle } from '../src/car/vehicle.js';
-import { BoatMode, BOAT_MAX_KPH } from '../src/game/boat.js';
+import { BoatMode, BOAT_MAX_KPH, EXIT_DEPTH, EXIT_PROBE_DIST, EXIT_STEEP_SLOPE } from '../src/game/boat.js';
+import { Rescue, waterDepth as rescueWaterDepth } from '../src/game/rescue.js';
+import { findFixture } from './diag-playtest-fixtures.mjs';
 
 const SEED = 20260726;
 const DT = 1 / 60;
@@ -31,7 +55,16 @@ const check = (ok, label, got, want) => {
 };
 
 /* Same shape as bench-rescue.mjs's own findLakesideRoad(): a plain grid scan for a point that
- * is genuinely deep water with a genuinely dry road close enough to drive from. */
+ * is genuinely deep water with a genuinely dry road close enough to drive from. Also requires
+ * a BEACHABLE immediate shoreline — src/game/boat.js's own EXIT_STEEP_SLOPE fix (issue 2 of
+ * this fix round) declines the exit onto anything steeper than that, and the shipped seed's
+ * banks are steep enough (rescue.js's own note: "~35°") that the first candidate the old,
+ * slope-blind version of this search returned turned out to be one of them — the UNLOCKED
+ * voyage below never beached there any more, not because the fix is wrong but because that
+ * particular shore genuinely is too steep to land a boat on nose-first. Filtering here for a
+ * shore this class will actually let the boat use is docs/BOAT-PLAN.md's own suggested fallback
+ * ("assert via the existing voyage that exit still happens on the gentle shore") rather than
+ * softening the fix to fit the fixture. */
 function findLakesideRoad() {
   const scan = new Terrain(SEED, -3000, -3000, 3000, 3000, 240);
   const w = new Float32Array(BIOME_COUNT);
@@ -41,16 +74,36 @@ function findLakesideRoad() {
     const wy = waterLevelAt(w, y);
     return wy === null ? 0 : wy - y;
   };
+  /** True if a boat driving from the road at (qx, qz) out toward (x, z) has, along that line,
+   *  a landing spot shallower than EXIT_DEPTH whose own approach is gentle enough that
+   *  src/game/boat.js's exit check would actually let it through — the SAME probe that class
+   *  runs itself (EXIT_PROBE_DIST ahead, EXIT_STEEP_SLOPE bar), just walked here in 0.5 m
+   *  steps to find where depth first crosses EXIT_DEPTH along the way. */
+  const hasGentleLanding = (qx, qz, x, z) => {
+    const dx = x - qx,
+      dz = z - qz;
+    const L = Math.hypot(dx, dz);
+    const ux = dx / L,
+      uz = dz / L;
+    for (let s = 0; s <= 30; s += 0.5) {
+      if (depth(qx + ux * s, qz + uz * s) < EXIT_DEPTH) continue;
+      const hereY = scan.height(qx + ux * s, qz + uz * s);
+      const aheadY = scan.height(qx + ux * (s - EXIT_PROBE_DIST), qz + uz * (s - EXIT_PROBE_DIST));
+      return (aheadY - hereY) / EXIT_PROBE_DIST <= EXIT_STEEP_SLOPE;
+    }
+    return false; // never got wet along this line inside 30 m
+  };
   for (let z = -3500; z <= 3500; z += 25) {
     for (let x = -3500; x <= 3500; x += 25) {
       if (depth(x, z) < 2.0) continue; // real open water, not a damp margin
       const q = scan.roads.query(x, z);
       if (!isFinite(q.d) || q.d > 45 || q.d < 12) continue;
       if (depth(q.qx, q.qz) > 0) continue; // the road itself must be dry — a bank, not a ford
+      if (!hasGentleLanding(q.qx, q.qz, x, z)) continue;
       return { x, z, q };
     }
   }
-  throw new Error('bench-boat: no lakeside road found in a 7 km square about the origin');
+  throw new Error('bench-boat: no lakeside road with a beachable shore found in a 7 km square about the origin');
 }
 const LAKE = findLakesideRoad();
 console.log(`lakeside road fixture: (${LAKE.x}, ${LAKE.z})`);
@@ -130,6 +183,53 @@ console.log('\n── LOCKED: the barrier cushions the car, no rescue needed ─
   check(said.some((s) => /boat/i.test(s)), 'said something about needing a boat', said.join(' | ') || '(nothing)', 'mentions "boat"');
 }
 
+console.log('\n── LOCKED + A REAL RESCUE: the barrier, not the teleport, owns the water ──');
+{
+  /* tools/diag-playtest-fixtures.mjs's own finder rather than this file's findLakesideRoad()
+   * above — see the file header for why: it is the SAME fixture the browser playtest drives,
+   * which is where the "still rescue-teleports on steep banks" report actually came from. */
+  const FIX = findFixture(SEED);
+  console.log(`  steep-bank fixture: road (${FIX.road.x}, ${FIX.road.z}) -> water (${FIX.water.x}, ${FIX.water.z}), shore ${FIX.shoreProfile}`);
+
+  const FT = new Terrain(SEED, FIX.road.x - 320, FIX.road.z - 320, FIX.road.x + 320, FIX.road.z + 320, 240);
+  const car = new Vehicle({ tier: 'sports', terrain: FT, preset: 'sport' });
+  car.placeAt(FIX.road.x, FIX.road.z, FIX.headingOut);
+
+  const wallet = { boatUnlocked: false }; // a locked wallet stub — exactly what boat.js reads
+  const boat = new BoatMode({ wallet, terrain: () => FT });
+  let recoverCalls = 0;
+  /* A REAL Rescue, wired exactly as main.js wires it: recover() counts invocations instead of
+   * actually placing the car (nothing here needs backToRoad()'s road-finding), and `skip` is
+   * main.js's own formula verbatim — `boatMode.active || (wallet.boatUnlocked && inWater)` —
+   * against this SAME BoatMode instance and this SAME locked wallet stub. */
+  const rescue = new Rescue({
+    recover: () => {
+      recoverCalls++;
+    },
+    skip: (inWater) => boat.active || (wallet.boatUnlocked && inWater),
+  });
+
+  let deepest = 0;
+  for (let i = 0; i < 60 * 30; i++) {
+    if (!boat.active) car.update(DT, DRIVE);
+    // Pre-collision surf, matching main.js's own ordering (boat.update() runs before this
+    // bench's stand-in for solids.resolve(), which does not exist here — there is nothing to
+    // collide with at open water).
+    boat.update(DT, car, FT.surface(car.x, car.z), DRIVE);
+    // Then a FRESH sample, exactly like main.js's own post-collision `surf` that rescue.update()
+    // actually reads — boat.update() itself can move the car (the barrier's own positional
+    // clamp, workstream C's fix for this same bug), so re-sampling here is load-bearing, not
+    // decoration.
+    const surf = FT.surface(car.x, car.z);
+    rescue.update(DT, car, surf);
+    const d = rescueWaterDepth(surf);
+    if (d > deepest) deepest = d;
+  }
+  console.log(`  30 s of pinned throttle: recover() called ${recoverCalls} time(s); deepest the car itself ever got ${deepest.toFixed(2)} m`);
+  check(recoverCalls === 0, 'the real Rescue never teleports while the boat is locked', recoverCalls, '0');
+  check(deepest < 0.25, "the car never gets wet enough to trip rescue's own contact gate", deepest.toFixed(2), '< 0.25 m');
+}
+
 console.log('\n── UNLOCKED: the boat engages, covers real ground, and hands back ─────');
 {
   const car = freshCar();
@@ -197,6 +297,103 @@ console.log('\n── UNLOCKED: the boat engages, covers real ground, and hands 
   advanced = Math.hypot(car.x - x0, car.z - z0);
   check(boat.active === false, 'stays a car after a couple of quiet seconds', boat.active, 'false');
   check(Number.isFinite(car.x) && Number.isFinite(car.y) && Number.isFinite(car.z), 'car pose is finite — the reseat did not NaN anything', `${car.x.toFixed(1)}, ${car.y.toFixed(2)}, ${car.z.toFixed(1)}`, 'finite');
+}
+
+console.log('\n── CONTROL RETENTION: a steep-bank bounce never eats the driver\'s input ──');
+{
+  /* The SAME steep-bank fixture section 2 uses (see the file header for why) — findFixture()'s
+   * own `road`/`water`/`headingOut` are untouched by that file's own fix round 2, so this is
+   * still whatever bank tripped the original "boat freezes at any steep shoreline nose-in"
+   * report. */
+  const FIX = findFixture(SEED);
+  const FT = new Terrain(SEED, FIX.road.x - 320, FIX.road.z - 320, FIX.road.x + 320, FIX.road.z + 320, 240);
+  const car = new Vehicle({ tier: 'sports', terrain: FT, preset: 'sport' });
+  car.placeAt(FIX.road.x, FIX.road.z, FIX.headingOut);
+  const wallet = { boatUnlocked: true };
+  const boat = new BoatMode({ wallet, terrain: () => FT });
+
+  // Launch (same full-throttle approach every other section uses), then a few seconds out on
+  // open water so there is real way on before the turn back.
+  for (let i = 0; i < 60 * 10 && !boat.active; i++) {
+    if (!boat.active) car.update(DT, DRIVE);
+    boat.update(DT, car, FT.surface(car.x, car.z), DRIVE);
+  }
+  check(boat.active, 'control-retention rig actually gets afloat first', boat.active, 'true');
+  for (let i = 0; i < 60 * 4; i++) boat.update(DT, car, FT.surface(car.x, car.z), DRIVE);
+
+  /* Turn around and drive straight back at the same steep shore under full throttle. Aimed at a
+   * point 10 m INLAND of the road, along the exact reverse of headingOut, not at the road point
+   * itself: chasing the road point directly lets the boat curve in from whatever angle its own
+   * turning circle happens to arrive at, which — measured — drifted onto a gentler stretch of
+   * this same shore a few metres over and exited cleanly instead of bouncing. Aiming at a point
+   * on the far side of the road, along the exact line the shore's own steep profile was measured
+   * on, forces the approach to retrace that transect. */
+  const inlandX = FIX.road.x - Math.sin(FIX.headingOut) * 10;
+  const inlandZ = FIX.road.z - Math.cos(FIX.headingOut) * 10;
+  let sawBounce = false;
+  let bounceX = 0,
+    bounceZ = 0;
+  for (let i = 0; i < 60 * 25 && !sawBounce; i++) {
+    const err = ((Math.atan2(inlandX - car.x, inlandZ - car.z) - boat.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    const cmd = { steer: Math.max(-1, Math.min(1, err * 2)), throttle: 1, brake: 0, handbrake: 0, analogue: true };
+    boat.update(DT, car, FT.surface(car.x, car.z), cmd);
+    if (boat.bouncing) {
+      sawBounce = true;
+      bounceX = car.x;
+      bounceZ = car.z;
+    }
+  }
+  check(sawBounce, 'nosing straight at the steep bank actually triggers the decline+bounce', sawBounce, 'true');
+
+  // Hold reverse (brake) for 3 s right from the bounce: the old bug's own branch would have
+  // eaten this input entirely (bounced === true skipped the throttle/steer block, every frame,
+  // for as long as the boat stayed shallow-and-steep). The fix's own dynamics block never skips.
+  const BRAKE = { steer: 0, throttle: 0, brake: 1, handbrake: 0, analogue: true };
+  for (let i = 0; i < 60 * 3; i++) boat.update(DT, car, FT.surface(car.x, car.z), BRAKE);
+  const clearedBank = Math.hypot(car.x - bounceX, car.z - bounceZ);
+  check(clearedBank > 2, 'holding reverse for 3 s after the bounce moves the boat clear of the bank', `${clearedBank.toFixed(2)} m`, '> 2 m');
+
+  // Then hold throttle + full steer for 6 s: input must keep working continuously — the boat
+  // should turn a real amount and never sit dead in the water (bounced-and-frozen) for more
+  // than a beat while the input is held.
+  //
+  // Steer sign: the SAME sign the turn-back approach above was already steering with (that loop
+  // computed a negative `steer` throughout — see its own trace), continuing to swing the bow the
+  // way it was already swinging, out along the shore and back to open water. The opposite sign
+  // was tried and measured to swing the bow straight back across the bank it just bounced off —
+  // a second real, correctly-declined bounce, then a THIRD, until the boat happens to cross a
+  // gentler stretch nearby and genuinely exits (grounds as a car) partway through the 6 s
+  // window — at which point `boat.speed` reads 0 by _exit()'s own design, not because control
+  // was lost, but because the vehicle is not a boat any more. That is a real, correct exit this
+  // section is not testing for; steering away from the bank instead keeps the whole 6 s a boat
+  // question. Measured on the shipped seed: min depth 2.79 m throughout, boat.active never
+  // drops, worst stall 0.02 s.
+  let lastYaw = boat.yaw;
+  let dyaw = 0;
+  let stalledFor = 0;
+  let worstStall = 0;
+  let stayedAfloat = true;
+  const TURN = { steer: -1, throttle: 1, brake: 0, handbrake: 0, analogue: true };
+  for (let i = 0; i < 60 * 6; i++) {
+    boat.update(DT, car, FT.surface(car.x, car.z), TURN);
+    if (!boat.active) stayedAfloat = false;
+    let d = boat.yaw - lastYaw;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    dyaw += d;
+    lastYaw = boat.yaw;
+    if (Math.abs(boat.speed) < 0.05) {
+      stalledFor += DT;
+      if (stalledFor > worstStall) worstStall = stalledFor;
+    } else {
+      stalledFor = 0;
+    }
+  }
+  console.log(`  bounced at (${bounceX.toFixed(1)}, ${bounceZ.toFixed(1)}); cleared ${clearedBank.toFixed(2)} m on reverse; |Δyaw| ${Math.abs(dyaw).toFixed(3)} rad over 6 s of throttle+full steer; worst stall ${worstStall.toFixed(2)} s`);
+  check(stayedAfloat, 'stays in boat mode for the whole throttle+steer window (a real control question, not a beaching)', stayedAfloat, 'true');
+  check(Math.abs(dyaw) > 0.5, 'throttle + full steer for 6 s actually turns the boat', `${Math.abs(dyaw).toFixed(3)} rad`, '> 0.5 rad');
+  check(worstStall < 1.5, 'never sits at |speed| < 0.05 for more than 1.5 continuous seconds while an input is held', `${worstStall.toFixed(2)} s`, '< 1.5 s');
+  check(Number.isFinite(car.x) && Number.isFinite(car.y) && Number.isFinite(car.z), 'car/boat pose stays finite through the whole bounce-and-recover', `${car.x.toFixed(1)}, ${car.y.toFixed(2)}, ${car.z.toFixed(1)}`, 'finite');
 }
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all boat checks passed'}\n`);

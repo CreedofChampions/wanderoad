@@ -745,8 +745,20 @@ async function boot() {
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
      * this frame's real speed and slip, and after the collision resolve so a car that has just
      * been pushed out of a tree does not spray from where it briefly was. Frozen with the
-     * physics while the garage is open, like everything else that moves. */
-    if (!menu.open) spray.update(dt, car, surf, (x, z) => car.terrain.height(x, z));
+     * physics while the garage is open, like everything else that moves.
+     *
+     * While boating, the SAME emitter throws a modest wake instead (playtest report: "no wake
+     * at speed") — `opts.wake` switches spray.js's own formula (see that file's own note), and
+     * `groundAt` switches from the lake BED (car.terrain.height, metres below the surface) to
+     * the water's own surface height: car.y already IS that surface plus boat.js's own bob
+     * while afloat, so a wake droplet lands on the water rather than falling through it. */
+    if (!menu.open) {
+      spray.update(
+        dt, car, surf,
+        boatMode.active ? () => car.y : (x, z) => car.terrain.height(x, z),
+        boatMode.active ? { wake: true } : null
+      );
+    }
 
     /* place the model — the car, or, while boat.js has the wheel, the boat. Exactly one of
      * the two is ever visible; the other's transform is simply not touched this frame, which

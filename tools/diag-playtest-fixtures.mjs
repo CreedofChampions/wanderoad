@@ -19,6 +19,7 @@
 import { Terrain, isDryAt } from '../src/world/terrain.js';
 import { BIOME_COUNT, waterLevelAt } from '../src/world/biomes.js';
 import { gemsForTile, GEM_TILE, coinsInBox } from '../src/world/loot.js';
+import { EXIT_DEPTH, EXIT_PROBE_DIST, EXIT_STEEP_SLOPE } from '../src/game/boat.js';
 
 export function findFixture(seed = 20260726, opts = {}) {
   const R = opts.range ?? 3500;
@@ -75,6 +76,87 @@ export function findFixture(seed = 20260726, opts = {}) {
   const dz = pick.water.z - pick.road.qz;
   const L = Math.hypot(dx, dz);
 
+  /* BEACHABLE HOME for the voyage. `pick` above is chosen purely by gem proximity, with no
+   * beachability requirement — same as it always was — and the shipped seed's own banks are
+   * steep enough (rescue.js's own note: "~35°") that `pick`'s own direct road-to-water line can
+   * be one of them (measured: 24.4 degrees at (721.1, 384.6), over src/game/boat.js's own
+   * EXIT_STEEP_SLOPE bar). That never mattered until the boat could actually be driven — now
+   * that it can, tools/diag-playtest-boat.mjs's testVoyage() SAILS HOME to this same shore, and
+   * a bank boat.js now correctly refuses to land on turns "drive back to a beach" into "orbit
+   * the beach forever" (docs/BOAT-PLAN.md fix round 2).
+   *
+   * Re-picking the WHOLE fixture around beachability was tried and rejected: requiring every
+   * `cands` entry above to also pass the gentle-landing test (next paragraph) collapses the
+   * 401-candidate pool this file's own gem-pairing depends on down to 2 candidates anywhere in
+   * the scanned square, and moves `pick` itself 2.6 km from its own nearest gem — fixing
+   * testVoyage by breaking what every OTHER consumer of `pick` (testBarrier, testFoam, testLook,
+   * testPerf, and bench-boat.mjs's own independent findFixture() call for its real-Rescue check)
+   * already relies on, none of which ever try to beach a boat there. Instead: a LOCAL search
+   * around this SAME shore for the closest actually-beachable dry/wet pair, exposed as its own
+   * `beachHome` field that ONLY testVoyage() switches to. `pick`'s own `road`/`water`/
+   * `headingOut`/`shoreProfile` keep meaning exactly what they always have.
+   *
+   * The criterion is bench-boat.mjs's own `hasGentleLanding()` (its findLakesideRoad() uses it
+   * for the same reason), duplicated here rather than imported — same reasoning as this file's
+   * `coinsAlongRoute()` duplicating tools/diag-stations.mjs's own walk helpers below: these are
+   * scripts with no shared-helper module, not libraries. Walked from a WET point outward rather
+   * than from a real road inward (unlike `hasGentleLanding()`'s own callers): a direct search for
+   * "the nearest actual road with a gentle line to deep water" found nothing within 60 m of this
+   * shore at all (measured) — the road network just does not run close enough to this lake's own
+   * gentler stretches — while a plain nearby DRY point (isDryAt(), the same dryness gate `cands`
+   * itself already applies to every road point above) does not need to be. `placeCar()`/CHASE()
+   * in tools/diag-playtest-boat.mjs only ever need a dry point and a heading, never an actual
+   * road, so this is not a lesser check for the purpose it serves. */
+  const hasGentleLanding = (qx, qz, x, z) => {
+    const gdx = x - qx;
+    const gdz = z - qz;
+    const gL = Math.hypot(gdx, gdz);
+    const ux = gdx / gL;
+    const uz = gdz / gL;
+    for (let s = 0; s <= 30; s += 0.5) {
+      if (depth(qx + ux * s, qz + uz * s) < EXIT_DEPTH) continue;
+      const hereY = scan.height(qx + ux * s, qz + uz * s);
+      const aheadY = scan.height(qx + ux * (s - EXIT_PROBE_DIST), qz + uz * (s - EXIT_PROBE_DIST));
+      return (aheadY - hereY) / EXIT_PROBE_DIST <= EXIT_STEEP_SLOPE;
+    }
+    return false; // never got wet along this line inside 30 m
+  };
+  /* Two passes, cheapest-first, same discipline the `cands` scan above and src/render/ships.js's
+   * own header both document: (1) a full local grid for wet points with SOME nearby dry point
+   * and a gentle line to it (isDryAt() not yet paid for — depth() alone is cheap); (2) walk that
+   * list nearest-first and stop at the first one whose own dry point also survives isDryAt()'s
+   * heavier check (a fresh Terrain per call), so that most-expensive gate runs at most a handful
+   * of times instead of once per grid cell. Measured on the shipped seed: 147 candidates from
+   * pass 1, the very first (26.9 m from `pick.water`) clears pass 2 — this is the same shore,
+   * just a gentler stretch of it a few car-lengths along. */
+  const beachCands = [];
+  for (let bz = -400; bz <= 400; bz += 15) {
+    for (let bx = -400; bx <= 400; bx += 15) {
+      const x = pick.water.x + bx;
+      const z = pick.water.z + bz;
+      if (depth(x, z) < 2.0) continue;
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const qx = x + Math.cos(ang) * 25;
+        const qz = z + Math.sin(ang) * 25;
+        if (depth(qx, qz) > 0 || !hasGentleLanding(qx, qz, x, z)) continue;
+        beachCands.push({ x, z, qx, qz, d: Math.hypot(bx, bz) });
+      }
+    }
+  }
+  beachCands.sort((a, b) => a.d - b.d);
+  const beachHome = beachCands.find((c) => isDryAt(c.qx, c.qz, seed));
+  if (!beachHome) throw new Error('bench-boat: no beachable shore found within 400 m of the lakeside fixture');
+  const bdx = beachHome.x - beachHome.qx;
+  const bdz = beachHome.z - beachHome.qz;
+  const bL = Math.hypot(bdx, bdz);
+  const beachHomeFixture = {
+    road: { x: +beachHome.qx.toFixed(1), z: +beachHome.qz.toFixed(1) },
+    headingOut: +Math.atan2(bdx / bL, bdz / bL).toFixed(4),
+    water: { x: +beachHome.x.toFixed(1), z: +beachHome.z.toFixed(1), depth: +depth(beachHome.x, beachHome.z).toFixed(2) },
+    distFromPick: +beachHome.d.toFixed(1),
+  };
+
   /* A SECOND shore, at least 400 m away from the first, so a finding at the first one can be
    * shown to be the feature's behaviour rather than one odd bank's. */
   const far = cands.find((c) => Math.hypot(c.road.qx - pick.road.qx, c.road.qz - pick.road.qz) > 400);
@@ -127,6 +209,7 @@ export function findFixture(seed = 20260726, opts = {}) {
 
   return {
     alt,
+    beachHome: beachHomeFixture,
     dryRoad,
     deep,
     seed,

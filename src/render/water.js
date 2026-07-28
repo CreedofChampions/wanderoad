@@ -535,6 +535,14 @@ void main(){
     // Open sea only, deep water only, and the same band-limit every other ripple term uses so
     // a stroke narrower than the pixel drawing it fades rather than aliases at distance.
     float gate = calm * bandLimit(fw, vec2(0.055*2.0)) * smoothstep(0.9, 2.2, depth);
+    // Sun-facing views wash to cream (playtest report): this gate and the sun-glitter term
+    // below it both brighten hardest looking straight down the same sun-facing line of sight,
+    // and stacked the two read as a bleached patch rather than two separate effects. Same dot
+    // product the glitter block computes for its own glitterPath (recomputed here, LOCALLY,
+    // since this block runs before that one in the shader) — attenuate the foam gate along it
+    // rather than let both terms keep brightening the same pixels unchecked.
+    float foamSunPath = smoothstep(0.55, 1.0, dot(normalize(vec2(V.x,V.z)), -normalize(uSunDir.xz)));
+    gate *= (1.0 - 0.45*foamSunPath);
     float wOpac = 0.42; // overall ceiling — the body plates underneath stay legible
 
     // The Wind Waker double line: a darker under-copy of l1, offset a couple of centimetres

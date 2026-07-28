@@ -3,10 +3,13 @@
  * docs/BOAT-PLAN.md, workstream C. Two jobs, one small state machine, in this order because
  * the second only exists to protect the first:
  *
- *   1. WHILE THE BOAT IS LOCKED, deep off-road water must never be reachable at all — no
- *      wallow, no rescue-teleport at the shoreline (rescue.js used to own that; see its own
- *      "Rescue integration" note). Instead the car is cushioned to a soft stop just short of
- *      the water and told why, every time, gently.
+ *   1. WHILE THE BOAT IS LOCKED, deep off-road water must never be reachable at all — not
+ *      "damped toward it more slowly", ACTUALLY unreachable: the barrier removes the velocity
+ *      component pointing at the water every single frame, so a floored throttle cannot re-add
+ *      it, and — because the probe is AHEAD of the car and a frame can still cover real ground —
+ *      walks the car itself back out of anything deeper than a wet wheel if it ever ends up
+ *      there anyway. No wallow, no rescue-teleport at the shoreline (rescue.js used to own
+ *      that; see its own "Rescue integration" note). See _stepBarrier() below for both halves.
  *   2. ONCE UNLOCKED, driving into deep water swaps the car's own physics for a small arcade
  *      boat — cozy, slow, easy to steer — until the driver comes back to a beach.
  *
@@ -90,8 +93,41 @@ const ON_ROAD = 0.45;
  *  rescue.js is already skipping itself, so there is no gap for the old teleport to reappear
  *  in. */
 const ENTER_DEPTH = 0.6;
-/** Depth at the boat's own position below which it has grounded and hands back to the car. */
-const EXIT_DEPTH = 0.2;
+/** Depth at the boat's own position below which it has grounded and hands back to the car.
+ *  Exported alongside EXIT_PROBE_DIST/EXIT_STEEP_SLOPE below for the same reason — a fixture
+ *  search that wants "a shore this class can actually exit onto" needs all three. */
+export const EXIT_DEPTH = 0.2;
+/** Metres ahead of the boat, along its own heading, the exit check probes the raw ground —
+ *  same shape as the barrier's own AHEAD probe (BARRIER_AHEAD), just against height rather
+ *  than water depth. Exported so tools/bench-boat.mjs's own fixture search can require a
+ *  landing this class will actually let a boat use, rather than re-deriving the number. */
+export const EXIT_PROBE_DIST = 2.5;
+/** Rise over that run above which the exit is declined — "beaching nose-first onto a >~20°
+ *  bank strands the car" (playtest report). tan(20°) ≈ 0.36. */
+export const EXIT_STEEP_SLOPE = 0.36;
+/** Fraction of the boat's own speed turned into the one-shot pushback below — "bounce gently"
+ *  so the boat noses back off under its own way rather than grinding to a halt against the
+ *  slope. A MAGNITUDE, not a signed multiplier any more (fix round 2): the old code applied
+ *  this every single frame the bank stayed shallow-and-steep, which — since |EXIT_BOUNCE_MUL|
+ *  is less than 1 — is a sign-flipping geometric decay (+2 -> -0.7 -> +0.245 -> -0.086 -> ...)
+ *  that collapses to zero speed in a few frames AND, because it lived inside the branch that
+ *  skipped the throttle/steer block entirely, left the driver with no way to power off, reverse,
+ *  or turn along the bank while it did — the actual soft-lock (playtest report: "the boat
+ *  freezes at any steep shoreline nose-in, no input works"). See EXIT_BOUNCE_COOLDOWN's own
+ *  comment for the redesign: a single push, not a state the boat sits in. */
+const EXIT_BOUNCE_MUL = 0.35;
+/** m/s — floor on the one-shot pushback's own magnitude, so a boat that noses into the bank at
+ *  near-zero speed (e.g. after drifting to a stop right at the waterline) still gets kicked
+ *  clear rather than bouncing at an unmeasurably small speed and re-triggering the exit test
+ *  again next frame. */
+const EXIT_BOUNCE_MIN_SPEED = 0.8;
+/** Seconds the EXIT TEST is suspended for after a bounce — not the driver's controls, which
+ *  never stop running (see _stepActive's own header comment). Long enough that the boat has
+ *  visibly cleared the bank under the pushback (and whatever the driver commands on top of it)
+ *  before the exit test is allowed to fire again and possibly decline (and re-bounce) a second
+ *  time; short enough that a driver who immediately powers straight back at the same steep spot
+ *  gets bounced again rather than waiting out a long, unresponsive-feeling lockout. */
+const EXIT_BOUNCE_COOLDOWN = 1.0;
 /** Metres the barrier probes ahead of the car along its own velocity (or heading, nearly
  *  stopped) — "probe the surface ~2.5 m ahead of the car along its velocity." */
 const BARRIER_AHEAD = 2.5;
@@ -99,13 +135,27 @@ const BARRIER_AHEAD = 2.5;
  *  number as ENTER_DEPTH: the probe is a look-ahead, not a measurement of where the car
  *  already is, so it can afford to be a little shallower and still stop the car in time. */
 const BARRIER_DEPTH = 0.45;
-/** 1/s, exponential decay of car.vx/vz while the barrier holds — "a soft cushion, not a
- *  wall-slam." Applied AFTER car/vehicle.js's own solver has already run this frame (see
- *  main.js's wiring), so it is genuinely a cushion pushing back against the driver's own
- *  throttle, not a substitute for the solver — the same shape rescue.js's own "lifting" phase
- *  already uses on the same two fields, tuned harder here because there is no placeAt() a
- *  fraction of a second later to finish the job. */
-const BARRIER_DAMP_RATE = 14;
+/** 1/s, MILD exponential decay on whatever velocity survives the projection in _stepBarrier's
+ *  own (a) below — a cushion on top of a cushion, not the primary defence any more. Back near
+ *  docs/BOAT-PLAN.md's own original "~6/s" ask: the old value (14) was tuned specifically to
+ *  out-fight a re-added throttle component that (a) now removes outright, every frame, before
+ *  this ever runs — there is no tug-of-war left for a hard rate to have to win. */
+const BARRIER_DAMP_RATE = 6;
+/** Metres of water over the CAR ITSELF (not the ahead-probe) above which _stepBarrier's
+ *  positional clamp — (b) below — walks it back out. The same number rescue.js calls CONTACT:
+ *  the barrier's whole job is to keep a boat-locked car on the dry side of the same line
+ *  rescue.js already draws for everyone else ("your wheels are in the water", not "you are
+ *  under it"). */
+const BARRIER_CLAMP_DEPTH = 0.18;
+/** Metres per walk-back step — "in ≤0.3 m steps". Small enough that the full budget below
+ *  covers under two metres, comfortably inside the ~2 m the shipped seed's own banks take to
+ *  go from dry to knee-deep (rescue.js's own measurement) — the loop only ever has to undo one
+ *  frame's worth of penetration, not search for the shore. */
+const BARRIER_CLAMP_STEP = 0.3;
+/** Step budget for the walk-back — "max ~6 steps". Cheap (one terrain sample each) and
+ *  bounded, so a car somehow deeper than six steps can reach stops trying rather than looping
+ *  the sampler forever. */
+const BARRIER_CLAMP_MAX_STEPS = 6;
 /** Seconds between "you need a boat" toasts, so holding the throttle into the barrier says it
  *  once every few seconds rather than every frame. */
 const BARRIER_SAY_COOLDOWN = 4;
@@ -140,6 +190,9 @@ export class BoatMode {
     this._t = 0;
     /** seconds since the locked-barrier toast last said its line. */
     this._sinceSay = Infinity;
+    /** seconds remaining on the post-bounce exit-test suspension — see EXIT_BOUNCE_COOLDOWN's
+     *  own comment. Zero means the exit test runs normally. */
+    this._bounceCooldown = 0;
   }
 
   /** True while the car's own solver is stood down and this class is driving instead. */
@@ -151,6 +204,15 @@ export class BoatMode {
    *  bench that wants to know without depending on the `say` callback's own log. */
   get blockedToastPending() {
     return this._blockedToastPending;
+  }
+
+  /** True while the post-bounce exit-test suspension is running — same idea as
+   *  blockedToastPending's own getter above, one level down: a bench that wants to know the
+   *  exact frame a steep-bank decline fired its one-shot pushback, without reaching into
+   *  `_bounceCooldown` (an implementation detail of the exit test, not a public contract) or
+   *  guessing from a sudden change in `speed`. */
+  get bouncing() {
+    return this._bounceCooldown > 0;
   }
 
   /**
@@ -191,6 +253,18 @@ export class BoatMode {
    * at all, which is what "cushions to a stop at the waterline" (docs/BOAT-PLAN.md's
    * acceptance script) actually asks for. Runs every frame the boat is locked, whether or not
    * the car is anywhere near water — the probe itself is what is cheap enough to afford that.
+   *
+   * TWO DEFENCES, not one. An exponential damp on its own settles at whatever equilibrium the
+   * SOLVER's own re-added throttle and the damp's own decay agree on — nonzero, at a floored
+   * throttle, which is a slow but real creep into the lake (measured: rescue's own 0.25 m
+   * contact gate crossed in ~6 s). So (a) the velocity component pointing at the water is
+   * PROJECTED OUT every frame — removed, not decayed — before the residual damp even runs,
+   * which is what makes "the solver re-adds it next frame" a non-event instead of a
+   * tug-of-war; and (b), because the probe is ahead of the car and a single frame can still
+   * cover real ground, a positional backstop: if the car's own position is ever wetter than
+   * BARRIER_CLAMP_DEPTH anyway, it is walked back out along the same heading in real
+   * terrain-sampled steps before its velocity is zeroed. Between the two, deep water is not
+   * damped toward, it is unreachable.
    */
   _stepBarrier(dt, car) {
     if (!this.terrain) return; // no sampler handed in — nothing this class can probe with
@@ -205,9 +279,35 @@ export class BoatMode {
     if (waterDepth(probe) <= BARRIER_DEPTH || (probe ? probe.onRoad : 0) >= ON_ROAD) return;
 
     this._blockedToastPending = true;
+
+    // (a) Project OUT the velocity component pointing at the water — subtract the POSITIVE
+    // part of (vx,vz) dotted with the probe heading — rather than merely decay it, so lateral
+    // movement and backing away (a non-positive dot) are left entirely alone. A mild overall
+    // damp on whatever is left is still applied, as a cushion rather than the whole defence.
+    const toward = car.vx * hx + car.vz * hz;
+    if (toward > 0) {
+      car.vx -= toward * hx;
+      car.vz -= toward * hz;
+    }
     const k = Math.exp(-BARRIER_DAMP_RATE * dt);
     car.vx *= k;
     car.vz *= k;
+
+    // (b) Positional backstop: the probe is AHEAD of the car, so one fast frame can still
+    // carry the car's own position past BARRIER_CLAMP_DEPTH before (a) above gets a chance to
+    // act on it. Walk it back out along the same heading, in real terrain-sampled steps,
+    // rather than trust the velocity fix alone to have been enough.
+    let here = t.surface(car.x, car.z);
+    if (waterDepth(here) > BARRIER_CLAMP_DEPTH) {
+      for (let i = 0; i < BARRIER_CLAMP_MAX_STEPS && waterDepth(here) > BARRIER_CLAMP_DEPTH; i++) {
+        car.x -= hx * BARRIER_CLAMP_STEP;
+        car.z -= hz * BARRIER_CLAMP_STEP;
+        here = t.surface(car.x, car.z);
+      }
+      car.vx = 0;
+      car.vz = 0;
+    }
+
     if (this._sinceSay >= BARRIER_SAY_COOLDOWN) {
       this._sinceSay = 0;
       this.say('you need a boat to enter the water', 2.6);
@@ -223,6 +323,7 @@ export class BoatMode {
     this.speed = clamp(car.speed, -BOAT_MAX_SPEED * BOAT_REVERSE_MUL, BOAT_MAX_SPEED);
     this.yaw = car.yaw;
     this.roll = 0;
+    this._bounceCooldown = 0; // a fresh voyage starts with the exit test live, not mid-cooldown
   }
 
   /**
@@ -236,11 +337,40 @@ export class BoatMode {
     // backToRoad() reseat the car on dry land earlier in this same tick (see main.js), so
     // `surf` here already reads shallow and the boat must stand down immediately rather than
     // drive one more frame of arcade dynamics out from under a car that is no longer afloat.
-    if (waterDepth(surf) < EXIT_DEPTH) {
-      this._exit(car);
-      return;
+    //
+    // Shallow is not always beachable, though: a bow pointed nose-first at a bank steeper than
+    // EXIT_STEEP_SLOPE strands the exit below flush on ground the car solver cannot climb —
+    // "beaching nose-first onto a >~20° bank strands the car (W does nothing, only reverse
+    // works)", playtest report — because the reseat assumes a gentle beach. Probe the ground a
+    // short distance ahead, the same shape _stepBarrier's own AHEAD probe uses; too steep to
+    // land on, decline the exit.
+    //
+    // ONE-SHOT PUSHBACK, not a state the boat sits in (fix round 2 — see EXIT_BOUNCE_MUL's own
+    // comment for the bug this replaced: applying the bounce every frame is a sign-flipping
+    // decay that collapses speed to zero AND, because it lived in a branch that skipped the
+    // throttle/steer block below, froze the boat with no input working at all). A decline here
+    // is a single backward kick and a cooldown that suspends the EXIT TEST for
+    // EXIT_BOUNCE_COOLDOWN seconds — the throttle/steer/drag block below is not inside that
+    // cooldown and is never skipped, bounced or not, so the driver can always power off the
+    // bank, reverse, or turn along it on the very same frame as the bounce and every frame
+    // after.
+    if (this._bounceCooldown > 0) this._bounceCooldown = Math.max(0, this._bounceCooldown - dt);
+    if (this._bounceCooldown <= 0 && waterDepth(surf) < EXIT_DEPTH) {
+      const t = this.terrain ? this.terrain() : null;
+      if (t && this._steepAhead(car, t)) {
+        // Guaranteed minimum kick (EXIT_BOUNCE_MIN_SPEED) so a boat that drifted up to the bank
+        // at near-zero speed still gets pushed clear rather than bouncing at an unmeasurable
+        // speed and re-declining next frame.
+        this.speed = Math.min(-Math.abs(this.speed) * EXIT_BOUNCE_MUL, -EXIT_BOUNCE_MIN_SPEED);
+        this._bounceCooldown = EXIT_BOUNCE_COOLDOWN;
+      } else {
+        this._exit(car);
+        return;
+      }
     }
 
+    // Normal throttle/steer/drag dynamics — ALWAYS run, bounced-this-frame or not; see the
+    // redesign note above for why this used to be conditional and why that was the bug.
     const throttle = clamp01(input?.throttle || 0);
     const brake = clamp01(input?.brake || 0);
     let want = throttle * BOAT_ACCEL;
@@ -272,6 +402,16 @@ export class BoatMode {
     car.vz = Math.cos(this.yaw) * this.speed;
     car.speed = this.speed;
     car.yawRate = yawRate;
+  }
+
+  /** True if the raw ground EXIT_PROBE_DIST ahead of the boat, along its own heading, rises
+   *  steeper than a beachable slope — see the note at the exit check in _stepActive() above
+   *  for why this exists. Same probe shape as _stepBarrier's own ahead-probe, just against
+   *  height rather than water depth: a boat exit runs INTO the shore, so "ahead" is uphill. */
+  _steepAhead(car, t) {
+    const hereY = t.height(car.x, car.z);
+    const aheadY = t.height(car.x + Math.sin(this.yaw) * EXIT_PROBE_DIST, car.z + Math.cos(this.yaw) * EXIT_PROBE_DIST);
+    return (aheadY - hereY) / EXIT_PROBE_DIST > EXIT_STEEP_SLOPE;
   }
 
   /** Grounded: hand the wheel back to the car. */

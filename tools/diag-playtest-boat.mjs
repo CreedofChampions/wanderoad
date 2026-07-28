@@ -108,10 +108,33 @@ async function connect(tag) {
       pending.set(i, res);
       ws.send(JSON.stringify({ id: i, method, params }));
     });
+  /* GUARDED: a page-eval throw used to come straight back as a `{__error}` sentinel that
+   * nothing downstream ever checked for — a caller expecting a number or a `.samples` array
+   * got a strange object instead, and the first property/method access on it threw a TypeError
+   * three call-frames away from the actual problem (measured: this crashed the whole run about
+   * 1 in 3 boots). Most of these are the same kind of race placeCar()'s own 1500 ms wait
+   * already treats as ordinary (the page hasn't caught up with a navigate or a terrain-sampler
+   * rebuild yet), so one retry after the same beat clears almost all of them. If it is still
+   * broken after that, it is a real failure, not a race — record it as its own failed check,
+   * with the actual error text, right here at the point it happened, then throw a normal Error
+   * so the caller's own `await` rejects cleanly instead of quietly being handed an object nothing
+   * was ever written to expect. */
   const evalJs = async (expr) => {
-    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
-    if (r.result?.exceptionDetails) return { __error: r.result.exceptionDetails.text + ' ' + (r.result.exceptionDetails.exception?.description || '') };
-    return r.result?.result?.value;
+    const attempt = async () => {
+      const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+      if (r.result?.exceptionDetails) return { __error: r.result.exceptionDetails.text + ' ' + (r.result.exceptionDetails.exception?.description || '') };
+      return r.result?.result?.value;
+    };
+    let out = await attempt();
+    if (out && typeof out === 'object' && '__error' in out) {
+      await sleep(1500);
+      out = await attempt();
+    }
+    if (out && typeof out === 'object' && '__error' in out) {
+      check('page eval', false, out.__error);
+      throw new Error(out.__error);
+    }
+    return out;
   };
   const shot = async (name) => {
     const s = await send('Page.captureScreenshot', { format: 'png' });
@@ -640,7 +663,16 @@ async function testVoyage(S, FIX) {
   const pre = await state(S);
   check('?cheat unlocks the boat instantly', pre.boatUnlocked === true, `unlocked=${pre.boatUnlocked}`);
 
-  await placeCar(S, FIX.road.x, FIX.road.z, FIX.headingOut);
+  /* Launch from FIX.beachHome, not the raw FIX.road/water/headingOut: this function SAILS HOME
+   * to wherever it launches from (see the "back to the beach" section below), and FIX.road's own
+   * direct line to the water can be steeper than src/game/boat.js's own EXIT_STEEP_SLOPE bar —
+   * the game now correctly refuses to land a returning boat there (docs/BOAT-PLAN.md fix round
+   * 2). FIX.beachHome is the same shore, a few car-lengths along, verified beachable by
+   * tools/diag-playtest-fixtures.mjs's own search (see that file's own comment on the field).
+   * Nothing else in this file switches: testBarrier/testFoam/testLook/testPerf never try to
+   * beach a boat, so FIX.road keeps meaning exactly what it always has for them. */
+  const HOME = FIX.beachHome || FIX;
+  await placeCar(S, HOME.road.x, HOME.road.z, HOME.headingOut);
   await S.shot('voyage-0-at-the-road');
   await mark(S, 'launch');
   await keys(S, ['KeyW']);
@@ -763,8 +795,8 @@ async function testVoyage(S, FIX) {
   /* Aim 40 m INLAND of the launch point, not at the launch point itself: a boat told to stop
    * exactly at the waterline orbits it at its own 14 m turn radius forever (measured: 90 s,
    * closest 8.2 m, never beached). A player heading home aims at the beach, not at the edge. */
-  const inX = +(FIX.road.x - Math.sin(FIX.headingOut) * 40).toFixed(1);
-  const inZ = +(FIX.road.z - Math.cos(FIX.headingOut) * 40).toFixed(1);
+  const inX = +(HOME.road.x - Math.sin(HOME.headingOut) * 40).toFixed(1);
+  const inZ = +(HOME.road.z - Math.cos(HOME.headingOut) * 40).toFixed(1);
   note(`aiming ashore at (${inX}, ${inZ}), 40 m inland of the launch point`);
   const home = await S.evalJs(CHASE(inX, inZ, 90000, { stop: 6, untilAshore: true }));
   await sleep(1500);

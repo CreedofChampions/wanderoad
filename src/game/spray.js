@@ -60,6 +60,27 @@ const GRAV = 9.4;
  *  looking ballistic before it lands. */
 const DRAG = 1.9;
 
+/* ── the boat's own wake ──────────────────────────────────────────────────────
+ * Playtest report: "no wake at speed" once boat mode (src/game/boat.js) shipped. Reusing this
+ * emitter rather than building a second one — same grains, same physics, just a different
+ * `want` formula and a different colour, gated behind the `opts.wake` flag on update() below
+ * instead of a restructure: a boat has no wheels, no onRoad, no tyre "effort" (car.limit/slip
+ * are car/vehicle.js fields that go stale the instant boat.js takes the wheel — see that
+ * file's own header), so the off-road dust formula just above genuinely does not apply and a
+ * second, minimal formula is honester than bending the first one to fit. */
+/** m/s. Below this the wake is nothing at all — "proportional to speed above ~3 m/s". */
+const WAKE_MIN_SPEED = 3;
+/** ...and the rate is at full by here. Pitched under a car's own FULL_SPEED (15 m/s) because
+ *  the cozy arcade boat tops out at 34 km/h (9.4 m/s, BOAT_MAX_SPEED in src/game/boat.js) —
+ *  reusing FULL_SPEED here would mean the wake never actually reached full rate. */
+const WAKE_FULL_SPEED = 8.5;
+/** Grains/second at full wake — a fraction of BASE_RATE. "Keep it subtle — cozy, not jetski." */
+const WAKE_RATE = 55;
+/** A pale wake-white rather than any biome's ground colour — see the `wake` branch of update()
+ *  below. Close to the water shader's own foam/shallow family (src/render/water.js's wFoam,
+ *  wShallow) so a wake reads as disturbed water, not dust that has wandered offshore. */
+const WAKE_HEX = 0xd8ecec;
+
 /* Ground colour per biome, in the order src/world/biomes.js keeps them: meadow, steppe,
  * highlands, dunes, wetland. Read straight off the palette's own sand/dry-grass/rock chips so a
  * grain matches the ground it came from rather than being a generic beige everywhere. Blended by
@@ -128,31 +149,49 @@ export class Spray {
    * @param {object} car     the Vehicle — .x/.y/.z, .yaw, .speed, .onRoad, .limit, .slip, .wb
    * @param {object} surf    the terrain surface sample at the car (`.w` biome weights, `.onRoad`)
    * @param {(x:number,z:number)=>number} [groundAt] terrain height, so a grain lands on the
-   *        ground it came off rather than on a plane through the car
+   *        ground it came off rather than on a plane through the car. While `opts.wake` is set
+   *        the caller should hand in the WATER surface height instead (e.g. `() => car.y`,
+   *        which while boating already IS the water surface plus its own bob — see
+   *        src/game/boat.js's `_stepActive`): the real lake bed sampled through `car.terrain`
+   *        can be metres below the surface a wake droplet actually lands on.
+   * @param {{wake?: boolean}} [opts] `wake: true` while src/game/boat.js has the wheel — see
+   *        the "boat's own wake" block above this method for why that is a different formula
+   *        rather than a tweak to the off-road one below.
    */
-  update(dt, car, surf, groundAt = null) {
+  update(dt, car, surf, groundAt = null, opts = null) {
     if (!(dt > 0)) return;
+    const wake = !!(opts && opts.wake);
 
     /* ── emit ──────────────────────────────────────────────────────────────
      * `car.onRoad` is the four-wheel average (see the file header for why this and not a
      * second probe). `?? 1` means a caller that hands in a bare car with no wheel data reads as
      * fully on-road and sprays nothing, which is the safe way round. */
     const speed = Math.abs(car.speed || 0);
-    const off = 1 - clamp01(car.onRoad ?? 1);
     let want = 0;
-    if (off > 0.02 && speed > MIN_SPEED && this.count < this.max) {
-      const sp = clamp01((speed - MIN_SPEED) / (FULL_SPEED - MIN_SPEED));
-      // How hard the tyres are working: the grip budget already spent, or the sideslip, whichever
-      // says more. Both are numbers vehicle.js maintains for its own use.
-      const effort = clamp01(Math.max(car.limit || 0, Math.abs(car.slip || 0) / 0.5));
-      const yield_ = this._blendYield(surf);
-      want = BASE_RATE * sp * off * yield_ * (0.45 + 0.55 * effort) * dt;
+    if (wake) {
+      // A boat under way, not a tyre in the dirt — speed alone decides it, no off-road gate (a
+      // boat is never "on road") and no tyre effort (nothing here is a tyre).
+      if (speed > WAKE_MIN_SPEED && this.count < this.max) {
+        const sp = clamp01((speed - WAKE_MIN_SPEED) / (WAKE_FULL_SPEED - WAKE_MIN_SPEED));
+        want = WAKE_RATE * sp * dt;
+      }
+    } else {
+      const off = 1 - clamp01(car.onRoad ?? 1);
+      if (off > 0.02 && speed > MIN_SPEED && this.count < this.max) {
+        const sp = clamp01((speed - MIN_SPEED) / (FULL_SPEED - MIN_SPEED));
+        // How hard the tyres are working: the grip budget already spent, or the sideslip,
+        // whichever says more. Both are numbers vehicle.js maintains for its own use.
+        const effort = clamp01(Math.max(car.limit || 0, Math.abs(car.slip || 0) / 0.5));
+        const yield_ = this._blendYield(surf);
+        want = BASE_RATE * sp * off * yield_ * (0.45 + 0.55 * effort) * dt;
+      }
     }
     this._carry += want;
     let n = Math.floor(this._carry);
     this._carry -= n;
     if (n > 0) {
-      this._blendColour(surf);
+      if (wake) this._col.setHex(WAKE_HEX);
+      else this._blendColour(surf);
       const sy = Math.sin(car.yaw || 0);
       const cy = Math.cos(car.yaw || 0);
       // The REAR contact patches, in world space. Half a wheelbase behind the centre of mass and
