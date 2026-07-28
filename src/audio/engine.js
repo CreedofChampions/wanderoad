@@ -337,6 +337,64 @@ export class EngineAudio {
     this.pickups = (this.pickups || 0) + 1;
   }
 
+  /**
+   * A gold coin. Short, bright, TWO notes rather than pickup()'s three — a lighter touch, so
+   * the two are never confused mid-drive even though a coin is collected far more often than a
+   * fuel can. Same triangle-oscillator shape as pickup(), a faster decay (0.22 s vs 0.34 s):
+   * coins come in clusters (world/loot.js), so several of these can overlap in under a second
+   * and each one needs to be OVER before the next lands, not ring into it.
+   */
+  coin() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    for (const [f, delay, gain] of [
+      [880.0, 0, 0.07], // A5
+      [1318.51, 0.05, 0.085], // E6
+    ]) {
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t + delay);
+      g.gain.linearRampToValueAtTime(gain, t + delay + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + delay + 0.22);
+      o.connect(g).connect(this.master);
+      o.start(t + delay);
+      o.stop(t + delay + 0.26);
+    }
+    /* Diagnostics only, same idea as pickup()'s own `this.pickups` counter. */
+    this.coins = (this.coins || 0) + 1;
+  }
+
+  /**
+   * A diamond. Three notes like pickup()'s arpeggio, but sine rather than triangle and a slow
+   * 0.1 s stagger rather than a fast rise — gems are rare and only ever found by boat, so this
+   * is unhurried where pickup() and coin() are both quick, a shimmer rather than a chime.
+   */
+  gem() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    for (const [f, delay, gain] of [
+      [987.77, 0, 0.065], // B5
+      [1479.98, 0.1, 0.08], // F#6
+      [1975.53, 0.2, 0.09], // B6
+    ]) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t + delay);
+      g.gain.linearRampToValueAtTime(gain, t + delay + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + delay + 0.6);
+      o.connect(g).connect(this.master);
+      o.start(t + delay);
+      o.stop(t + delay + 0.65);
+    }
+    this.gems = (this.gems || 0) + 1;
+  }
+
   /** A soft two-note rise. Used once per streak milestone and never otherwise. */
   chime() {
     const ctx = this.ctx;

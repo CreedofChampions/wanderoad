@@ -64,6 +64,24 @@ import { BIOME_SHORT } from '../world/biomes.js';
  * over a camera move without competing with it. A string, because an inline style takes one. */
 const CINE_DIM = '0.4';
 
+/* Hysteresis for the streak caption. Operator, verbatim: "the off-road/leaving-the-road thing
+ * fuzzes back and forth every three seconds making all the text underneath unreadable." The
+ * caption used to be written straight off `s.grace`/`s.paused` every frame with no memory of
+ * what it showed last — and `s.grace` (src/game/streak.js) is `_off > 0 && _off < GRACE`, which
+ * a car riding the painted edge of the road can flip on and off every single frame as the one
+ * sample point at its centre crosses ON_ROAD back and forth. A caption with no memory repeats
+ * that flicker verbatim.
+ *
+ * The fix is a small state machine, `_setCaption()` below: a candidate state must stay the
+ * SAME candidate for CAP_CONFIRM_S straight before it is believed at all (so a state that
+ * never holds for even a third of a second — the flicker itself — never gets shown), and once
+ * a state IS shown it stays up for at least CAP_MIN_HOLD_S regardless of what happens
+ * underneath in the meantime (so even a confirmed swap cannot repeat more than once every two
+ * seconds). Exported so tools/diag-hud.mjs can hold the real numbers to the operator's own
+ * ">= 2 s" rather than a copy. */
+export const CAP_MIN_HOLD_S = 2.0;
+export const CAP_CONFIRM_S = 0.3;
+
 /** Make a div/span with an id or class and, optionally, resting text. */
 function el(tag, idOrClass, text) {
   const n = document.createElement(tag);
@@ -213,6 +231,47 @@ export class Hud {
      * best actually reached the old target — the old one was just earned. Switching cheat mode
      * also clears the target and that is not an achievement, hence the `best >=` test. */
     this._nextId = '';
+
+    /* The streak caption's hysteresis state — see CAP_MIN_HOLD_S/CAP_CONFIRM_S above.
+     * `_capKey` is whichever short key ('start'/'best'/'onroad'/'grace'/'paused') is actually
+     * on screen right now; it starts as 'start' to match this.streakCap's own resting text set
+     * a few lines up, so the very first frame never has to invent a swap just to agree with
+     * itself. `_capHold` counts down the minimum-display floor; `_capPendingKey`/`_capPendingT`
+     * track how long a NEW key has been asked for, continuously, before it is believed. */
+    this._capKey = 'start';
+    this._capHold = 0;
+    this._capPendingKey = null;
+    this._capPendingT = 0;
+  }
+
+  /** Write `text` into the caption, but only once `key` has been the SAME desired state for
+   *  CAP_CONFIRM_S straight (so a flicker that never holds that long never reaches the glass)
+   *  AND the state currently on screen has already held for CAP_MIN_HOLD_S (so even a real,
+   *  confirmed change cannot repeat faster than every two seconds). `key === this._capKey` is
+   *  the fast path every ordinary frame takes: nothing pending, just keep the hold timer
+   *  ticking down and the text as it is. */
+  _setCaption(key, text, dt) {
+    if (this._capHold > 0) this._capHold -= dt;
+    if (key === this._capKey) {
+      this._capPendingKey = null;
+      this._capPendingT = 0;
+      this.streakCap.textContent = text;
+      return;
+    }
+    if (this._capPendingKey !== key) {
+      this._capPendingKey = key;
+      this._capPendingT = 0;
+    }
+    this._capPendingT += dt;
+    if (this._capPendingT >= CAP_CONFIRM_S && this._capHold <= 0) {
+      this._capKey = key;
+      this._capHold = CAP_MIN_HOLD_S;
+      this._capPendingKey = null;
+      this._capPendingT = 0;
+      this.streakCap.textContent = text;
+    }
+    // else: the candidate has not yet earned the swap (or the current caption has not held its
+    // floor) — the text already on screen from the last confirmed key is left exactly as it is.
   }
 
   /** One short line, centred, gone in a few seconds. The only interruption in the game. */
@@ -278,7 +337,6 @@ export class Hud {
     const s = streak.state;
     const live = s.distance > 0;
     this.streakEl.classList.toggle('live', live);
-    this.streakEl.classList.toggle('grace', live && !!s.grace);
     if (live) {
       // Smooth the displayed distance so the last digit is not a blur at 300 km/h.
       this._shownKm += (s.km - this._shownKm) * Math.min(1, dt * 9);
@@ -289,21 +347,34 @@ export class Hud {
        * the streak is frozen (src/game/streak.js), so neither "without leaving the road" nor
        * "off the road…" is true — the number on screen is not moving and the caption has to be
        * the one line that explains why. A big figure that has visibly stopped counting with no
-       * explanation under it is exactly the sort of thing that reads as a bug. */
-      this.streakCap.textContent = s.paused
+       * explanation under it is exactly the sort of thing that reads as a bug.
+       *
+       * Routed through _setCaption() rather than written straight to the DOM: `s.grace` itself
+       * can flip true/false every single frame while a wheel rides the painted edge of the road
+       * (see CAP_MIN_HOLD_S/CAP_CONFIRM_S's own note above), and this is the caption the
+       * operator called out by name as the thing fuzzing unreadable. */
+      const capKey = s.paused ? 'paused' : s.grace ? 'grace' : 'onroad';
+      const capText = s.paused
         ? 'held while auto-drive has the wheel'
         : s.grace
           ? 'off the road…'
           : 'without leaving the road';
+      this._setCaption(capKey, capText, dt);
+      // The warm "off the road" colour rides the SAME debounced state as the words it sits
+      // under, not the raw frame-to-frame `s.grace` — a caption that has just decided to keep
+      // reading "without leaving the road" through a flicker must not still blush warm
+      // underneath it. Text and colour agree, or neither moves.
+      this.streakEl.classList.toggle('grace', this._capKey === 'grace');
       this.streakMul.textContent = s.multiplier > 1.02 ? `×${s.multiplier.toFixed(2)}` : '';
       this.streakPts.textContent = s.score > 5 ? fmtScore(s.score) : '';
     } else {
       this._shownKm = 0;
+      this.streakEl.classList.remove('grace');
       // At rest the figure holds the all-time best, because that is the number the fleet
       // unlocks against — the bar underneath is measured in the same units. Never blank:
       // fmtDistance(0) is "0 m", which is a true statement and, more to the point, a box.
       this.streakKm.textContent = fmtDistance(s.best);
-      this.streakCap.textContent = s.best > 0 ? 'your longest run' : 'stay on the road';
+      this._setCaption(s.best > 0 ? 'best' : 'start', s.best > 0 ? 'your longest run' : 'stay on the road', dt);
       this.streakMul.textContent = '';
       this.streakPts.textContent = '';
     }

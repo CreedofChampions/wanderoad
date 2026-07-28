@@ -227,16 +227,41 @@ export class ChaseCamera {
     const C = CAMERA[this.mode] || CAMERA.sport;
     const speed = Math.abs(car.speed);
     const sNorm = clamp01(speed / (250 / 3.6));
+    /* Moving backwards in the car's own body frame, not just `car.reverse` — a car rolling
+     * back down a slope with the pedal up is exactly as reversed, camera-wise, as one under
+     * the reverse governor. Gates BOTH terms below off. */
+    const reversing = car.speed < -0.3;
 
     /* ── where the rig wants to point ─────────────────────────────────── */
     let targetYaw = car.yaw;
-    if (C.velocityBlend > 0 && speed > 3) {
+    /* REVERSE CAMERA. "looks bad" / swings, and the reason is a genuine singularity, not a
+     * vague feel: while reversing dead straight the velocity heading (`velYaw` below) sits
+     * almost exactly 180° from `car.yaw` — the ANTIPODE of the blend's own reference angle,
+     * where `angleDelta` has no well-defined sign. A wheel of numerical noise on `car.vx`
+     * flips that ±180° result between +π and −π from one step to the next, and 62% of a
+     * sign flip on a 180° delta is a rig yaw that lurches by more than a hundred degrees in
+     * a single frame — measured directly with a scripted reverse trace
+     * (`tools/diag-camera-reverse.mjs`): dead-straight reverse held a rock-steady camera yaw
+     * of 0.000 rad for four seconds and then, the instant `Math.abs(car.speed)` crossed the
+     * blend's own 3 m/s gate, swung to 1.52 rad (87°) within two physics steps — a camera
+     * that was BEHIND the car suddenly swinging to point almost sideways at it.
+     *
+     * The fix is not a bigger deadband around the singularity — the singularity is not a
+     * narrow special case, it is where reversing STRAIGHT always sits, so any live car doing
+     * exactly what "hold S to back up" asks for would clip it. Reversing gets the plain
+     * chase pose instead: the rig points at `car.yaw`, full stop, the same "stay behind the
+     * car's own nose" rule the cruise camera already uses everywhere. Concretely this means
+     * the boom (which is placed at `car.position - forward*behind`, i.e. always physically
+     * near the TAIL, whichever way the car is travelling) simply holds its yaw and lets the
+     * car back toward it — "keep looking over the tail as it backs up" is exactly what a
+     * rig that refuses to swing produces, and it is what "stable and boring" asks for. */
+    if (C.velocityBlend > 0 && speed > 3 && !reversing) {
       const velYaw = Math.atan2(car.vx, car.vz);
       // Blend only PARTWAY. All the way and the car dislocates from the frame during a
       // slide; none of the way and the camera never looks into the corner.
       targetYaw = car.yaw + angleDelta(car.yaw, velYaw) * C.velocityBlend;
     }
-    if (C.lookIntoCorner) {
+    if (C.lookIntoCorner && !reversing) {
       const extra = clamp(C.lookIntoCorner * car.steer * car.maxSteerAngle() * 4.0, -C.lookIntoClamp, C.lookIntoClamp);
       targetYaw += extra;
     }

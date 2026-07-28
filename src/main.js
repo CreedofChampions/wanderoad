@@ -12,12 +12,12 @@
 
 import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, SRGBColorSpace } from 'three';
 import * as THREE_NS from 'three';
-import { DEG } from './core/math.js';
+import { DEG, closestHeading } from './core/math.js';
 import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
 import { Water } from './render/water.js';
-import { Ships } from './render/ships.js';
+import { Ships, buildPlayerBoat } from './render/ships.js';
 import { Birds } from './render/birds.js';
 import { Clouds } from './render/clouds.js';
 import { Flora } from './render/trees.js';
@@ -38,15 +38,20 @@ import { Autopilot } from './car/autopilot.js';
 import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak } from './game/streak.js';
+import { Wallet } from './game/wallet.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
+import { BoatMode } from './game/boat.js';
 import { Spray } from './game/spray.js';
 import { Props } from './render/props.js';
+import { Loot } from './render/loot.js';
 import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
+import { LootCounter } from './ui/lootCounter.js';
 import { Hud } from './ui/hud.js';
+import { PerfNotice, PerfMonitor, isSoftwareRenderer } from './ui/perfNotice.js';
 import { Cinematic } from './game/cinematic.js';
 import { Menu } from './ui/menu.js';
 import { MusicPanel } from './ui/musicPanel.js';
@@ -102,6 +107,21 @@ async function boot() {
     setStat('this browser has no WebGL2 — try Chrome, Edge or Firefox');
     return;
   }
+
+  /* Operator: "people without hardware acceleration lag tremendously — detect it and let
+   * them know." Two checks, one gentle dismissible notice — see src/ui/perfNotice.js for both
+   * the renderer-string sniff and the fps window, and tools/diag-perf-notice.mjs for the proof
+   * neither one is DOM-dependent. If the renderer string already names a software rasteriser
+   * there is nothing to learn from watching frame times, so `perfMonitor` is only built when
+   * that first check comes back clean. */
+  const perfNotice = new PerfNotice(document.body);
+  let perfMonitor = null;
+  if (isSoftwareRenderer(renderer.getContext())) {
+    perfNotice.show('Your browser is drawing this in software, not on the GPU — turning on hardware acceleration in your browser settings will make it much smoother.');
+  } else {
+    perfMonitor = new PerfMonitor();
+  }
+
   const pr = Math.min(devicePixelRatio || 1, 1.75);
   renderer.setPixelRatio(pr);
   renderer.setSize(innerWidth, innerHeight, false);
@@ -292,6 +312,27 @@ async function boot() {
   });
   const fuelGauge = new FuelGauge(hud.root);
 
+  /* Coins along the road, gems on open water — src/render/loot.js. `wallet`
+   * (src/game/wallet.js) tracks what has been collected and gates the boat unlock at
+   * BOAT_UNLOCK_COINS; `lootCounter` (src/ui/lootCounter.js) is fuelGauge's own pattern,
+   * docked in the one HUD corner not already claimed — see that file's own comment. */
+  const loot = new Loot({ seed: SEED, scene });
+  const wallet = new Wallet();
+  const lootCounter = new LootCounter(hud.root);
+
+  /* Boat mode — the last unlock, src/game/boat.js. `terrain` is a zero-arg forward reference
+   * to `car.terrain` for the same reason `recover`/`say`/`ping` a little further down are:
+   * main.js reassigns it every frame, so a reference captured now would go stale the moment
+   * the player left this box. The mesh itself is car/model.js's own idiom (buildCar() built
+   * once, repositioned every frame) — `ships.material` so the one extra hull shares the
+   * anchored fleet's already-compiled painted-solid program rather than paying for a second
+   * one. Built now rather than deferred to the actual unlock: a handful of triangles is not
+   * worth a lazy-init branch in the per-frame model-placement block below. */
+  const boatMode = new BoatMode({ wallet, say: (t, s) => hud.say(t, s), terrain: () => car.terrain });
+  const boatMesh = buildPlayerBoat(ships.material);
+  boatMesh.visible = false;
+  scene.add(boatMesh);
+
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
    * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
   let carKeyLive = carKey;
@@ -357,12 +398,73 @@ async function boot() {
    * in world/terrain.js). So the query result is checked with the SAME water-safe test
    * findSpawn() uses on its own candidates before it is trusted, and if it fails, this falls
    * back to findSpawn() — the one place in the game that already has to solve "find dry
-   * land" — rather than a second, independently-written search living here. */
+   * land" — rather than a second, independently-written search living here.
+   *
+   * A road runs both ways, and Math.atan2(q.tx, q.tz) only ever names ONE of the two —
+   * operator: "Reset to Road needs to check your cardinal direction... so you continue in
+   * that direction." Read car.yaw BEFORE placeAt() overwrites it, and hand both it and the
+   * raw tangent to closestHeading() (core/math.js), which keeps whichever of the tangent or
+   * its exact opposite is the shorter turn — so R nudges the car onto the road without ever
+   * spinning it around to face back the way it came. See tools/diag-reset-heading.mjs. */
+  /* edited by AI from here — DO NOT SET THEM DOWN FACING A WALL.
+   *
+   * How much road there is if you set off from (x, z) on heading `h`: walked along the
+   * centreline itself in 5 m steps, because roads bend and a straight ray leaves the tarmac
+   * on the first corner and would report every bend as a dead end. Gives up at `limit`, so
+   * the cost is at most a dozen road queries and only ever on an R press.
+   *
+   * This exists because of the interaction between two separately-correct changes. R now
+   * keeps the direction you were already driving (closestHeading, see the note above and
+   * tools/diag-reset-heading.mjs) — right, and the operator asked for it. The road network
+   * also has terminuses. Put those together and R can set you down 20 m short of a closing
+   * bar, pointing at it. Measured live, headless Chrome, the browser suite's own world
+   * (?terrain=meadow, seed 20260726): R landed the car at (504, 337) with 20 m of road ahead
+   * and 1900 m behind, and auto-drive then drove those 20 m and switched itself off saying
+   * "the road ends here" — which is what fails the suite's "G engages auto-drive and it
+   * drives" and, downstream of being parked at a terminus, "the road streak accumulates".
+   *
+   * The rule below is deliberately narrow: the heading you were driving WINS unless it has
+   * almost no road left AND the other way has meaningfully more. On open road both directions
+   * run past the horizon, both measure `LOOK`, and nothing flips — so every case
+   * diag-reset-heading.mjs traces is untouched. */
+  const RESET_LOOK = 60;
+  /** Below this much road ahead, "carry on the way you were" is pointing at a closing bar. */
+  const RESET_MIN_AHEAD = 40;
+  function roadRunFrom(t, x, z, h, limit = RESET_LOOK) {
+    let cx = x,
+      cz = z,
+      tx = Math.sin(h),
+      tz = Math.cos(h),
+      len = 0;
+    for (let i = 0; i < limit / 5; i++) {
+      const r = t.roads.query(cx + tx * 5, cz + tz * 5);
+      if (!isFinite(r.d) || r.d > 4) break; // off the end, or off onto the verge
+      let rtx = r.tx,
+        rtz = r.tz;
+      if (rtx * tx + rtz * tz < 0) {
+        rtx = -rtx;
+        rtz = -rtz;
+      } // keep going the way we set off
+      cx = r.qx;
+      cz = r.qz;
+      tx = rtx;
+      tz = rtz;
+      len += 5;
+    }
+    return len;
+  }
   function backToRoad() {
     const t = car.terrain || local;
     const q = t.roads.query(car.x, car.z);
     if (isFinite(q.d) && isDryAt(q.qx, q.qz, SEED)) {
-      car.placeAt(q.qx, q.qz, Math.atan2(q.tx, q.tz));
+      const tangentHeading = Math.atan2(q.tx, q.tz);
+      let heading = closestHeading(car.yaw, tangentHeading);
+      const ahead = roadRunFrom(t, q.qx, q.qz, heading);
+      if (ahead < RESET_MIN_AHEAD) {
+        const behind = roadRunFrom(t, q.qx, q.qz, heading + Math.PI);
+        if (behind > ahead) heading += Math.PI;
+      }
+      car.placeAt(q.qx, q.qz, heading);
     } else {
       const s = findSpawn(SEED, car.x, car.z);
       car.placeAt(s.x, s.z, s.heading);
@@ -392,7 +494,16 @@ async function boot() {
   /* The lakes have 35° banks and a flat bed you can drive along for ever, eleven metres
    * under. This notices and undoes it, using the same backToRoad() the R key does so the
    * two can never drift apart. See src/game/rescue.js for why it is depth-gated. */
-  const rescue = new Rescue({ recover: backToRoad, say: (t, s) => hud.say(t, s) });
+  /* `skip` — src/game/boat.js's own "Rescue integration" note: once the boat exists it owns
+   * the water, both while actually afloat and for the whole approach once it is unlocked, so
+   * this teleport must step aside rather than fight it. See rescue.js's own constructor
+   * comment for exactly what `inWater` means here (the SAME gates this class already computes
+   * every update(), asked once). */
+  const rescue = new Rescue({
+    recover: backToRoad,
+    say: (t, s) => hud.say(t, s),
+    skip: (inWater) => boatMode.active || (wallet.boatUnlocked && inWater),
+  });
 
   setStat('looking for company…', 0.7);
   const transport = createTransport({
@@ -435,12 +546,14 @@ async function boot() {
   });
   addEventListener('pagehide', () => {
     streak.flush();
+    wallet.flush();
     save.flush();
     transport.send({ op: 'bye', cell: cellKey(), car: carPacket() }).catch(() => {});
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       streak.flush();
+      wallet.flush();
       save.flush();
     }
   });
@@ -526,6 +639,19 @@ async function boot() {
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
 
+    /* the fps half of the lag notice — only runs until its ~10 s window closes once, then
+     * `perfMonitor` is dropped so this costs nothing for the other few thousand frames of the
+     * session. `dt` is already the frame's real seconds; 1/dt is that frame's instant rate. */
+    if (perfMonitor) {
+      perfMonitor.sample(dt, dt > 0 ? 1 / dt : 60);
+      if (perfMonitor.done) {
+        if (perfMonitor.triggered) {
+          perfNotice.show('This seems to be running slowly on your hardware — turning on hardware acceleration in your browser settings should help a lot.');
+        }
+        perfMonitor = null;
+      }
+    }
+
     /* input */
     const cmd = input.poll();
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
@@ -574,11 +700,24 @@ async function boot() {
      * already limited. It goes after the autopilot on purpose — a self-driving car runs out
      * of fuel too — and it gates rather than mutating, so the autopilot's own record of what
      * it asked for stays intact. */
-    /* `burn: !auto.on` — operator: auto-drive costs "no fuel". Only the burn is suppressed; cans,
-     * shares, the station scan and the pumps all still work while the chauffeur has the wheel.
+    /* `burn: !auto.on && !boatMode.active` — operator: auto-drive costs "no fuel"; and
+     * docs/BOAT-PLAN.md: cozy sailing is free too. Only the burn is suppressed; cans, shares,
+     * the station scan and the pumps all still work regardless of who (or what) has the wheel.
      * See game/fuel.js's update() for the whole reasoning. */
-    if (!menu.open) fuel.update(dt, car, { burn: !auto.on });
-    if (!menu.open) car.update(dt, fuel.gate(drive));
+    if (!menu.open) fuel.update(dt, car, { burn: !auto.on && !boatMode.active });
+    const gated = fuel.gate(drive);
+    /* Boat mode runs INSTEAD of the car solver while active — src/game/boat.js is a small
+     * arcade state machine, not a second physics engine, and it writes car.x/y/z/yaw/vx/vz
+     * back itself so the camera, the net packets, the HUD speed and the trail keep working
+     * without any of them knowing a boat exists. When it is NOT active, the ordinary solver
+     * runs first, exactly as before, and boat.update() only has to decide whether this is the
+     * frame to enter or whether the locked barrier needs to cushion the car — see that file's
+     * own header for the whole state machine, including why `surf` is sampled here rather
+     * than reused from a stale value. */
+    const wasBoating = boatMode.active;
+    if (!menu.open && !boatMode.active) car.update(dt, gated);
+    if (!menu.open) boatMode.update(dt, car, car.terrain.surface(car.x, car.z), gated);
+    if (!wasBoating && boatMode.active) audio.thump(0.4); // the splash — boat.js's own "Enter" note
 
     /* collisions — after the solver, before the camera, so the camera never chases a car
        that is momentarily inside a tree */
@@ -609,16 +748,34 @@ async function boot() {
      * physics while the garage is open, like everything else that moves. */
     if (!menu.open) spray.update(dt, car, surf, (x, z) => car.terrain.height(x, z));
 
-    /* place the model. car.roll and car.pitch are the whole body attitude now — the ground
-       under the four wheels, the springs, and a rollover — so nothing gets added on top of
-       them here. This line used to add 60% of a second, oppositely-signed ground sample,
-       which pitched the nose into every hill it climbed. */
-    model.group.position.set(car.x, car.y - 0.36, car.z);
-    model.group.rotation.set(0, car.yaw, 0);
-    model.setBodyRoll(car.roll, car.pitch);
-    model.setSteer(car.steerAngle || 0);
-    model.setWheelSpin(car.wheelSpin);
-    model.setBrakeGlow(car.brake);
+    /* place the model — the car, or, while boat.js has the wheel, the boat. Exactly one of
+     * the two is ever visible; the other's transform is simply not touched this frame, which
+     * is cheaper than hiding-and-showing an idle mesh and leaves it wherever it last was. */
+    if (boatMode.active) {
+      model.group.visible = false;
+      boatMesh.visible = true;
+      // car.y is already the water surface plus boat.js's own bob (see its _stepActive) — no
+      // ride-height offset here, unlike the car below: a hull's local origin sits AT the
+      // waterline (render/ships.js's addHull() comment), a car's does not.
+      boatMesh.position.set(car.x, car.y, car.z);
+      boatMesh.rotation.set(0, car.yaw, boatMode.roll);
+    } else {
+      boatMesh.visible = false;
+      model.group.visible = true;
+      /* car.roll and car.pitch are the whole body attitude now — the ground under the four
+         wheels, the springs, and a rollover — so nothing gets added on top of them here. This
+         line used to add 60% of a second, oppositely-signed ground sample, which pitched the
+         nose into every hill it climbed. */
+      /* Ride height, not rest length. car.y is the sprung body; the springs sit car.sag
+       * (~0.1 m at steady state) below their rest length under the car's own weight, and using
+       * the raw restLength here is what sank the tyres into the road by exactly that much. */
+      model.group.position.set(car.x, car.y - 0.36 + (car.sag || 0), car.z);
+      model.group.rotation.set(0, car.yaw, 0);
+      model.setBodyRoll(car.roll, car.pitch);
+      model.setSteer(car.steerAngle || 0);
+      model.setWheelSpin(car.wheelSpin);
+      model.setBrakeGlow(car.brake);
+    }
 
     /* camera — the cinematic borrows it, and only it. Any key, button, tap or stick ends the
        borrow; cine.skip() is idempotent, and the cinematic has its own DOM listeners so this
@@ -646,6 +803,28 @@ async function boot() {
     flora.update(dt, camera.position);
     props.update(dt, car.x, car.z);
     ships.update(dt, car.x, car.z);
+    /* Loot: coins along the road, gems on open water — src/render/loot.js. `boatMode.active`
+     * replaces workstream B's own `const boatActive = false` placeholder now that
+     * src/game/boat.js exists — see docs/BOAT-PLAN.md's deviations log (workstream B entry)
+     * for why that was the honest interim behaviour rather than a fake unlock. */
+    loot.update(dt, car, boatMode.active);
+    const gainedCoins = loot.drainCoins();
+    if (gainedCoins) {
+      wallet.addCoins(gainedCoins);
+      audio.coin();
+    }
+    const gainedGems = loot.drainGems();
+    if (gainedGems) {
+      wallet.addGems(gainedGems);
+      audio.gem();
+      hud.say(`a diamond! ${wallet.gems}`, 1.6);
+    }
+    const walletEvent = wallet.drain();
+    if (walletEvent && walletEvent.kind === 'boat-unlock') {
+      audio.chime();
+      hud.say('the boat is yours — drive into the water', 4);
+    }
+    wallet.update(dt);
     birds.update(dt, car.x, car.z);
     save.markVisited(car.x, car.z);
 
@@ -663,6 +842,7 @@ async function boot() {
 
     hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name });
     fuelGauge.update(dt, fuel, car);
+    lootCounter.update(dt, wallet);
     post.render(scene, camera);
     input.endFrame();
 
@@ -734,6 +914,16 @@ async function boot() {
     post,
     props,
     ships,
+    /* Same reasoning as `props`/`ships`/`spray` just above and below: the honest answer to
+     * "how much loot exists right now" is loot.stats, live counts of what the renderer
+     * actually built, not a re-derivation. */
+    loot,
+    wallet,
+    /* `boatMode`/`boatMesh` so a browser check can read `boatMode.active` and the mesh's own
+     * `.visible` directly, the same "the live renderer, not a re-derivation" reasoning as
+     * `ships`/`loot`/`spray` above and below. */
+    boatMode,
+    boatMesh,
     /* `birds` is exposed for the same reason `flora` and `ships` are: the only honest answer
      * to "are there seagulls" is a live count of the ones the renderer ACTUALLY DREW this
      * frame, which is birds.stats.drawn — not a flag, and not the number that exist. */

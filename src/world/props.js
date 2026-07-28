@@ -601,6 +601,43 @@ const STATION_AT = [0.08, 0.16, 0.24, 0.32, 0.40, 0.48, 0.56, 0.64, 0.72, 0.80, 
  *  relief pass left even alpine's MEDIAN road grade at 7.4%, above the old cap, so no amount
  *  of extra search finds a legal spot on a preset whose typical ground already exceeds it. */
 export const STATION_MAX_GRADE = 0.11;
+
+/* ── the forecourt has to stand on the ground it is drawn on ──────────────────
+ * Operator, twice: "the collisions of fuel stations are still non-existent". The hitboxes
+ * (render/props.js STATION_HITBOXES) were there the whole time and are registered on every
+ * baked tile; measured, 24.3% of them were being thrown away by collide.js's own height gate
+ * (`car.y - 0.4 > s.y + s.h`) before they could ever be tested, and at 12 of 30 sampled
+ * stations 4-6 of the 7 were gone. That gate is CORRECT — nothing invisible may be solid —
+ * and it was firing because the building really was invisible: underground.
+ *
+ * WHY. A forecourt is graded to the ROAD (`y: best.y` below, which is right — a real one is,
+ * and a forecourt that followed the ground would tilt and the pumps would lean), but it sits
+ * `e.width/2 + STATION_OFFSET` ≈ 19 m OFF the road, and nothing carves the terrain out there.
+ * Nothing checked what the ground 19 m away was doing. Measured across three seeds, 30
+ * stations: the ground under the forecourt centre missed the road height by a MEDIAN of 5.5 m
+ * and by as much as 9.4 m — stations buried in a hillside, or standing on a plinth of air over
+ * a valley. render/props.js can only lift the slab by ±1 m before the access spur becomes a
+ * cliff, so the fix has to be in the PLACEMENT: put the forecourt where the hill isn't.
+ *
+ * The lever costs nothing, because the search was already there and was spending itself on the
+ * wrong question. STATION_AT offers 11 candidate sites along the edge and each has two sides;
+ * the old code took the flattest ROAD grade of the eleven and then picked a side by a coin
+ * flip. Ranking the same 22 (site, side) pairs by the STEP between the road and the ground the
+ * forecourt would stand on instead — grade and water still hard requirements, not preferences —
+ * moves the achievable step from "≤1 m at 18% of edges" to "≤1 m at 64%, ≤2 m at 76%"
+ * (tools/bench-props.mjs re-measures this; the raw sweep is in the station section there).
+ *
+ * The cap below is then what turns "the best of 22" into a guarantee. An edge whose best
+ * pairing still steps more than this gets no station at all: better a slightly longer hunt
+ * than a petrol station you can drive through, and the floating cans (below) are the layer
+ * that exists precisely so a rarer station is not a stranding. */
+export const STATION_MAX_STEP = 3.0;
+/** How far along the road either side of the forecourt centre the step is sampled — half the
+ *  apron's own depth plus a little, so a site is rejected for a hill CROSSING the forecourt as
+ *  well as for one that merely misses its centre. Three probes, not nine: the same measurement
+ *  that chose the cap shows the centre probe alone already carries the signal, and this is
+ *  evaluated 22 times per arterial edge. */
+const STATION_STEP_PROBE = 8;
 /** Metres from the centreline to the middle of the forecourt. */
 export const STATION_OFFSET = 15.5;
 /** Within this of the pumps, stopped, and you are refuelling. */
@@ -677,6 +714,48 @@ function stationForEdge(e, seed, stats = null) {
    * keeping the flattest point that clears BOTH is what a "flattest AND dry" search actually
    * means. Grade is measured over the polyline either side, which is ~150 m for an arterial —
    * the length a forecourt and its two approaches actually need. */
+  /* WHICH SIDE OF THE ROAD, and the water test that the road point alone cannot make.
+   *
+   * A candidate's grade test above is about the ROAD. The forecourt does not sit on the road —
+   * it sits `e.width/2 + STATION_OFFSET` (~19 m) to one side with STATION_RADIUS of apron
+   * around it, so a station can pass every road-side test and still have its apron running down
+   * into a lake. Measured before this existed: 4 of 128 stations across 7 seeds had apron
+   * within the road's own 1.6 m freeboard of open water, the worst clearing it by only 0.76 m.
+   * The operator's screenshot is one of them — a forecourt at the very edge of the water.
+   *
+   * The side used to be a free coin flip; it is now part of the search (see STATION_MAX_STEP
+   * above), and the flip survives only as the tie-break order, so a station on genuinely
+   * symmetric ground still picks a side unpredictably instead of always leaning one way. */
+  const off = e.width * 0.5 + STATION_OFFSET;
+  /* Deepest water intrusion over the apron: its centre plus its rim. `water()` returns null on
+   * dry ground. Positive means the water plane is ABOVE the graded forecourt height. */
+  const apronWater = (ax, az, refY) => {
+    let worst = -Infinity;
+    for (let i = 0; i < 9; i++) {
+      const a = i ? ((i - 1) / 8) * Math.PI * 2 : 0;
+      const r = i ? STATION_RADIUS : 0;
+      const w = water(ax + Math.cos(a) * r, az + Math.sin(a) * r);
+      if (w !== null) worst = Math.max(worst, w - refY);
+    }
+    return worst;
+  };
+  /* How far the ground under the forecourt misses the height the forecourt will be BUILT at
+   * (the road's own graded height). Sampled at the centre and one apron-depth either way along
+   * the road, so a hill crossing the forecourt is caught as well as one that misses its
+   * centre. This is the number the whole station-collision bug came down to — see
+   * STATION_MAX_STEP. */
+  const apronStep = (ax, az, tx, tz, refY) => {
+    let worst = 0;
+    for (const u of [0, -STATION_STEP_PROBE, STATION_STEP_PROBE]) {
+      const d = Math.abs(land(ax + tx * u, az + tz * u) - refY);
+      if (d > worst) worst = d;
+    }
+    return worst;
+  };
+  // Same freeboard the road itself uses, so a forecourt is held to the road's own standard.
+  const FREEBOARD = -1.6;
+  const first = rnd() < 0.5 ? 1 : -1;
+
   let best = null;
   for (const f of STATION_AT) {
     atArc(e, cum, f * total, at);
@@ -695,60 +774,36 @@ function stationForEdge(e, seed, stats = null) {
       tally('rejectCauseway'); // no pumps on a causeway
       continue;
     }
-    if (!best || grade < best.grade) {
-      best = { grade, x: at.x, z: at.z, tx: at.tx, tz: at.tz, y: roadY, frac: f };
+    /* Both sides, both hard tests, and the STEP is what ranks the survivors. Ordering the two
+     * sides by the coin flip is what makes the tie-break unbiased; `<` (not `<=`) then keeps
+     * the first-tried side when the two are exactly equal. */
+    let wet = 0;
+    for (const s of [first, -first]) {
+      // Same right-hand ground normal as propsInBox and render/road.js: (tz, -tx).
+      const rx = at.tz * s;
+      const rz = -at.tx * s;
+      const ax = at.x + rx * off;
+      const az = at.z + rz * off;
+      if (apronWater(ax, az, roadY) >= FREEBOARD) {
+        wet++;
+        continue;
+      }
+      const step = apronStep(ax, az, at.tx, at.tz, roadY);
+      if (step > STATION_MAX_STEP) continue;
+      if (!best || step < best.step) {
+        best = { grade, step, x: at.x, z: at.z, tx: at.tx, tz: at.tz, y: roadY, frac: f, side: s, rx, rz };
+      }
     }
+    if (wet === 2) tally('rejectApronWater'); // both sides put this forecourt in the water
   }
   if (!best) {
     tally('edgeEmpty');
     return null;
   }
 
-  /* WHICH SIDE OF THE ROAD, and the water test that the road point alone cannot make.
-   *
-   * The candidate loop above tests water at the ROAD point. The forecourt does not sit on the
-   * road — it sits `e.width/2 + STATION_OFFSET` (~19 m) to one side with STATION_RADIUS of
-   * apron around it, so a station can pass every test above and still have its apron running
-   * down into a lake. Measured before this existed: 4 of 128 stations across 7 seeds had apron
-   * within the road's own 1.6 m freeboard of open water, the worst clearing it by only 0.76 m.
-   * The operator's screenshot is one of them — a forecourt at the very edge of the water.
-   *
-   * The side was already a free coin flip, so it costs nothing to spend it usefully: try the
-   * chosen side, and if that apron is too near the water, take the other one. Only if BOTH
-   * sides are wet is the station dropped, which keeps stations dense (they are the thing the
-   * player hunts for) while removing the ones that look wrong. */
-  const off = e.width * 0.5 + STATION_OFFSET;
-  /* Deepest water intrusion over the apron: its centre plus its rim. `water()` returns null on
-   * dry ground. Positive means the water plane is ABOVE the graded forecourt height. */
-  const apronWater = (ax, az) => {
-    let worst = -Infinity;
-    for (let i = 0; i < 9; i++) {
-      const a = i ? ((i - 1) / 8) * Math.PI * 2 : 0;
-      const r = i ? STATION_RADIUS : 0;
-      const w = water(ax + Math.cos(a) * r, az + Math.sin(a) * r);
-      if (w !== null) worst = Math.max(worst, w - best.y);
-    }
-    return worst;
-  };
-  // Same freeboard the road itself uses, so a forecourt is held to the road's own standard.
-  const FREEBOARD = -1.6;
-  const first = rnd() < 0.5 ? 1 : -1;
-  let sideSign = 0;
-  for (const s of [first, -first]) {
-    const ax = best.x + best.tz * s * off;
-    const az = best.z + -best.tx * s * off;
-    if (apronWater(ax, az) < FREEBOARD) {
-      sideSign = s;
-      break;
-    }
-  }
-  if (!sideSign) {
-    tally('rejectApronWater'); // both sides put the forecourt in the water
-    return null;
-  }
-  // Same right-hand ground normal as propsInBox and render/road.js: (tz, -tx).
-  const rx = best.tz * sideSign;
-  const rz = -best.tx * sideSign;
+  const sideSign = best.side;
+  const rx = best.rx;
+  const rz = best.rz;
   const x = best.x + rx * off;
   const z = best.z + rz * off;
   tally('placed');
@@ -776,6 +831,10 @@ function stationForEdge(e, seed, stats = null) {
     along: Math.atan2(best.tx, best.tz),
     side: sideSign,
     grade: best.grade,
+    /** Worst |ground - graded height| over the forecourt, in metres — the number
+     *  STATION_MAX_STEP caps. Kept on the record so the acceptance harness measures what the
+     *  placement actually promised rather than re-deriving it a second way. */
+    step: best.step,
     // Fraction along the edge's own arc length, [0,1) — not used by the renderer, only by a
     // route walk that needs to know WHERE in the edge the forecourt sits to add up real gaps.
     edgeFrac: best.frac,
@@ -902,13 +961,44 @@ const CAN_SLOT = 90;
  *  deliberately, because this layer exists to backstop STATION_P's rare double-digit-km
  *  droughts (see above), and it has to be dense enough to reliably catch one of those, not
  *  just common on average. See the numbers recorded next to STATION_MAX_GRADE above. */
-const CAN_SLOT_P = [0.35, 0.42];
+/* Operator: "Cans a bit too abundant — reduce by 50%." Halved, exactly, from [0.35, 0.42].
+ * The reason this is safe to halve is the change directly below it: a can you can actually
+ * reach without leaving the tarmac is worth roughly double one you cannot, so the number of
+ * cans that are USE is not halved with the count. Measured: 2.61 -> 1.30 cans per km of road
+ * (tools/bench-props.mjs prints both the density and the reachability). */
+const CAN_SLOT_P = [0.175, 0.21];
 /** Metres above the sampled ground the can's origin sits at. A fixed constant — see the
  *  file comment above for exactly what "floating" does and does not mean. */
 export const CAN_HOVER = 0.55;
-/** Stopped this close and it is collected. Bigger than a station's radius on purpose — a can
- *  is meant to be grabbed without a precise parking manoeuvre. */
-export const CAN_RADIUS = 7;
+/* ── reachable without breaking the streak ───────────────────────────────────
+ * Operator, verbatim: "Gas cans need to be accessible from the road, otherwise you have to
+ * break your streak to get a gas can. Self-defeating. ... make them a little nearer, with a
+ * giant hitbox so you can tap them easily."
+ *
+ * "Without breaking the streak" is a precise, checkable statement, so it is worth stating the
+ * arithmetic rather than picking a nice-looking number. game/streak.js breaks the streak when
+ * `surf.onRoad < ON_ROAD (0.45)` at the car's centre OR at ANY of the four wheels
+ * (car.onRoadMin). `onRoad` is roads.js's `edge = 1 - smoothstep(half - 0.4, half + 0.35, d)`,
+ * which crosses 0.45 within 5 mm of `d = half` — so the rule is simply "every wheel inside the
+ * tarmac". A wheel sits ~0.8 m off the car's centreline, so the furthest a LEGAL driving line
+ * can be from the centre of the road is `half - 0.8`, and the furthest it can be from a can at
+ * offset `o` is therefore `o - half + 0.8`.
+ *
+ * With `o = half + VERGE_CLEAR + CAN_FOOT + spread` that is `2.7 + spread` metres, independent
+ * of the road's width — 3.9 m at the far end of the spread below. CAN_RADIUS clears that with
+ * room for the driver to be on the WRONG side of the road (add up to 2*half ≈ 8.6 m more), for
+ * a can on the outside of a bend, and for one frame of travel at full speed. Nothing here
+ * moves a can onto the carriageway: VERGE_CLEAR is untouched and bench-props still measures
+ * zero cans on tarmac and a positive tightest clearance.
+ */
+/** How far past the minimum verge clearance a can may wander, in metres. Was 7, which put the
+ *  far end of the spread 9.7 m from a legal driving line — outside the old 7 m pickup, i.e.
+ *  exactly the "you have to leave the road to get it" the operator hit. */
+const CAN_VERGE_SPREAD = 1.2;
+/** Drive within this of a can and it is collected — no stopping, no parking manoeuvre, no
+ *  speed gate (render/props.js `_updateCans` is a pure distance test against the car's own
+ *  position, called every frame). "A giant hitbox", sized by the arithmetic above. */
+export const CAN_RADIUS = 14;
 /** Fraction of a full tank one can restores. */
 export const CAN_FRACTION = 0.22;
 /** Footprint radius for clearance and freeboard purposes — small; it is a jerry can. */
@@ -960,10 +1050,12 @@ export function fuelCansInBox(x0, z0, x1, z1, seed, probe, stats = null) {
       atArc(e, cum, (s + 0.15 + rnd() * 0.7) * CAN_SLOT, at);
       if (at.x < x0 - CAN_MAX_OFFSET || at.x > x1 + CAN_MAX_OFFSET) continue;
 
-      // Close to the verge and clear of the tarmac — the same floor propsInBox uses.
+      // ON the verge, and clear of the tarmac — the same floor propsInBox uses, with only
+      // CAN_VERGE_SPREAD of wander on top of it so the can stays inside the reach worked out
+      // above rather than drifting out into the field.
       const sideSign = rnd() < 0.5 ? 1 : -1;
       const minOff = half + VERGE_CLEAR + CAN_FOOT;
-      const off = minOff + rnd() * 7;
+      const off = minOff + rnd() * CAN_VERGE_SPREAD;
       const rx = at.tz * sideSign;
       const rz = -at.tx * sideSign;
       const x = at.x + rx * off;

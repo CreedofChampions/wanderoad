@@ -33,6 +33,15 @@ export function angleDelta(a, b) {
   return d;
 }
 
+/** A road runs both ways, so its tangent and its exact opposite are both valid headings to
+ *  place something facing along it. This picks whichever of the two is the shorter turn from
+ *  `current` — i.e. the one that keeps travelling the same way rather than reversing it.
+ *  Used by main.js's backToRoad() so pressing R to recover onto the road never spins the car
+ *  around to face back the way it came; see the note at that call site. */
+export function closestHeading(current, tangent) {
+  return Math.abs(angleDelta(current, tangent)) <= Math.PI / 2 ? tangent : tangent + Math.PI;
+}
+
 /** Frame-rate independent exponential approach. `rate` is the fraction closed per second. */
 export function damp(current, target, rate, dt) {
   return lerp(current, target, 1 - Math.exp(-rate * dt));

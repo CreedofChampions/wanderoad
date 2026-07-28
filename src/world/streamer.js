@@ -29,6 +29,31 @@ const SPLIT_FACTOR = 1.7;
 /** Hard cap on live meshes, so a pathological view cannot exhaust memory. */
 const MAX_LIVE = 520;
 
+/**
+ * edited by AI: rule 2 in the banner above — "a node is never removed until its replacement has
+ * actually been uploaded" — was the intent, not the code. `update()` released every node that
+ * left the want-set on the spot, while its replacements were still queued for a worker. The
+ * replacements are what the ground is made of, so between the two there was nothing there.
+ *
+ * Measured, not assumed. `tools/diag-treeblink.mjs` probes a world-anchored 40 m lattice inside
+ * 320 m of the car every 3rd frame and asks whether ANY live node covers the point: on a 4 km
+ * cruise that found **731 holes in 107 s of steady-state driving, every one of them between 221
+ * and 320 m from the car and about 0.1 s long** — the 217 m level-1 -> level-0 split boundary,
+ * firing seven times a second, ahead of the car and beside it and behind it at once. With the
+ * deferral below the same run reports **0**.
+ *
+ * A superseded node therefore keeps drawing until something else covers its ground. That can
+ * mean a coarse node and its finer replacements are both drawn for the ~0.1 s the swap takes;
+ * the depth buffer sorts them out and the LOD difference is a fraction of a metre of smoothing
+ * at 220 m. This direction fails safe — the worst case is a slightly-too-smooth patch held a few
+ * frames too long, never a hole with the sky showing through it. The two escape hatches (out of
+ * view distance, and RETIRE_MAX_MS) exist so a node whose replacement never arrives cannot be
+ * held forever.
+ */
+const RETIRE_MAX_MS = 4000;
+/** Cap on superseded nodes kept alive; oldest go first. Bounded by the view distance in practice. */
+const MAX_RETIRING = 160;
+
 export class Streamer {
   /**
    * @param {object} opts
@@ -55,10 +80,13 @@ export class Streamer {
     this.live = new Map();
     /** key -> true while a job is in flight */
     this.pending = new Map();
+    /** edited by AI: key -> rec, for nodes the want-set has dropped but whose ground nothing else
+     *  covers yet. See RETIRE_MAX_MS above. */
+    this.retiring = new Map();
     /** queued jobs, re-sorted each selection pass */
     this.queue = [];
 
-    this.stats = { built: 0, queued: 0, live: 0, workers: 0, lastMs: 0 };
+    this.stats = { built: 0, queued: 0, live: 0, retiring: 0, workers: 0, lastMs: 0 };
 
     const n = workers || Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
     this.workers = [];
@@ -138,16 +166,32 @@ export class Streamer {
     // 4 km node behind a hill.
     this.queue.sort((a, b) => a.d - b.d);
 
-    // Retire anything no longer wanted. Keep it if it still covers the camera and nothing
-    // has replaced it — that is the "never remove the ground you are standing on" rule.
+    // Retire anything no longer wanted. It is not released here: it is released by
+    // `_retirePass()` once its replacements are actually live — that is the "never remove the
+    // ground you are standing on" rule, which used to be a comment rather than a behaviour.
+    // See RETIRE_MAX_MS at the top of the file for what was measured.
     for (const [key, rec] of this.live) {
-      if (want.has(key)) continue;
-      this._release(key, rec);
+      if (want.has(key)) {
+        if (rec.retiring) {
+          rec.retiring = false;
+          this.retiring.delete(key);
+        }
+        continue;
+      }
+      if (!rec.retiring) {
+        rec.retiring = true;
+        rec.retiredAt = t0;
+        this.retiring.set(key, rec);
+      }
     }
+    if (this.retiring.size) this._retirePass(camX, camZ, t0);
 
-    // Emergency trim if something pathological happened.
+    // Emergency trim if something pathological happened. edited by AI: superseded nodes go
+    // first — a node whose ground someone else is about to cover is a far cheaper thing to drop
+    // than a node that is the only copy of its ground.
     if (this.live.size > MAX_LIVE) {
       const sorted = [...this.live.entries()].sort((a, b) => {
+        if (!!a[1].retiring !== !!b[1].retiring) return a[1].retiring ? -1 : 1;
         const da = Math.hypot(a[1].ox + a[1].size * 0.5 - camX, a[1].oz + a[1].size * 0.5 - camZ);
         const db = Math.hypot(b[1].ox + b[1].size * 0.5 - camX, b[1].oz + b[1].size * 0.5 - camZ);
         return db - da;
@@ -158,7 +202,60 @@ export class Streamer {
     this._pump();
     this.stats.queued = this.queue.length;
     this.stats.live = this.live.size;
+    this.stats.retiring = this.retiring.size; // edited by AI
     this.stats.lastMs = performance.now() - t0;
+  }
+
+  /* ── the handoff ─────────────────────────────────────────────────────────
+   * edited by AI; see RETIRE_MAX_MS at the top of the file.
+   */
+
+  /** Is every square metre of this node now carried by some OTHER live node? */
+  _replaced(rec) {
+    // The node got coarser (you drove away): its parent, or its parent's parent, took over.
+    for (let l = rec.level + 1; l <= this._maxLevel; l++) {
+      const s = 1 << (l - rec.level);
+      const up = this.live.get(`${l}:${Math.floor(rec.cx / s)},${Math.floor(rec.cz / s)}`);
+      if (up && !up.retiring) return true;
+    }
+    // Or it got finer (you drove towards it): every child, recursively, has to be there.
+    return this._covers(rec.level, rec.cx, rec.cz);
+  }
+
+  _covers(level, cx, cz) {
+    const r = this.live.get(`${level}:${cx},${cz}`);
+    if (r && !r.retiring) return true;
+    if (level === 0) return false;
+    const l = level - 1;
+    return (
+      this._covers(l, cx * 2, cz * 2) &&
+      this._covers(l, cx * 2 + 1, cz * 2) &&
+      this._covers(l, cx * 2, cz * 2 + 1) &&
+      this._covers(l, cx * 2 + 1, cz * 2 + 1)
+    );
+  }
+
+  _retirePass(camX, camZ, now) {
+    for (const [key, rec] of [...this.retiring]) {
+      // Out of the world entirely: nothing is ever coming to replace it, and nobody can see it.
+      const dx = Math.max(Math.abs(camX - (rec.ox + rec.size * 0.5)) - rec.size * 0.5, 0);
+      const dz = Math.max(Math.abs(camZ - (rec.oz + rec.size * 0.5)) - rec.size * 0.5, 0);
+      if (
+        Math.hypot(dx, dz) > this.viewDistance ||
+        now - rec.retiredAt > RETIRE_MAX_MS ||
+        this._replaced(rec)
+      ) {
+        this._release(key, rec);
+      }
+    }
+    // Insertion order is retirement order, so this drops the ones that have waited longest.
+    if (this.retiring.size > MAX_RETIRING) {
+      let over = this.retiring.size - MAX_RETIRING;
+      for (const [key, rec] of this.retiring) {
+        this._release(key, rec);
+        if (--over <= 0) break;
+      }
+    }
   }
 
   _pump() {
@@ -239,6 +336,8 @@ export class Streamer {
       maxY: c.maxY,
       heights: c.heights || null,
       water: c.water || null,
+      retiring: false, // edited by AI — see RETIRE_MAX_MS
+      retiredAt: 0,
     };
     this.live.set(key, rec);
     this.stats.built++;
@@ -253,6 +352,7 @@ export class Streamer {
     this.group.remove(rec.mesh);
     rec.mesh.geometry.dispose();
     this.live.delete(key);
+    this.retiring.delete(key); // edited by AI: every release path, not just the retire pass
   }
 
   /**

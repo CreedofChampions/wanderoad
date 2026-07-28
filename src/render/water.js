@@ -511,6 +511,42 @@ void main(){
               rib*0.10*(0.4 + 0.6*sh)*bandLimit(fw, vec2(0.155, 1.05))*nearW);
   }
 
+  // ── foam drawings (Wind Waker scribble lines) ──────────────────────────────
+  // Hand-drawn white lines slowly crawling over open, deep water — laid ON TOP of the body,
+  // reflection and flow ribbons resolved above, never replacing them. Reuses the ripple
+  // frame q rather than a fresh domain so the drawings sit still relative to the water they
+  // ride on instead of sliding independently across it.
+  {
+    vec2 fq = q * 0.055; // ~18 m features: a hand-scribble scale, coarser than the ripple bands
+    vec2 warp = vec2(pn2(fq*0.35 + 3.7), pn2(fq*0.35 + 9.2)) * 1.8;
+    // Slow drift along the local current, plus a small fixed crawl of its own — the pen's
+    // lines visibly creep even where the water beneath them barely flows at all.
+    vec2 fp = fq + warp - adv*(uTime*0.010) - vec2(uTime*0.008, uTime*0.003);
+
+    // A scribble is a set of thin lines, not a filled shape, so it is drawn at pn2's
+    // zero-crossings rather than at its peaks: two bands, the second finer and offset so the
+    // pair reads as loose hand-drawn strokes rather than one repeating contour.
+    float l1 = pn2(fp);
+    float l2 = pn2(fp*1.9 + 17.0);
+    float line1 = 1.0 - smoothstep(0.045, 0.13, abs(l1));
+    float line2 = 1.0 - smoothstep(0.040, 0.11, abs(l2));
+    float scrib = clamp(line1 + line2*0.6, 0.0, 1.0);
+
+    // Open sea only, deep water only, and the same band-limit every other ripple term uses so
+    // a stroke narrower than the pixel drawing it fades rather than aliases at distance.
+    float gate = calm * bandLimit(fw, vec2(0.055*2.0)) * smoothstep(0.9, 2.2, depth);
+    float wOpac = 0.42; // overall ceiling — the body plates underneath stay legible
+
+    // The Wind Waker double line: a darker under-copy of l1, offset a couple of centimetres
+    // in the scribble domain so it never coincides with the white stroke, drawn UNDER it at
+    // ~0.35 of the white's weight — the "ink shadow" that gives the drawing its hand-drawn feel.
+    float lShadow = pn2(fp + vec2(0.06));
+    float lineShadow = 1.0 - smoothstep(0.045, 0.13, abs(lShadow));
+    col = mix(col, mix(${C.wDeepShade}, K_SHADOW, 0.35), lineShadow*gate*wOpac*0.35);
+
+    col = mix(col, ${C.wFoam}, scrib*gate*wOpac);
+  }
+
   // ── quantised sun glitter ──────────────────────────────────────────────────
   // Hard-stepped into discrete winking glints rather than left as a specular lobe: a
   // specular lobe on stylised water reads as plastic.

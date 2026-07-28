@@ -86,7 +86,7 @@ globalThis.localStorage = {
 };
 globalThis.location = { search: '' };
 
-const { Hud, MILESTONES_KM } = await import('../src/ui/hud.js');
+const { Hud, MILESTONES_KM, CAP_MIN_HOLD_S, CAP_CONFIRM_S } = await import('../src/ui/hud.js');
 const { Streak, fmtDistance } = await import('../src/game/streak.js');
 const { FLEET, fmtUnlock } = await import('../src/game/garage.js');
 const { StreakTrail } = await import('../src/render/trail.js');
@@ -174,6 +174,111 @@ check(
   'a new run is measured against the old best, with the best marked on the track',
   fresh.markOn === true && parseFloat(fresh.mark) > 1 && parseFloat(fresh.fill) < parseFloat(fresh.mark),
   `fill ${fresh.fill}, best notch at ${fresh.mark}`
+);
+
+/* ── 1a. caption hysteresis — "fuzzes back and forth every three seconds" ──────────────────
+ * Operator, verbatim: "the off-road/leaving-the-road thing fuzzes back and forth every three
+ * seconds making all the text underneath unreadable." The caption used to be written straight
+ * off `s.grace` every single frame, and `s.grace` (src/game/streak.js) can itself flip on the
+ * exact same frame the one sample point at the car's centre crosses ON_ROAD back and forth — a
+ * car riding the painted edge of the road does this many times a second.
+ *
+ * A REAL pass count, not a claim: a fresh Hud (so its hysteresis state starts clean) is driven
+ * frame by frame against a small fake streak this file controls directly, and every actual
+ * change to the real DOM text node is recorded with the real elapsed time it happened at. */
+
+console.log('\ncaption hysteresis — a road-edge flicker must never repeat on the caption:\n');
+
+class FakeStreak {
+  constructor() {
+    this.distance = 0;
+    this.best = 0;
+    this.grace = false;
+    this.paused = false;
+  }
+  get state() {
+    return {
+      distance: this.distance,
+      km: this.distance / 1000,
+      score: 0,
+      total: 0,
+      best: this.best,
+      bestScore: 0,
+      multiplier: 1,
+      onRoad: !this.grace,
+      grace: this.grace,
+      graceLeft: 0,
+      tier: 0,
+      paused: this.paused,
+    };
+  }
+  drain() {
+    return null;
+  }
+}
+
+/** Drives `hud` for `frames` real DT ticks against `fake`, calling `mutate(i, t)` (t = seconds
+ *  elapsed so far in THIS call) before each frame's update, and returns every real change to
+ *  hud.streakCap.textContent as `{ t, text }` — t measured from the start of this call. */
+function recordCaption(hud, fake, frames, mutate) {
+  const events = [];
+  let prev = hud.streakCap.textContent;
+  let t = 0;
+  for (let i = 0; i < frames; i++) {
+    if (mutate) mutate(i, t);
+    hud.update(DT, { car, streak: fake, surface: ON });
+    t += DT;
+    const now = hud.streakCap.textContent;
+    if (now !== prev) events.push({ t, text: now });
+    prev = now;
+  }
+  return events;
+}
+
+const hud2 = new Hud();
+const fake = new FakeStreak();
+fake.distance = 500; // live from frame one
+
+let ev = recordCaption(hud2, fake, Math.round(1.0 / DT));
+check(
+  'from a standing start, settles onto the plain caption after exactly one real, confirmed swap',
+  ev.length === 1 && ev[0].text === 'without leaving the road',
+  ev.map((e) => `${e.t.toFixed(2)}s -> "${e.text}"`).join(', ') || 'no change'
+);
+
+const FLICKER_FRAMES = Math.round(3.0 / DT);
+ev = recordCaption(hud2, fake, FLICKER_FRAMES, (i) => {
+  fake.grace = i % 2 === 0; // flips every single frame — far faster than CAP_CONFIRM_S
+});
+check(
+  `${FLICKER_FRAMES} frame-by-frame flips of the underlying state over 3 real seconds produce ZERO caption changes`,
+  ev.length === 0 && hud2.streakCap.textContent === 'without leaving the road',
+  `${ev.length} change(s), still reading "${hud2.streakCap.textContent}"`
+);
+
+/* A genuine, steady departure (not oscillating) still reaches the caption — once it has really
+ * held for CAP_CONFIRM_S — and then a genuine, steady recovery is held off until the caption
+ * that IS showing has had its full CAP_MIN_HOLD_S on screen. One continuous run so both
+ * durations are measured against the same clock, off the same real Hud. */
+const SETTLE = 0.05;
+const HOLD_GRACE = 1.0;
+ev = recordCaption(hud2, fake, Math.round((SETTLE + HOLD_GRACE + CAP_MIN_HOLD_S + 1.0) / DT), (i, t) => {
+  fake.grace = t >= SETTLE && t < SETTLE + HOLD_GRACE;
+});
+console.log(
+  `   real departure at t=${SETTLE.toFixed(2)}s, real recovery at t=${(SETTLE + HOLD_GRACE).toFixed(2)}s — caption changes: ${ev
+    .map((e) => `${e.t.toFixed(2)}s -> "${e.text}"`)
+    .join(', ')}`
+);
+check(
+  'a genuine, steady departure is believed and shown — once, after CAP_CONFIRM_S, not instantly',
+  ev.length >= 1 && ev[0].text === 'off the road…' && ev[0].t >= SETTLE + CAP_CONFIRM_S - DT && ev[0].t <= SETTLE + CAP_CONFIRM_S + 0.1,
+  ev[0] ? `shown at ${ev[0].t.toFixed(3)}s (CAP_CONFIRM_S = ${CAP_CONFIRM_S}s)` : 'never shown'
+);
+check(
+  `the minimum display time (>= ${CAP_MIN_HOLD_S}s, the operator's own "2 s per state") is honoured even for the very next real change`,
+  ev.length === 2 && ev[1].text === 'without leaving the road' && ev[1].t - ev[0].t >= CAP_MIN_HOLD_S - DT,
+  ev.length === 2 ? `"off the road…" was on screen for ${(ev[1].t - ev[0].t).toFixed(3)}s before it changed again` : `${ev.length} change(s), expected 2`
 );
 
 /* ── 1b. the milestone dots ──────────────────────────────────────────────── */

@@ -20,7 +20,7 @@
 import { Vehicle } from '../src/car/vehicle.js';
 import { PHYSICS_DT } from '../src/car/tuning.js';
 import { Fuel, TANK_SECONDS, CRUISE_V, CRUISE_THROTTLE } from '../src/game/fuel.js';
-import { STATION_RADIUS, nearestStation, CAN_FRACTION } from '../src/world/props.js';
+import { STATION_RADIUS, nearestStation, CAN_FRACTION, canSpacing } from '../src/world/props.js';
 
 const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 
@@ -195,6 +195,31 @@ console.log('\n── refuelling at a real station ─────────�
     fuel2.update(DT, car2);
   }
   check(fuel2.fraction < 0.5, 'driving through a forecourt does not refuel', `${(fuel2.fraction * 100).toFixed(1)}%`, '< 50%');
+}
+
+console.log('\n── half as many cans, and still more than a tank needs ────────────────────');
+{
+  /* Operator: "Cans a bit too abundant — reduce by 50%." CAN_SLOT_P was halved in
+   * world/props.js; the question THIS file owns is whether the fuel model can still afford
+   * that, because "half as many" is only a good change if it stays impossible to be stranded
+   * between them. So it is asked in this file's own unit — seconds of cruise — rather than as
+   * a density number the props harness already checks.
+   *
+   * A tank is TANK_SECONDS at CRUISE_V, and canSpacing() reports metres of road per can over a
+   * real 18 km-square of the real network. Both are measured, neither is asserted. */
+  const tankKm = (TANK_SECONDS * CRUISE_V) / 1000;
+  for (const seed of [20260726, 7, 424242]) {
+    const cs = canSpacing(seed, 9000);
+    const perTank = (tankKm * 1000) / cs.metresPerCan;
+    console.log(`       seed ${seed}: one can every ${cs.metresPerCan.toFixed(0)} m — ${perTank.toFixed(1)} cans within one ${tankKm.toFixed(1)} km tank`);
+    /* 4 is the floor, and it is not a round number picked for comfort: RESCUE_FRACTION hands
+     * back 0.16 of a tank and CAN_FRACTION is 0.22, so a driver who misses every petrol station
+     * needs to meet cans at least a few times a tank for the can layer to be a real backstop
+     * rather than a garnish. Measured after the halving: 17-18 per tank on these three seeds,
+     * so the halving spent margin this check still shows is there — and if anyone halves it
+     * again, this is the check that says no. */
+    check(perTank > 4, `cans within one tank of driving (seed ${seed})`, perTank.toFixed(1), '> 4');
+  }
 }
 
 console.log('\n── a floating can, collected ──────────────────────────────────────────────');

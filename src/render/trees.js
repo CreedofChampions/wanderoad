@@ -730,6 +730,43 @@ const GROW_START = 0.05;
 const growEase = (t) => smoothstep(0, 1, t);
 
 /**
+ * edited by AI — THE HANDOFF. Second operator report on the same symptom: "trees keep spawning
+ * in and out of existence in my field of view rather than being there already... can't have
+ * trees spawning behind you or right next to you."
+ *
+ * The previous pass measured FIRST appearance and moved it out past 900 m, which is where it
+ * still is. It never measured the other event, which turned out to be the real one:
+ * `tools/diag-treeblink.mjs` counts a tree that is ALREADY DRAWN going away and coming back.
+ * On a 4 km cruise that happened **10 892 times in 107 s of steady-state driving — 5947 of them
+ * inside the forward 100° windshield cone, 3781 of them behind the car, the nearest at 228.8 m**.
+ *
+ * Why: `scatterChunk` is LOD-invariant. A level-3 node's tree list is byte-identical to the
+ * union of its four level-2 children's — verified over 13 895 trees across 118 parent/child
+ * pairs, zero mismatches in position, scale or species. So a tree does not belong to a chunk;
+ * it belongs to the ground, and whichever node currently covers that ground carries it. Every
+ * LOD change is therefore a remove-and-re-add of a tree that never moved, and the streamer
+ * hands those two events to `Flora` in the wrong order: `remove()` fires the moment the node
+ * leaves the want-set, `add()` only after the replacement has streamed, been scattered and got
+ * through `_drain()`'s 2.6 ms budget. The gap between them is the blink. The 217 m level-1 ->
+ * level-0 split boundary is why the nearest one lands at ~228 m, and why they happen beside and
+ * behind the car as well as in front — the quadtree splits in every direction at once.
+ *
+ * So `remove()` no longer detaches. It RETIRES: the chunk keeps drawing its trees until the
+ * nodes that replace it are scattered and ready, and then the swap happens inside one frame —
+ * never a gap, and never a doubled tree either, because the replacements are held back until
+ * the whole footprint can go over at once. A replacement that takes over occupied ground also
+ * skips the grow-in above (those trees are already full size on screen; growing them again is
+ * the blink wearing a different hat).
+ *
+ * The two escape hatches exist because a retired chunk whose replacement never arrives must not
+ * be drawn forever: past the cull ring it is invisible anyway, and RETIRE_MAX_S is a backstop
+ * for anything neither case predicts.
+ */
+const RETIRE_MAX_S = 6;
+/** Cap on retained retiring chunks, oldest dropped first. Bounded by the cull ring in practice. */
+const MAX_RETIRING = 160;
+
+/**
  * Every tree and bush in the world, as a handful of instanced draws.
  *
  * One InstancedMesh per (species, LOD). Instances are packed into a dense array per batch
@@ -771,7 +808,7 @@ export class Flora {
     /** entries waiting to be scattered, nearest-first because the streamer queues that way */
     this.pending = [];
 
-    this.stats = { chunks: 0, instances: 0, batches: 0, attached: 0, buildMs: 0, backlog: 0 };
+    this.stats = { chunks: 0, instances: 0, batches: 0, attached: 0, buildMs: 0, backlog: 0, retiring: 0 };
     this._cam = new Vector3();
     this._hasCam = false;
 
@@ -781,6 +818,9 @@ export class Flora {
      * in the browser. See GROW_SECS above. */
     this._t = 0;
     this._growing = [];
+    /* edited by AI: chunks that the streamer has released but whose ground is not yet carried by
+     * anything else. See RETIRE_MAX_S above. key -> entry. */
+    this._retiring = new Map();
 
     scene.add(this.group);
   }
@@ -801,7 +841,18 @@ export class Flora {
   add(rec, props) {
     if (rec.level > SCATTER_MAX_LEVEL) return;
     const key = `${rec.level}:${rec.cx},${rec.cz}`;
-    if (this.chunks.has(key)) return;
+    const existing = this.chunks.get(key);
+    if (existing) {
+      // edited by AI: the streamer changed its mind — this exact node is wanted again while it
+      // was still retiring (it happens on the hysteresis-free split boundary). Un-retire it
+      // rather than ignore it: its trees are on screen already and must stay there.
+      if (existing.retiring) {
+        existing.retiring = false;
+        existing.dead = false;
+        this._retiring.delete(key);
+      }
+      return;
+    }
     const entry = {
       key,
       level: rec.level,
@@ -813,22 +864,45 @@ export class Flora {
       groups: null,
       blocks: null,
       dead: false,
+      retiring: false,
+      retiredAt: 0,
     };
     this.chunks.set(key, entry);
     this.pending.push(entry);
     this.stats.chunks = this.chunks.size;
   }
 
-  /** Call from the streamer's release path. Safe to call for a chunk that never scattered. */
+  /**
+   * Call from the streamer's release path. Safe to call for a chunk that never scattered.
+   *
+   * edited by AI: a chunk whose trees are currently ON SCREEN is not dropped here — it is
+   * retired, and `_retirePass()` drops it once something else is carrying that ground. See the
+   * RETIRE_MAX_S comment above the class for the measured reason. A chunk with nothing drawn
+   * (never scattered, or already culled) still goes immediately: there is nothing to hand over.
+   */
   remove(rec) {
     const key = `${rec.level}:${rec.cx},${rec.cz}`;
     const entry = this.chunks.get(key);
     if (!entry) return;
     entry.dead = true; // the pending queue skips it rather than paying a splice
+    if (!entry.blocks) {
+      this._purge(entry);
+      return;
+    }
+    if (!entry.retiring) {
+      entry.retiring = true;
+      entry.retiredAt = this._t;
+      this._retiring.set(key, entry);
+    }
+  }
+
+  /** edited by AI: drop a chunk record for good — the old body of `remove()`. */
+  _purge(entry) {
     if (entry.blocks) this._detach(entry);
-    this.chunks.delete(key);
+    this.chunks.delete(entry.key);
+    this._retiring.delete(entry.key);
     this.stats.chunks = this.chunks.size;
-    if (this.flowers) this.flowers.remove(key);
+    if (this.flowers) this.flowers.remove(entry.key);
   }
 
   /**
@@ -842,6 +916,10 @@ export class Flora {
       this._hasCam = true;
     }
     this._drain(dt);
+    // edited by AI: after the drain, because the drain is what makes a replacement READY, and
+    // before the cull pass, so a chunk that has just been handed over is not also walked as a
+    // live one. Both halves of a handoff therefore land in the same frame — see RETIRE_MAX_S.
+    this._retirePass();
     this._cullPass();
     this._growPass();
     this._flush();
@@ -983,8 +1061,121 @@ export class Flora {
     b.cap = cap;
   }
 
-  _attach(entry) {
+  /* ── the handoff ───────────────────────────────────────────────────────────
+   * edited by AI. Three small pieces of quadtree arithmetic; see RETIRE_MAX_S above for what
+   * they are for and what was measured.
+   */
+
+  /**
+   * True while some OTHER chunk is already drawing this entry's ground, so this one must not draw
+   * it as well.
+   *
+   * It deliberately asks about every attached chunk, not just the retiring ones. The streamer now
+   * defers its own release the same way (see RETIRE_MAX_MS in world/streamer.js), which means
+   * `add()` for the four fine children arrives BEFORE `remove()` for the coarse parent — the
+   * opposite order from before. Testing only the retiring set missed exactly that window, and
+   * `tools/diag-treeblink.mjs`'s double-draw counter caught it: 4056 tree-frames with the same
+   * tree carried by two attached chunks at once. With this test it is 0.
+   *
+   * Nothing can be held forever: overlapping chunks only exist while a handoff is in flight, and
+   * the holder's own `remove()` is what releases this one (via `_retirePass`).
+   */
+  _heldByOverlap(entry) {
+    for (let l = entry.level + 1; l <= SCATTER_MAX_LEVEL; l++) {
+      const s = 1 << (l - entry.level);
+      const up = this.chunks.get(`${l}:${Math.floor(entry.cx / s)},${Math.floor(entry.cz / s)}`);
+      if (up && up !== entry && up.blocks) return true;
+    }
+    return this._anyAttachedBelow(entry.level, entry.cx, entry.cz);
+  }
+
+  _anyAttachedBelow(level, cx, cz) {
+    if (level === 0) return false;
+    const l = level - 1;
+    const x = cx * 2;
+    const z = cz * 2;
+    for (let q = 0; q < 4; q++) {
+      const dx = x + (q & 1);
+      const dz = z + (q >> 1);
+      const e = this.chunks.get(`${l}:${dx},${dz}`);
+      if (e && e.blocks) return true;
+      if (this._anyAttachedBelow(l, dx, dz)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The set of ready, non-retiring chunks that together cover this one exactly — its parent if
+   * the LOD got coarser, its children (recursively) if it got finer. Null while any part of the
+   * footprint has nothing ready to take it over, which is exactly when the old chunk has to
+   * keep drawing.
+   */
+  _replacementFor(entry) {
+    for (let l = entry.level + 1; l <= SCATTER_MAX_LEVEL; l++) {
+      const s = 1 << (l - entry.level);
+      const up = this.chunks.get(`${l}:${Math.floor(entry.cx / s)},${Math.floor(entry.cz / s)}`);
+      if (up && up.groups && !up.retiring) return [up];
+    }
+    const out = [];
+    return this._gather(entry.level, entry.cx, entry.cz, out) ? out : null;
+  }
+
+  _gather(level, cx, cz, out) {
+    const e = this.chunks.get(`${level}:${cx},${cz}`);
+    if (e && e.groups && !e.retiring) {
+      out.push(e);
+      return true;
+    }
+    if (level === 0) return false;
+    const l = level - 1;
+    return (
+      this._gather(l, cx * 2, cz * 2, out) &&
+      this._gather(l, cx * 2 + 1, cz * 2, out) &&
+      this._gather(l, cx * 2, cz * 2 + 1, out) &&
+      this._gather(l, cx * 2 + 1, cz * 2 + 1, out)
+    );
+  }
+
+  _retirePass() {
+    this.stats.retiring = this._retiring.size;
+    if (!this._retiring.size) return;
+    // Oldest first, so the age backstop and the size cap both bite on the right records.
+    for (const entry of [...this._retiring.values()]) {
+      // Past the cull ring there is nothing on screen to protect: drop it as the cull pass would.
+      if (this._hasCam && this._distance(entry) > this.cull) {
+        this._purge(entry);
+        continue;
+      }
+      const rep = this._replacementFor(entry);
+      if (rep) {
+        // Attach every replacement and drop the old one in the SAME frame — no gap, no double.
+        // `false`: this ground already has full-size trees on it, so the replacements must not
+        // grow in from seedlings.
+        for (const e of rep) if (!e.blocks) this._attach(e, false, true);
+        this._purge(entry);
+        continue;
+      }
+      if (this._t - entry.retiredAt > RETIRE_MAX_S) this._purge(entry);
+    }
+    if (this._retiring.size > MAX_RETIRING) {
+      let over = this._retiring.size - MAX_RETIRING;
+      for (const entry of this._retiring.values()) {
+        this._purge(entry);
+        if (--over <= 0) break;
+      }
+    }
+  }
+
+  /**
+   * @param {object} entry
+   * @param {boolean} [grow] edited by AI: false when this chunk is taking over ground whose trees
+   *        are already drawn at full size — see RETIRE_MAX_S above.
+   * @param {boolean} [force] edited by AI: skip the "someone else is still drawing this" guard,
+   *        because the caller is the handoff itself and is about to stop that someone.
+   */
+  _attach(entry, grow = true, force = false) {
     if (entry.blocks || !entry.groups) return;
+    if (!force && this._heldByOverlap(entry)) return;
     const blocks = [];
     for (const g of entry.groups.values()) {
       const n = g.pos.length / 4;
@@ -1000,8 +1191,12 @@ export class Flora {
       // just wrote the FULL target scale into the w component of each instance; only that is
       // knocked down here, x/y/z (the root position) are already correct and untouched, so the
       // tree grows in place rather than sliding in from somewhere.
-      for (let k = 0; k < n; k++) b.iPos[(block.start + k) * 4 + 3] = g.pos[k * 4 + 3] * GROW_START;
-      this._growing.push({ block, t0: this._t });
+      // `grow === false` skips all of it: a handoff replacement inherits ground whose trees are
+      // already standing at full size, and re-growing them would BE the pop it is fixing.
+      if (grow) {
+        for (let k = 0; k < n; k++) b.iPos[(block.start + k) * 4 + 3] = g.pos[k * 4 + 3] * GROW_START;
+        this._growing.push({ block, t0: this._t });
+      }
       b.count += n;
       b.dirty = true;
       blocks.push(block);
@@ -1039,15 +1234,19 @@ export class Flora {
     const out = this.cull;
     const back = this.cull * REATTACH;
     let attached = 0;
-    for (const entry of this.chunks.values()) {
+    for (const entry of [...this.chunks.values()]) {
       if (!entry.groups) continue;
       const d = this._distance(entry);
       if (entry.blocks) {
-        if (d > out) this._detach(entry);
-        else attached++;
+        // edited by AI: a retiring chunk that leaves the ring is not just detached, it is gone —
+        // nothing on screen is depending on it any more, so there is no handoff left to wait for.
+        if (d > out) {
+          if (entry.retiring) this._purge(entry);
+          else this._detach(entry);
+        } else attached++;
       } else if (d <= back) {
         this._attach(entry);
-        attached++;
+        if (entry.blocks) attached++;
       }
     }
     this.stats.attached = attached;
@@ -1056,7 +1255,9 @@ export class Flora {
 
   _evict() {
     const cold = [];
-    for (const entry of this.chunks.values()) if (!entry.blocks && entry.groups) cold.push(entry);
+    // edited by AI: `!entry.retiring` — a retiring record is mid-handoff and is not cold, even in
+    // the one frame between the cull pass detaching it and the retire pass dropping it.
+    for (const entry of this.chunks.values()) if (!entry.blocks && entry.groups && !entry.retiring) cold.push(entry);
     cold.sort((a, b) => this._distance(b) - this._distance(a));
     const n = Math.min(cold.length, this.chunks.size - MAX_CHUNKS);
     for (let i = 0; i < n; i++) this.chunks.delete(cold[i].key);
@@ -1130,6 +1331,7 @@ export class Flora {
     }
     this.batches.clear();
     this.chunks.clear();
+    this._retiring.clear(); // edited by AI
     this.pending.length = 0;
     if (this.group.parent) this.group.parent.remove(this.group);
   }

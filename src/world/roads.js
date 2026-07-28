@@ -304,6 +304,64 @@ function linkLive(i, j, dir, tier, seed, tag) {
 }
 
 /**
+ * How many roads are actually BUILT at node (i, j) — the same two-part test `geomsInBox` runs
+ * before it emits an edge (`linkLive` and not `isLeafLane`), applied to the node's four links.
+ * A node with a live degree of 1 is a genuine DEAD END: exactly one road reaches it and there
+ * is nothing on the far side.
+ *
+ * WHY THE RENDERER NEEDS THIS, and why it must be this function and not a second copy of the
+ * rule. The one-ply leaf cull runs on the HASH degree on purpose (see `isLeafLane`: making it
+ * water-aware compounded with the lake cull and took the network to 62% of its length), so
+ * stumps survive — `tools/diag-deadends.mjs` measures 6.1 per 16 km², two-thirds of them lanes
+ * orphaned when their neighbour drowned. Those are roads that stop for a REASON, but the
+ * player cannot see the reason, and the operator's screenshot is one of them: edge lines,
+ * centre dashes and all, running straight into the grass at the cut.
+ *
+ * So render/road.js gives every one of them a visible termination instead, and asks THIS
+ * function which ends need one. If the renderer re-derived "is this a dead end" from its own
+ * copy of the rule it would be a second opinion about the network, which is the exact class of
+ * bug this file's header spends four paragraphs on.
+ *
+ * Pure and local: four hash tests plus, at most, four cached water profiles. No box, no
+ * enumeration, so the answer is the same one metre inside a query window as one metre outside
+ * it — which is what lets a diagnostic count dead ends without a clip margin.
+ */
+export function liveDegreeAt(i, j, tier, seed, tag = fieldTag(seed)) {
+  let n = 0;
+  // east and south OF this node, and the west and north links INTO it — the same four the
+  // hash-degree `degreeAt` above counts, so the two are directly comparable.
+  const links = [
+    [i, j, 0],
+    [i, j, 1],
+    [i - 1, j, 0],
+    [i, j - 1, 1],
+  ];
+  for (const [li, lj, d] of links) {
+    if (!linkLive(li, lj, d, tier, seed, tag)) continue;
+    if (isLeafLane(li, lj, d, tier, seed)) continue;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Which of an edge's two ends stop dead — `[atStart, atEnd]`, matching the order of its own
+ * `pts` (index 0 is the (i,j) node, the last sample is the far node).
+ *
+ * `e.key` is `${tier}:${i},${j},${dir}`, the same string `edgeNodeKeys` parses; parsed here
+ * rather than carried on the edge so nothing has to be threaded through `edgeFrom` and the
+ * chunk worker's separate module graph (gotcha 2).
+ */
+export function edgeDeadEnds(e, seed, tag = fieldTag(seed)) {
+  const [tierStr, rest] = e.key.split(':');
+  const tier = Number(tierStr);
+  const [i, j, dir] = rest.split(',').map(Number);
+  const i1 = dir === 0 ? i + 1 : i;
+  const j1 = dir === 0 ? j : j + 1;
+  return [liveDegreeAt(i, j, tier, seed, tag) <= 1, liveDegreeAt(i1, j1, tier, seed, tag) <= 1];
+}
+
+/**
  * DIAGNOSTIC ONLY — nothing in the game calls this; `tools/diag-density.mjs` does.
  *
  * Two independent culls now sit between the hash and the tarmac, and they MULTIPLY: the water

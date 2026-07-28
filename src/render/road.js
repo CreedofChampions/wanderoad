@@ -30,7 +30,7 @@ import {
 } from 'three';
 import { vertHead, fragHead, GL_HASH, GL_NOISE, GL_SKY, GL_SHADOW, GL_LIGHT, glCloudField } from '../core/glsl.js';
 import { sharedUniforms } from './uniforms.js';
-import { RoadField, TIERS, findCrossings, outranks } from '../world/roads.js';
+import { RoadField, TIERS, findCrossings, outranks, edgeDeadEnds } from '../world/roads.js';
 import { Terrain, landFn, waterFn } from '../world/terrain.js';
 import { hash2i, clamp01, lerp } from '../core/math.js';
 import { RGB } from '../core/palette.js';
@@ -408,12 +408,41 @@ export function buildRibbon(edge, seed) {
 
 /** Extra lift, ON TOP OF `LIFT`, for the junction overlay. */
 const JUNCTION_LIFT = LIFT + 0.03;
-/** Subdivisions across the paved patch, so it can follow a little of the ground's own slope
- *  through a junction rather than being one dead-flat quad. */
-const JUNCTION_GRID = 4;
-/** How far the patch reaches past the OTHER road's half-width along each road's own tangent,
- *  so it always overlaps the approaching ribbons with room to spare. */
+/** Target metres between patch vertices. A junction is now as long as the crossing angle makes
+ *  it (see `SHALLOW_CAP`), so a fixed subdivision count would leave 8 m chords flying over the
+ *  carved ground on the shallow ones — the same chord-sag bug `RING_TOL` exists for on ribbons.
+ *  Sampling by DISTANCE keeps the sag where it was at 90 degrees however long the patch gets. */
+const JUNCTION_STEP = 3.2;
+/** Subdivisions per axis: never fewer than the 4 the square case always used, never more than
+ *  a 12x12 grid (169 vertices) so one shallow junction cannot cost more than a short ribbon. */
+const JUNCTION_GRID_MIN = 4;
+const JUNCTION_GRID_MAX = 12;
+/** How far the patch reaches past the OTHER road's carriageway edge, measured PERPENDICULAR to
+ *  that road (not along the tangent), so the overhang is the same 1.6 m at every angle. */
 const JUNCTION_MARGIN = 1.6;
+/**
+ * The most the patch may be stretched to chase a shallow crossing, as a multiple of its
+ * square-crossing size.
+ *
+ * TWO CARRIAGEWAYS CROSSING AT ANGLE θ OVERLAP OVER A PARALLELOGRAM, NOT A SQUARE, AND THAT IS
+ * THE WHOLE OF THIS ROUND'S WORST SCREENSHOT. The overlap runs `w_other / sin θ` along each
+ * road's own tangent: at 90 degrees that is exactly the other road's width, which is what this
+ * patch was built to cover, but at the 21-degree crossings `diag-crossing-angle.mjs` still
+ * finds in the tail it is 2.8 times longer. The patch covered the middle third of the mess and
+ * both roads' edge lines and centre dashes ran out from under it and crossed each other in the
+ * open — "all sorts of lines everywhere, total mess", verbatim.
+ *
+ * Dividing by sin θ makes the patch the overlap EXACTLY rather than approximately: a point at
+ * `v` metres along the minor tangent sits `v · sin θ` from the major's centreline, so
+ * `v = w_major / (2 sin θ)` is precisely the major's kerb. Outside the patch at most one
+ * carriageway exists, so at most one road's lines can be painted — which is the requirement.
+ *
+ * The cap is a safety ceiling, not a tuning knob: 1/sin θ runs to infinity as two roads become
+ * parallel, and `findCrossings` will report a crossing for a pair that merely graze. 3.5
+ * covers every crossing in the 12 km box (worst deviation 69.05°, θ = 20.95°, 1/sin = 2.80)
+ * with room over, and stops a grazing pair from painting a 100 m runway.
+ */
+const SHALLOW_CAP = 3.5;
 /** Metres between the patch's own edge and a give-way bar on the minor road's approach. */
 const GIVE_WAY_GAP = 1.0;
 /** Metres a give-way bar is thick, along the road — reads as a stop line from the driver's
@@ -454,6 +483,119 @@ function pushQuadUp(position, index, a, b, c, d) {
   tri(a, c, d);
 }
 
+/** Subdivisions along one patch axis of half-extent `halfExtent`, at roughly JUNCTION_STEP
+ *  metres a vertex, floored and ceiled so neither a tiny nor a very shallow junction is a
+ *  surprise in the vertex budget. */
+function gridSteps(halfExtent) {
+  const n = Math.round((halfExtent * 2) / JUNCTION_STEP);
+  return Math.max(JUNCTION_GRID_MIN, Math.min(JUNCTION_GRID_MAX, n));
+}
+
+/**
+ * Walk `dist` metres along `edge`'s own polyline from the point (x, z) on segment `k`, in the
+ * direction of increasing (`sign` = +1) or decreasing (-1) sample index. Returns the point and
+ * the UNIT TANGENT there, pointing the way we walked — or null if the road ends first, which
+ * is the honest answer for "put a marking `dist` metres up this road" when there is no road
+ * that far up it.
+ *
+ * The tangent is taken from the segment the walk finishes on, not from where it started, so a
+ * marking placed 20 m up a bending lane is square to the lane where it is painted.
+ */
+function walkEdge(edge, k, x, z, sign, dist) {
+  const pts = edge.pts;
+  const n = pts.length / 2;
+  let cx = x,
+    cz = z;
+  let left = dist;
+  for (let seg = k; seg >= 0 && seg < n - 1; seg += sign) {
+    const ax = pts[seg * 2],
+      az = pts[seg * 2 + 1];
+    const bx = pts[seg * 2 + 2],
+      bz = pts[seg * 2 + 3];
+    let tx = (bx - ax) * sign,
+      tz = (bz - az) * sign;
+    const tl = Math.hypot(tx, tz) || 1;
+    tx /= tl;
+    tz /= tl;
+    // the far end of THIS segment in the walking direction
+    const ei = sign > 0 ? seg + 1 : seg;
+    const ex = pts[ei * 2],
+      ez = pts[ei * 2 + 1];
+    const d = Math.hypot(ex - cx, ez - cz);
+    if (d >= left) return { x: cx + tx * left, z: cz + tz * left, tx, tz };
+    left -= d;
+    cx = ex;
+    cz = ez;
+  }
+  return null;
+}
+
+/**
+ * WHERE one junction's paved patch is, as a parallelogram in the ground plane — the single
+ * source of truth for the patch's footprint, used by `buildJunction` to build it and by
+ * `tools/diag-junction-cover.mjs` to test whether it actually covers the two carriageways'
+ * overlap. Two opinions about a junction's extent is exactly the shape of bug this file has
+ * paid for before, so there is one.
+ *
+ * Returns the centre, the two (non-orthogonal) axes — each road's unit tangent — and the
+ * half-extent along each, plus `sinT`/`stretch` for reporting. A point (x, z) is inside iff
+ * solving `p - centre = u·majorT·halfU + v·minorT·halfV` gives |u| <= 1 and |v| <= 1.
+ */
+export function junctionFootprint(c) {
+  const major = outranks(c.a, c.b) ? c.a : c.b;
+  const minor = major === c.a ? c.b : c.a;
+  const majorTx = major === c.a ? c.ax : c.bx;
+  const majorTz = major === c.a ? c.az : c.bz;
+  const minorTx = minor === c.a ? c.ax : c.bx;
+  const minorTz = minor === c.a ? c.az : c.bz;
+
+  /* THE CROSSING ANGLE, from the cross product of the two unit tangents `findCrossings` already
+   * returns. |a x b| IS sin θ for unit vectors, so there is no trigonometry to get wrong and —
+   * because it is an absolute value of a cross product — no handedness for gotcha 1 to bite.
+   * `stretch` is 1 at a square crossing, so a 90-degree junction's geometry is byte-identical
+   * to what shipped; everything below only moves where the crossing is genuinely shallow. */
+  const sinT = Math.abs(c.ax * c.bz - c.az * c.bx);
+  const stretch = Math.min(1 / Math.max(sinT, 1e-4), SHALLOW_CAP);
+
+  // Patch half-extent along EACH road's own tangent: the OTHER road's half-width plus a
+  // perpendicular margin, divided by sin θ. That IS the overlap parallelogram of the two
+  // carriageways (see SHALLOW_CAP) — one clean paved area at any crossing angle, with both
+  // roads' painted lines disappearing under its edge instead of crossing in the open.
+  const halfAlongMajor = (minor.width * 0.5 + JUNCTION_MARGIN) * stretch;
+  const halfAlongMinor = (major.width * 0.5 + JUNCTION_MARGIN) * stretch;
+
+  return {
+    major,
+    minor,
+    majorTx,
+    majorTz,
+    minorTx,
+    minorTz,
+    halfAlongMajor,
+    halfAlongMinor,
+    sinT,
+    stretch,
+    x: c.x,
+    z: c.z,
+  };
+}
+
+/**
+ * Is (x, z) under the paved patch of the junction whose footprint is `f`? Solves the 2x2
+ * system for the (u, v) coordinates of the parallelogram. `det` is the cross product of the
+ * two tangents, which is sin θ — never zero for a real crossing, since two parallel segments
+ * cannot cross at a point (`findCrossings` skips them explicitly).
+ */
+export function inJunctionFootprint(f, x, z) {
+  const det = f.majorTx * f.minorTz - f.majorTz * f.minorTx;
+  if (Math.abs(det) < 1e-9) return false;
+  const dx = x - f.x,
+    dz = z - f.z;
+  const a = (dx * f.minorTz - dz * f.minorTx) / det; // metres along the major tangent
+  const b = (dz * f.majorTx - dx * f.majorTz) / det; // metres along the minor tangent
+  return Math.abs(a) <= f.halfAlongMajor && Math.abs(b) <= f.halfAlongMinor;
+}
+
 /**
  * One junction's geometry: the paved patch plus give-way bars on the MINOR road's two
  * approaches (see `outranks` — the same priority rule roads.js already uses to decide who
@@ -465,19 +607,9 @@ function pushQuadUp(position, index, a, b, c, d) {
  */
 export function buildJunction(c, seed) {
   const s = seed >>> 0;
-  const major = outranks(c.a, c.b) ? c.a : c.b;
-  const minor = major === c.a ? c.b : c.a;
-  const majorTx = major === c.a ? c.ax : c.bx;
-  const majorTz = major === c.a ? c.az : c.bz;
-  const minorTx = minor === c.a ? c.ax : c.bx;
-  const minorTz = minor === c.a ? c.az : c.bz;
-
-  // Patch half-extent along EACH road's own tangent is half the OTHER road's width plus a
-  // margin — the overlap of the two carriageways for a square crossing, generous enough to
-  // stay true where squareCrossings could only partly reach 90 degrees.
-  const halfAlongMajor = minor.width * 0.5 + JUNCTION_MARGIN;
-  const halfAlongMinor = major.width * 0.5 + JUNCTION_MARGIN;
-  const reach = Math.max(halfAlongMajor, halfAlongMinor) + GIVE_WAY_GAP + GIVE_WAY_THICK + 4;
+  const f = junctionFootprint(c);
+  const { major, minor, majorTx, majorTz, minorTx, minorTz, halfAlongMajor, halfAlongMinor } = f;
+  const reach = halfAlongMajor + halfAlongMinor + GIVE_WAY_GAP + GIVE_WAY_THICK + major.width + 4;
 
   const terr = new Terrain(s, c.x - reach, c.z - reach, c.x + reach, c.z + reach, 48);
   const h = (x, z) => terr.height(x, z) + JUNCTION_LIFT;
@@ -494,13 +626,17 @@ export function buildJunction(c, seed) {
     return idx;
   };
 
-  // ── the paved patch: a small grid spanning the major tangent (u) and minor tangent (v) ──
+  // ── the paved patch: a grid spanning the major tangent (u) and minor tangent (v) ──
+  // Subdivided BY DISTANCE, not by a fixed count: a shallow junction is several times longer
+  // than a square one and a fixed count would stretch its chords over the carved ground.
+  const gridU = gridSteps(halfAlongMajor);
+  const gridV = gridSteps(halfAlongMinor);
   const grid = [];
-  for (let i = 0; i <= JUNCTION_GRID; i++) {
-    const u = (i / JUNCTION_GRID) * 2 - 1; // -1..1 along the major road
+  for (let i = 0; i <= gridU; i++) {
+    const u = (i / gridU) * 2 - 1; // -1..1 along the major road
     const row = [];
-    for (let j = 0; j <= JUNCTION_GRID; j++) {
-      const v = (j / JUNCTION_GRID) * 2 - 1; // -1..1 along the minor road
+    for (let j = 0; j <= gridV; j++) {
+      const v = (j / gridV) * 2 - 1; // -1..1 along the minor road
       const x = c.x + majorTx * u * halfAlongMajor + minorTx * v * halfAlongMinor;
       const z = c.z + majorTz * u * halfAlongMajor + minorTz * v * halfAlongMinor;
       // Away from the dead centre of either detection band, so the shader's own wear/chip
@@ -509,28 +645,38 @@ export function buildJunction(c, seed) {
     }
     grid.push(row);
   }
-  for (let i = 0; i < JUNCTION_GRID; i++) {
-    for (let j = 0; j < JUNCTION_GRID; j++) {
+  for (let i = 0; i < gridU; i++) {
+    for (let j = 0; j < gridV; j++) {
       pushQuadUp(position, index, grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]);
     }
   }
 
-  // ── give-way bars on the minor road's two approaches ──
+  /* ── give-way bars on the minor road's two approaches ──
+   *
+   * WALKED ALONG THE MINOR ROAD'S OWN POLYLINE, not extrapolated along its tangent at the
+   * crossing. That used to be the same thing to within a few centimetres because the bar sat
+   * `major.width/2 + 2.6` metres out — under 7 m. A shallow crossing now pushes the patch edge
+   * up to 3.5 times further, past 20 m on an arterial, and 20 m of straight line off a road
+   * that is bending at its own 103 m minimum radius leaves the carriageway completely: the bar
+   * would have been painted on the grass beside the road it is supposed to stop.
+   */
   const barDist = halfAlongMinor + GIVE_WAY_GAP;
-  const nx = -minorTz,
-    nz = minorTx; // a perpendicular to the minor road, in the ground plane — either sign
-  // does, since the bar is symmetric across it and pushQuadUp fixes the winding regardless.
   const half = minor.width * 0.5;
   const t = GIVE_WAY_THICK * 0.5;
+  const kMinor = minor === c.a ? c.ka : c.kb;
   for (const side of [1, -1]) {
-    const bx = c.x + minorTx * side * barDist;
-    const bz = c.z + minorTz * side * barDist;
-    const tx = minorTx * side * t,
-      tz = minorTz * side * t;
-    const p1 = pushVert(bx + nx * half - tx, bz + nz * half - tz, AC_LINE, 0);
-    const p2 = pushVert(bx - nx * half - tx, bz - nz * half - tz, AC_LINE, 0);
-    const p3 = pushVert(bx - nx * half + tx, bz - nz * half + tz, AC_LINE, 0);
-    const p4 = pushVert(bx + nx * half + tx, bz + nz * half + tz, AC_LINE, 0);
+    const at = walkEdge(minor, kMinor, c.x, c.z, side, barDist);
+    if (!at) continue; // the road ends before the bar would be — no bar rather than a floating one
+    // a perpendicular to the minor road THERE, in the ground plane — either sign does, since
+    // the bar is symmetric across it and pushQuadUp fixes the winding regardless.
+    const nx = -at.tz,
+      nz = at.tx;
+    const tx = at.tx * t,
+      tz = at.tz * t;
+    const p1 = pushVert(at.x + nx * half - tx, at.z + nz * half - tz, AC_LINE, 0);
+    const p2 = pushVert(at.x - nx * half - tx, at.z - nz * half - tz, AC_LINE, 0);
+    const p3 = pushVert(at.x - nx * half + tx, at.z - nz * half + tz, AC_LINE, 0);
+    const p4 = pushVert(at.x + nx * half + tx, at.z + nz * half + tz, AC_LINE, 0);
     pushQuadUp(position, index, p1, p2, p3, p4);
   }
 
@@ -540,6 +686,237 @@ export function buildJunction(c, seed) {
   geo.setAttribute('aCross', new BufferAttribute(new Float32Array(across), 2));
   geo.setIndex(index);
   geo.computeBoundingSphere();
+  return geo;
+}
+
+/* ── dead-end terminations ───────────────────────────────────────────────────
+ *
+ * The operator's other junction screenshot: a lane ENDING in open grass with its edge lines,
+ * its centre dashes and a give-way bar running right up to the cut. A road that stops with its
+ * markings still going is the single most artificial thing in the world, and it is the picture
+ * behind "roads end randomly here and there".
+ *
+ * The stumps themselves are not a bug that can simply be deleted. `tools/diag-deadends.mjs`
+ * measures 6.1 interior dead ends per 16 km² across five seeds and names the mechanism for
+ * each: 121 of 275 are lanes orphaned when the neighbour they continued into was culled for
+ * crossing a lake, 133 when the neighbour was culled as a leaf, 3 are hash degree 1. Chasing
+ * them to zero means cascading the culls, and `tools/diag-density.mjs` already prices that at
+ * 62% of the network's length and 52% of its junctions — the exact trade this project took
+ * once and reverted.
+ *
+ * So the road is allowed to end, and it is given a REASON TO HAVE ENDED that the player can
+ * see from the driver's seat: the carriageway opens out into a small turning head and a solid
+ * white bar closes it off. Which is what a real dead-end lane does.
+ *
+ * Built from the ribbon's own `ring` (so the head sits exactly where the tarmac does) with
+ * every vertex height from `Terrain.height()` — the same function the ribbon, the junction
+ * patch and the car's wheels read. There is no fourth opinion about the ground here either.
+ */
+
+/**
+ * Turning-head radii to try, as multiples of the road's own half-width, widest first.
+ *
+ * IT HAS TO BE A SEARCH, AND THE REASON IS `carve()`. The ground is held DEAD FLAT only inside
+ * the carriageway half-width; past that it batters towards the raw land at 1:1.6 on fill and
+ * 1:2.2 in cutting. A head at a fixed 1.55 half-widths therefore paves 55% of a half-width out
+ * onto that batter, and measured over 27 real dead ends (`tools/diag-terminus.mjs`) the worst
+ * rim sat **0.99 m** below the road it belongs to — a paved lip hanging over an embankment,
+ * which is the "large cliffs where roads meet hills" complaint in miniature, self-inflicted.
+ *
+ * So the head asks the ground how big it is allowed to be. Every vertex is still
+ * `Terrain.height()`; this only decides how far out to go before the answer stops being level.
+ * The last entry is 1.0 — no widening at all, just the round cap of flat shelf the carve
+ * already puts beyond a road's end — so the search always terminates on something that is by
+ * construction on level ground, and even then the closing bar still reads.
+ *
+ * Deterministic: the ground is a pure function of position, so two players get the same head.
+ */
+const TERMINUS_RADII = [1.55, 1.42, 1.32, 1.22, 1.14, 1.07, 1.0];
+/**
+ * How far the head's rim may fall away sideways from the road beside it before it is shrunk,
+ * in metres. See `fallAt` for what "sideways" means and why it is not measured against the
+ * road's own end height.
+ *
+ * SWEPT, over 27 real dead ends in four windows, not picked. The figure trades how big the
+ * turning head gets against how far it runs down the batter, and the batter is also where the
+ * drawn surface starts flying over the carved ground between vertices (`Terrain.height()` STEPS
+ * by up to 0.5 m where carve()'s nearest edge flips tier, and no subdivision follows a step):
+ *
+ *   drop 0.30  worst fall 0.350 m  worst chord 0.274 m  mean radius 1.48x  27/27 widened
+ *   drop 0.22  worst fall 0.237 m  worst chord 0.194 m  mean radius 1.37x  27/27
+ *   drop 0.18  worst fall 0.208 m  worst chord 0.167 m  mean radius 1.29x  25/27
+ *   drop 0.16  the shipped figure — see tools/diag-terminus.mjs for the numbers it holds
+ *   drop 0.14  worst fall 0.179 m  worst chord 0.111 m  mean radius 1.18x  21/27
+ *
+ * It cannot go to zero: the carve gives a road a crown-to-gutter camber, so the ground at the
+ * kerb is already ~0.18 m below the crown and even a head no wider than the carriageway has a
+ * fall. 0.16 keeps most heads visibly wider than the road while holding the chord near the
+ * 0.10 m of lift the overlay has, and the residual is recorded rather than hidden.
+ */
+const TERMINUS_MAX_DROP = 0.16;
+/**
+ * Sectors round the head, and target metres between its concentric rings.
+ *
+ * Both are set by MEASUREMENT, not by eye. The head crosses the knee where `carve()` stops
+ * holding the ground flat and starts battering it, and the ground turns hard there — 20 sectors
+ * with 1.1 m rings left the drawn surface flying 0.164 m above it between vertices, against the
+ * 0.10 m of lift that is all the separation this overlay has. That is the same chord-sag
+ * failure `RING_TOL` exists for on ribbons, arriving by the same route.
+ *
+ * 32 x 0.5 m does NOT take it to zero and it is worth saying so plainly: the final measurement
+ * is 0.146 m worst, on 14 of 13718 triangles. Beyond a certain point the residual stops being
+ * resolution and starts being the STEP `Terrain.height()` genuinely has where carve()'s nearest
+ * edge flips tier, which no subdivision follows — RING_DEPTH's own note records the same wall
+ * on ribbons (depth 4, 6 and 8 all leave ~0.3 m). What moved this number was shrinking the head
+ * (TERMINUS_MAX_DROP), not cutting it finer. The head is ~300 vertices either way, a tenth of
+ * one short ribbon, so the finer grid is kept for the continuous part of the miss it does fix.
+ */
+const TERMINUS_SECTORS = 32;
+const TERMINUS_RING_STEP = 0.5;
+const TERMINUS_RINGS_MAX = 12;
+/** Where the closing bar sits, as a fraction of the head's radius out from the road's last
+ *  centreline point, and how thick it is in metres. 0.62 puts it near the far edge of the head
+ *  with turning room behind it, so the head reads as somewhere to turn round rather than as a
+ *  blob of tarmac past a stop line. */
+const TERMINUS_BAR_AT = 0.62;
+const TERMINUS_BAR_THICK = 0.7;
+
+/**
+ * The paved turning head and closing bar for ONE end of one edge — `atEnd` picks which.
+ *
+ * Returns a BufferGeometry drawn with the same road material as the ribbons and the junction
+ * patches, lifted by the same `JUNCTION_LIFT` so it lies over the ribbon it overlaps without
+ * z-fighting it. Exported for tools/diag-terminus.mjs.
+ */
+export function buildTerminus(edge, ring, atEnd, seed) {
+  const s = seed >>> 0;
+  const n = ring.length;
+  if (n < 2) return null;
+  const p = atEnd ? ring[n - 1] : ring[0];
+  const q = atEnd ? ring[n - 2] : ring[1];
+  // OUTWARD along the road, away from the rest of it. Empirically signed — from the ribbon's
+  // own points, p minus q — rather than from any assumption about which way +X or +Z faces
+  // on screen (gotcha 1).
+  let tx = p.x - q.x,
+    tz = p.z - q.z;
+  const tl = Math.hypot(tx, tz) || 1;
+  tx /= tl;
+  tz /= tl;
+  const nx = -tz,
+    nz = tx; // a perpendicular; pushQuadUp fixes winding, so either sign does
+
+  const half = edge.width * 0.5;
+  /* Pad the sampler to 96 m, matching buildRibbon's. The carve blends over every road within
+   * `half + verge*2.6 + 60` = 77.8 m, so a smaller pad makes Terrain.height() a function of the
+   * box you asked it about — and this head shares its edge with a ribbon built at 96. */
+  const reach = half * TERMINUS_RADII[0] + TERMINUS_BAR_THICK + 2;
+  const terr = new Terrain(s, p.x - reach, p.z - reach, p.x + reach, p.z + reach, 96);
+
+  /* (lateral, along) offsets of sector k on a rim of radius `rad`, and the world point. The
+   * basis is (n, t) — across the road and along it — so `along` is a station on the road and
+   * `lateral` is how far out to the side, which is the split the drop test below needs. */
+  const rimAt = (rad, k) => {
+    const a = (k / TERMINUS_SECTORS) * Math.PI * 2;
+    const lat = Math.cos(a) * rad,
+      along = Math.sin(a) * rad;
+    return [p.x + nx * lat + tx * along, p.z + nz * lat + tz * along, lat, along];
+  };
+  /**
+   * How far the ground at a head vertex falls away from the ROAD BESIDE IT — measured against
+   * the ground on the centreline at the SAME station, not against the road's single end height.
+   *
+   * That distinction is the whole test. Comparing to one height folds in the road's own
+   * LONGITUDINAL GRADIENT, which on this world's steepest lanes is tens of per cent: measured,
+   * the worst "drop" read 0.62 m at a head that had already shrunk to no widening at all, and
+   * every centimetre of it was the road going downhill underneath a head that was lying
+   * perfectly on it. A head cannot fix a gradient and must not be shrunk for one. What it CAN
+   * do is stop paving out over a batter, which is a lateral fall, and that is what this
+   * isolates. The station is clamped just inside the flat cap the carve puts beyond a road's
+   * end, so the reference is itself always on level ground.
+   */
+  const fallAt = (x, z, along) => {
+    const st = Math.min(along, half * 0.9);
+    return Math.abs(terr.height(x, z) - terr.height(p.x + tx * st, p.z + tz * st));
+  };
+  let R = half * TERMINUS_RADII[TERMINUS_RADII.length - 1];
+  for (const mul of TERMINUS_RADII) {
+    const rad = half * mul;
+    let worst = 0;
+    for (let k = 0; k < TERMINUS_SECTORS; k++) {
+      const [rx, rz, , along] = rimAt(rad, k);
+      const d = fallAt(rx, rz, along);
+      if (d > worst) worst = d;
+    }
+    if (worst <= TERMINUS_MAX_DROP) {
+      R = rad;
+      break;
+    }
+  }
+  const ringCount = Math.max(2, Math.min(TERMINUS_RINGS_MAX, Math.ceil(R / TERMINUS_RING_STEP)));
+
+  const position = [];
+  const normal = [];
+  const across = [];
+  const index = [];
+  const pushVert = (x, z, ac) => {
+    const idx = position.length / 3;
+    position.push(x, terr.height(x, z) + JUNCTION_LIFT, z);
+    normal.push(0, 1, 0);
+    across.push(ac, 0);
+    return idx;
+  };
+
+  // ── the head: a fan of concentric rings about the road's last centreline point ──
+  const centre = pushVert(p.x, p.z, AC_PLAIN);
+  const rings = [];
+  for (let r = 1; r <= ringCount; r++) {
+    const rad = (r / ringCount) * R;
+    const row = [];
+    for (let k = 0; k < TERMINUS_SECTORS; k++) {
+      const [rx, rz] = rimAt(rad, k);
+      row.push(pushVert(rx, rz, AC_PLAIN));
+    }
+    rings.push(row);
+  }
+  for (let k = 0; k < TERMINUS_SECTORS; k++) {
+    const k1 = (k + 1) % TERMINUS_SECTORS;
+    // innermost ring closes on the centre vertex as triangles, not quads
+    const a = rings[0][k],
+      b = rings[0][k1];
+    const upA =
+      (position[b * 3 + 2] - position[a * 3 + 2]) * (position[centre * 3] - position[a * 3]) -
+      (position[b * 3] - position[a * 3]) * (position[centre * 3 + 2] - position[a * 3 + 2]);
+    if (upA >= 0) index.push(a, b, centre);
+    else index.push(a, centre, b);
+    for (let r = 0; r + 1 < ringCount; r++) {
+      pushQuadUp(position, index, rings[r][k], rings[r][k1], rings[r + 1][k1], rings[r + 1][k]);
+    }
+  }
+
+  /* ── the closing bar ──
+   * Chord half-width of the head at the bar's distance out, so the bar spans the head exactly
+   * and neither floats short of its edge nor hangs over it into the grass. */
+  const d = R * TERMINUS_BAR_AT;
+  const w = Math.sqrt(Math.max(R * R - d * d, 0));
+  const bx = p.x + tx * d,
+    bz = p.z + tz * d;
+  const t = TERMINUS_BAR_THICK * 0.5;
+  const b1 = pushVert(bx + nx * w - tx * t, bz + nz * w - tz * t, AC_LINE);
+  const b2 = pushVert(bx - nx * w - tx * t, bz - nz * w - tz * t, AC_LINE);
+  const b3 = pushVert(bx - nx * w + tx * t, bz - nz * w + tz * t, AC_LINE);
+  const b4 = pushVert(bx + nx * w + tx * t, bz + nz * w + tz * t, AC_LINE);
+  pushQuadUp(position, index, b1, b2, b3, b4);
+
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(new Float32Array(position), 3));
+  geo.setAttribute('normal', new BufferAttribute(new Float32Array(normal), 3));
+  geo.setAttribute('aCross', new BufferAttribute(new Float32Array(across), 2));
+  geo.setIndex(index);
+  geo.computeBoundingSphere();
+  /* The head's own frame, so tools/diag-terminus.mjs can re-run `fallAt` on the vertices this
+   * actually produced instead of reconstructing the basis and getting a sign wrong (gotcha 1).
+   * Nothing in the game reads it. */
+  geo.userData.terminus = { x: p.x, z: p.z, tx, tz, nx, nz, half, R, ringCount };
   return geo;
 }
 
@@ -681,10 +1058,28 @@ export class Roads {
       mesh.renderOrder = 1;
       this.group.add(mesh);
 
+      /* A road that stops gets a turning head and a closing bar instead of its markings
+       * running into the grass. `edgeDeadEnds` is roads.js's own live-degree rule, not a copy
+       * of it — the renderer must not have a second opinion about which roads exist, which is
+       * why that function lives in roads.js and is imported here. A road leaving the drawing
+       * window is NOT a dead end and does not get one: the rule is box-independent. */
+      const rec = { mesh, instanced: [], terminals: [] };
+      const dead = edgeDeadEnds(e, this.seed);
+      for (let end = 0; end < 2; end++) {
+        if (!dead[end]) continue;
+        const tgeo = buildTerminus(e, ring, end === 1, ctx);
+        if (!tgeo) continue;
+        const tm = new Mesh(tgeo, this.material);
+        tm.frustumCulled = true;
+        tm.matrixAutoUpdate = false;
+        tm.renderOrder = 2; // over the ribbon, like a junction patch, for the same reason
+        this.group.add(tm);
+        rec.terminals.push(tm);
+      }
+
       const items = furnitureFor(e, ring, half, this.seed);
       const posts = items.filter((i) => i.kind === 'post');
       const chevs = items.filter((i) => i.kind === 'chevron');
-      const rec = { mesh, instanced: [] };
       for (const [geo, list] of [
         [this.furniture.post, posts],
         [this.furniture.chevron, chevs],
@@ -716,6 +1111,10 @@ export class Roads {
       for (const im of rec.instanced) {
         this.group.remove(im);
         im.dispose();
+      }
+      for (const tm of rec.terminals) {
+        this.group.remove(tm);
+        tm.geometry.dispose();
       }
       this.live.delete(key);
     }
@@ -759,6 +1158,7 @@ export class Roads {
     for (const [k, rec] of this.live) {
       rec.mesh.geometry.dispose();
       for (const im of rec.instanced) im.dispose();
+      for (const tm of rec.terminals) tm.geometry.dispose();
       this.live.delete(k);
     }
     for (const [k, rec] of this.junctions) {

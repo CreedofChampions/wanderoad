@@ -983,3 +983,70 @@ canvas {
   border: 1px solid rgba(44, 61, 49, 0.22);
   border-bottom-width: 2px;
 }
+
+/* ── the hardware-acceleration notice ────────────────────────────────────
+ * src/ui/perfNotice.js. ONE gentle line, ever — a software renderer or a laggy first ~10 s
+ * gets told once, dismissibly, and never again. It lives at the very top edge, full width: the
+ * one strip nothing else on this HUD claims (see the music-window comment above for the map of
+ * every corner — speedo bottom-right, place bottom-left, streak bottom-centre, players
+ * top-right, toast/openMenu top-centre, unlock bar the full bottom edge, music tab and game
+ * title sharing top-/bottom-left). A full-width strip also reads as a system notice rather than
+ * another instrument competing for a corner, which is the right register for "your browser,"
+ * not "your drive".
+ *
+ * `pointer-events: none` on the resting strip so it can never eat a click over the game before
+ * it has actually lifted into view; `.show` is the only state that turns pointer-events back on,
+ * matching the opacity/transform transition so a hit-test can never land ahead of the pixels.
+ * z-index 25: above the HUD (20) and the music window (21), so it is never hidden behind either,
+ * but below the veil (40) and the garage (60) so it never flashes over the loading card or fights
+ * the one surface you're meant to look AT. */
+#perfNotice {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 25;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  padding: 0.6rem 1.1rem;
+  background: rgba(20, 26, 38, 0.85);
+  color: var(--cream);
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  text-align: center;
+  line-height: 1.4;
+  opacity: 0;
+  transform: translateY(-100%);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+  pointer-events: none;
+}
+#perfNotice.show {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+#perfNotice button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  color: var(--cream);
+  background: rgba(246, 236, 216, 0.14);
+  border: 1px solid rgba(246, 236, 216, 0.32);
+  border-radius: 999px;
+  padding: 0.24rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+#perfNotice button:hover {
+  background: rgba(246, 236, 216, 0.26);
+}
+@media (max-width: 640px) {
+  #perfNotice {
+    font-size: 0.72rem;
+    padding: 0.5rem 0.8rem;
+  }
+}

@@ -75,8 +75,9 @@ import { C, BIOME_TINT } from '../core/palette.js';
 import { U, sharedUniforms } from './uniforms.js';
 import { GL_WIND, windUniforms } from './wind.js';
 import { Terrain } from '../world/terrain.js';
-import { BIOME, BIOME_COUNT, BIOME_SCATTER } from '../world/biomes.js';
+import { BIOME, BIOME_COUNT, BIOME_SCATTER, waterLevelAt } from '../world/biomes.js';
 import { canopyShade } from '../world/scatter.js';
+import { stationsInBox, STATION_RADIUS } from '../world/props.js';
 import { clamp, clamp01, hash3i, rng, smoothstep } from '../core/math.js';
 
 /* ── the density law ─────────────────────────────────────────────────────────
@@ -139,6 +140,37 @@ const SLOPE_N1 = 0.85;
  * as scorched earth. */
 const CANOPY_THIN = 0.45;
 
+/* Operator report: "grass still tips in on the edge of the road — keep grass at a distance
+ * from the road, 1 foot." The lattice below already zeroes blade DENSITY on the carriageway
+ * via `T.roads.carve(x,z).edge` (W2 passes 118/118 on the centreline), but that mask is
+ * roads.js's own shoulder fade — full suppression only up to `half-0.4`, faded out entirely by
+ * `half+0.35`, a ~0.75 m band straddling the physical tarmac edge (see `carve()`'s `edgeHere`
+ * in world/roads.js). A blade BASE rooted right where that fade is already partway back can
+ * still lean its TIP over the white line under wind. Never widened in roads.js itself — that
+ * function also drives the terrain carve and the drawn ribbon, which must stay on ONE shared
+ * elevation profile (gotcha 6) — so it is re-derived here, in grass.js only, from the distance
+ * (`d`) and blended width (`width`) `carve()` already hands back: the identical `edgeHere`
+ * shape, with its whole fade window pushed this many extra metres out from the centreline. */
+const ROAD_GRASS_MARGIN = 0.4;
+
+/* Operator report: "there's grass in the water." The lattice never compared a blade's base
+ * against the local water plane at all — a stub that silently omits `.wy` "does not fail, it
+ * lies" (docs/BACKLOG.md, the stationTownInBox water-probe story), and the equivalent bug here
+ * was never even asking the question. Follows world/scatter.js's own WATER_OK convention:
+ * `waterLevelAt(weights, -Infinity)` asks unconditionally for the water PLANE (never null,
+ * unlike passing the real ground height, which only returns non-null when already submerged),
+ * then the real ground height is freeboard-tested against it here — the same two-step split
+ * render/props.js's own probe uses. A hair of freeboard keeps a blade rooted exactly on the
+ * shoreline from reading as half-drowned. */
+const GRASS_WATER_FREEBOARD = 0.05;
+
+/* BACKLOG: "grass grows through station forecourts... the grass system knows about roads but
+ * evidently not about station aprons." Stations sit off to the side of their host road
+ * entirely, so the road edge mask above never touches them. `STATION_RADIUS` is world/props.js's
+ * own apron radius — not a fuzzier number invented here — matching exactly the paved circle
+ * `stationForEdge` grades flat and `_bake` (render/props.js) actually builds. */
+const STATION_GRASS_RADIUS = STATION_RADIUS;
+
 /* One `Terrain` serves every ring. Its box has to contain the far ring's outermost chunk
  * corner (4.5 chunks of 160 m = 800 m) plus however far the car may drive before the box is
  * rebuilt. The constructor is atomic — it builds a climate lattice and a road network in one
@@ -147,6 +179,20 @@ const CANOPY_THIN = 0.45;
  * realistic cruise. */
 const REGION_HALF = 930;
 const REGION_DRIFT = 100;
+
+/* Stations, cached at their OWN, much coarser cadence — never `stationsInBox` per chunk build,
+ * and not even at the Terrain region's own 100 m drift. Measured (`node --eval`, warm module,
+ * varied boxes): `stationsInBox` costs a median 12-20 ms and a WORST case up to 65 ms even for
+ * one region-sized box — it grades every candidate edge fresh with no cache of its own, so a
+ * chunk-sized call (0.5-3 ms) still would have meant paying that on every one of the dozen
+ * chunk rebuilds the 2.5 ms `DEFAULT_BUDGET_MS` allows in a single frame. Stations do not move,
+ * so a stale-by-a-thousand-metres cache is exactly as correct as a fresh one as long as it
+ * still covers the far ring (worst reach ~730 m: 4 chunks x 160 m + a chunk's own 80 m corner +
+ * the apron radius) around wherever the car now is — which is what the generous margin between
+ * the two constants below buys back (HALF - DRIFT = 800 m > 730 m, always safe) for a cadence
+ * about 14x coarser than the Terrain region's, i.e. once every ~53 s at a realistic cruise. */
+const STATION_REGION_HALF = 2200;
+const STATION_REGION_DRIFT = 1400;
 
 /* Wall-clock JS the rebuild queue may spend per frame. A ring that took 200 ms would pop
  * in visibly at 90 m/s; at this budget the queue keeps up with 90 m/s with ~20% to spare
@@ -646,8 +692,10 @@ class GrassChunk {
     this.ySpan = 1;
     // The terrain lattice this chunk was built from, kept so a densening does not have to
     // resample the ground. ~4.5 kB on the coarse rings, and it is the single biggest saving
-    // in the whole rebuild path: half of all rebuilds are densenings.
-    this.lat = new Float32Array((ring.R.lat + 1) * (ring.R.lat + 1) * 5);
+    // in the whole rebuild path: half of all rebuilds are densenings. 6th channel per node is
+    // the raw "is this node submerged" flag — see pass 3's own comment on why that is kept
+    // separately from the already-suppressed density channel.
+    this.lat = new Float32Array((ring.R.lat + 1) * (ring.R.lat + 1) * 6);
 
     this.iPos = new Uint16Array(cap * 2);
     this.iGrd = new Uint16Array(cap);
@@ -718,6 +766,11 @@ export class Grass {
     this._terrain = null;
     this._regionX = Infinity;
     this._regionZ = Infinity;
+    /** Stations within reach of the current position, refreshed on their own coarse cadence —
+     *  see `_ensureRegion`'s comment and STATION_REGION_HALF/DRIFT for why. */
+    this._stations = [];
+    this._stationRegionX = Infinity;
+    this._stationRegionZ = Infinity;
 
     this.stats = { chunks: 0, dirty: 0, drawn: 0, built: 0, extended: 0, buildMs: 0, bytes: 0 };
     this._rings = RINGS.map((R, i) => this._buildRing(R, i));
@@ -875,19 +928,42 @@ export class Grass {
 
   /** One `Terrain` for every ring, rebuilt only when the car leaves the box it covers. */
   _ensureRegion(camX, camZ) {
-    if (this._terrain && Math.abs(camX - this._regionX) < REGION_DRIFT && Math.abs(camZ - this._regionZ) < REGION_DRIFT) {
+    if (!(this._terrain && Math.abs(camX - this._regionX) < REGION_DRIFT && Math.abs(camZ - this._regionZ) < REGION_DRIFT)) {
+      this._terrain = new Terrain(
+        this.seed,
+        camX - REGION_HALF,
+        camZ - REGION_HALF,
+        camX + REGION_HALF,
+        camZ + REGION_HALF,
+        90
+      );
+      this._regionX = camX;
+      this._regionZ = camZ;
+    }
+    this._ensureStations(camX, camZ);
+  }
+
+  /**
+   * Stations, fetched on their OWN much coarser cadence than the Terrain region above — never
+   * per chunk build, and not even at the region's 100 m drift. Every grass chunk build (there
+   * can be a dozen in one 2.5 ms rebuild budget) just filters this small, already-fetched
+   * array by plain distance, which costs nothing measurable; the expensive part happens here,
+   * rarely. See STATION_REGION_HALF/DRIFT's own comment for the measured cost that forced the
+   * coarser cadence.
+   */
+  _ensureStations(camX, camZ) {
+    if (this._stationRegionX !== Infinity && Math.abs(camX - this._stationRegionX) < STATION_REGION_DRIFT && Math.abs(camZ - this._stationRegionZ) < STATION_REGION_DRIFT) {
       return;
     }
-    this._terrain = new Terrain(
-      this.seed,
-      camX - REGION_HALF,
-      camZ - REGION_HALF,
-      camX + REGION_HALF,
-      camZ + REGION_HALF,
-      90
+    this._stations = stationsInBox(
+      camX - STATION_REGION_HALF - STATION_GRASS_RADIUS,
+      camZ - STATION_REGION_HALF - STATION_GRASS_RADIUS,
+      camX + STATION_REGION_HALF + STATION_GRASS_RADIUS,
+      camZ + STATION_REGION_HALF + STATION_GRASS_RADIUS,
+      this.seed
     );
-    this._regionX = camX;
-    this._regionZ = camZ;
+    this._stationRegionX = camX;
+    this._stationRegionZ = camZ;
   }
 
   /**
@@ -1058,9 +1134,34 @@ export class Grass {
     const lat = chunk.lat;
     const x0 = chunk.cx * cs;
     const z0 = chunk.cz * cs;
+    // Needed by pass 3's exact water re-check on EVERY call, not just a lattice (re)build.
+    const T = this._terrain;
+
+    /* Station forecourts this chunk could overlap. Filtered from `this._stations` — fetched
+     * ONCE per REGION rebuild, not here — down to the handful, if any, within reach of this
+     * one chunk. `stationsInBox` itself was measured at 0.5-3 ms even for one small
+     * chunk-sized box (it grades every candidate edge fresh, no cache of its own); calling it
+     * per chunk would blow the WHOLE 2.5 ms rebuild budget on a single chunk. See
+     * `_ensureRegion`'s comment for where the real fetch now lives.
+     *
+     * Computed OUTSIDE the `chunk.built === 0` gate below (cheap — filtering a handful of
+     * already-fetched entries) because pass 3 needs it on EVERY call, including a pure
+     * densening where the lattice itself is not rebuilt. */
+    const regionStations = this._stations;
+    const stations = [];
+    for (let si = 0; si < regionStations.length; si++) {
+      const s = regionStations[si];
+      if (
+        s.x >= x0 - STATION_GRASS_RADIUS &&
+        s.x <= x0 + cs + STATION_GRASS_RADIUS &&
+        s.z >= z0 - STATION_GRASS_RADIUS &&
+        s.z <= z0 + cs + STATION_GRASS_RADIUS
+      ) {
+        stations.push(s);
+      }
+    }
 
     if (chunk.built === 0) {
-      const T = this._terrain;
       const step = cs / L;
 
       /* Canopy shade at the chunk's four CORNERS, interpolated across the lattice below.
@@ -1102,13 +1203,40 @@ export class Grass {
           // The carriageway is bald. 'edge' is the tarmac mask, so the verge — where the
           // carve mask is high but the edge mask is falling — keeps its grass, which is
           // what makes a road read as cut into the land rather than mown around.
-          const edge = T.roads.carve(x, z).edge;
-          const k = (j * N + i) * 5;
+          const rc = T.roads.carve(x, z);
+          let edge = rc.edge;
+          // Widen the carriageway suppression a foot-ish further than roads.js's own shoulder
+          // fade reaches — see ROAD_GRASS_MARGIN's comment. `rc.width` only reads back a real
+          // blended half-width while SOME edge still has weight here (roads.js's carve(), same
+          // file); off in open country it is 0 and this term drops out on its own.
+          if (rc.width > 0) {
+            const half = rc.width * 0.5;
+            const marginEdge = 1 - smoothstep(half - 0.4 + ROAD_GRASS_MARGIN, half + 0.35 + ROAD_GRASS_MARGIN, rc.d);
+            if (marginEdge > edge) edge = marginEdge;
+          }
+          // No grass with its base under water — see GRASS_WATER_FREEBOARD's comment.
+          const waterY = waterLevelAt(w, -Infinity);
+          const submerged = waterY !== null && y < waterY + GRASS_WATER_FREEBOARD;
+          // No grass inside a station's paved apron — see STATION_GRASS_RADIUS's comment.
+          let inApron = false;
+          for (let si = 0; si < stations.length; si++) {
+            const s = stations[si];
+            const sdx = x - s.x;
+            const sdz = z - s.z;
+            if (sdx * sdx + sdz * sdz < STATION_GRASS_RADIUS * STATION_GRASS_RADIUS) {
+              inApron = true;
+              break;
+            }
+          }
+          const k = (j * N + i) * 6;
           lat[k] = y;
-          lat[k + 1] = g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
+          lat[k + 1] = submerged || inApron ? 0 : g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
           lat[k + 2] = dry;
           lat[k + 3] = snow;
           lat[k + 4] = wet;
+          // The raw "is this NODE itself submerged" flag, kept separately from the density
+          // above — see pass 3's own comment on why.
+          lat[k + 5] = submerged ? 1 : 0;
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
         }
@@ -1124,10 +1252,10 @@ export class Grass {
           const im = i > 0 ? i - 1 : i;
           const ip = i < N - 1 ? i + 1 : i;
           const dx = (ip - im) * step;
-          const gx = (lat[(j * N + im) * 5] - lat[(j * N + ip) * 5]) / dx;
-          const gz = (lat[(jm * N + i) * 5] - lat[(jp * N + i) * 5]) / dz;
+          const gx = (lat[(j * N + im) * 6] - lat[(j * N + ip) * 6]) / dx;
+          const gz = (lat[(jm * N + i) * 6] - lat[(jp * N + i) * 6]) / dz;
           const ny = 1 / Math.sqrt(gx * gx + gz * gz + 1);
-          lat[(j * N + i) * 5 + 1] *= smoothstep(SLOPE_N0, SLOPE_N1, ny);
+          lat[(j * N + i) * 6 + 1] *= smoothstep(SLOPE_N0, SLOPE_N1, ny);
         }
       }
 
@@ -1162,10 +1290,10 @@ export class Grass {
       if (iz > L - 1) iz = L - 1;
       const tx = fx - ix;
       const tz = fz - iz;
-      const k00 = (iz * N + ix) * 5;
-      const k10 = k00 + 5;
-      const k01 = k00 + N * 5;
-      const k11 = k01 + 5;
+      const k00 = (iz * N + ix) * 6;
+      const k10 = k00 + 6;
+      const k01 = k00 + N * 6;
+      const k11 = k01 + 6;
       const w00 = (1 - tx) * (1 - tz);
       const w10 = tx * (1 - tz);
       const w01 = (1 - tx) * tz;
@@ -1173,6 +1301,57 @@ export class Grass {
 
       const dens = lat[k00 + 1] * w00 + lat[k10 + 1] * w10 + lat[k01 + 1] * w01 + lat[k11 + 1] * w11;
       if (dens <= 0.004) continue;
+
+      /* EXACT water re-check, at the blade's own precise world position, not the lattice's —
+       * same root cause as the station note just below: a small pond or a narrow inlet can sit
+       * entirely inside one bilinear cell without any of its four corners actually being wet,
+       * so the interpolated `dens` above can come out positive for a point standing in open
+       * water. Caught with real, driven `Grass` output: blades as deep as 6.55 m into open
+       * water, worst in the coarsest rings. Only escalated to a real `Terrain` query — the
+       * thing the whole lattice exists to avoid paying per blade — when the four corners of
+       * THIS cell actually disagree about being submerged (the raw flag pass 1 wrote to
+       * `lat[k+5]`, kept separately from the already-suppressed density channel for exactly
+       * this reason): a shoreline is thin, so most blades are nowhere near one and this reads
+       * four already-fetched floats and returns. */
+      const wet00 = lat[k00 + 5],
+        wet10 = lat[k10 + 5],
+        wet01 = lat[k01 + 5],
+        wet11 = lat[k11 + 5];
+      const needsBladePos = stations.length > 0 || wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11;
+      const bx = needsBladePos ? x0 + ux * INV_U16 * cs : 0;
+      const bz = needsBladePos ? z0 + uz * INV_U16 * cs : 0;
+      if (wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11) {
+        const by = lat[k00] * w00 + lat[k10] * w10 + lat[k01] * w01 + lat[k11] * w11;
+        const bw = T.weights(bx, bz).w;
+        const waterY = waterLevelAt(bw, -Infinity);
+        if (waterY !== null && by < waterY + GRASS_WATER_FREEBOARD) continue;
+      }
+
+      /* EXACT station-apron re-check, at the blade's own precise world position, not the
+       * lattice's. The lattice suppression in pass 1 zeroes density at each NODE, but the far
+       * ring's node spacing (cs/lat, up to ~11.4 m) is comparable to or bigger than a station's
+       * own apron (STATION_RADIUS = 11 m radius, 22 m across) — a real apron can sit entirely
+       * inside ONE bilinear cell without touching any of its four corners, so the
+       * lattice-interpolated `dens` above can come out positive for a point that is, in world
+       * space, standing on the tarmac. Caught with real, driven `Grass` output
+       * (tools/diag-grasstrim.mjs's real-blade check): blades as deep as 1.93 m inside an
+       * 11 m-radius apron, worst in the cs=160 ring where node spacing (11.4 m) is coarsest.
+       * `stations` is already filtered to the handful in reach of this chunk, so the extra
+       * cost here is one cheap loop, only paid when it is non-empty. */
+      if (stations.length) {
+        let onApron = false;
+        for (let si = 0; si < stations.length; si++) {
+          const s = stations[si];
+          const sdx = bx - s.x;
+          const sdz = bz - s.z;
+          if (sdx * sdx + sdz * sdz < STATION_GRASS_RADIUS * STATION_GRASS_RADIUS) {
+            onApron = true;
+            break;
+          }
+        }
+        if (onApron) continue;
+      }
+
       // The coin is hashed from (chunk, template index), never from the world position the
       // shader's own thinning hash uses: if the two hashes correlated, the field would thin
       // in stripes instead of uniformly.

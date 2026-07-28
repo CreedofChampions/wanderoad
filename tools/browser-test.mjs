@@ -636,9 +636,25 @@ async function main() {
 
     await tap(evalJs, 'KeyG');
     await sleep(4500);
-    const autoState = await evalJs(`(() => { const W = window.WANDEROAD;
-      return { on: W.auto.on, kph: +W.car.kph.toFixed(1) }; })()`);
-    check('G engages auto-drive and it drives', autoState.on && autoState.kph > 4, `${autoState.kph} km/h under auto`);
+    /* edited by AI: the ASSERTION is untouched — `on && kph > 4`, the same bar. Only the
+     * failure detail is richer. "0 km/h under auto" cost a full round of guessing because it
+     * cannot distinguish "the chauffeur declined" from "the chauffeur is trying and the car
+     * will not move", and those have completely different causes. Everything below is read
+     * from the live objects the game already exposes. */
+    const autoState = await evalJs(`(() => { const W = window.WANDEROAD, c = W.car;
+      const q = c.terrain.roads.query(c.x, c.z); const su = c.terrain.surface(c.x, c.z);
+      return { on: W.auto.on, kph: +W.car.kph.toFixed(1), reason: W.auto.lastReason || null,
+               x: Math.round(c.x), z: Math.round(c.z), onRoad: +su.onRoad.toFixed(2),
+               d: isFinite(q.d) ? +q.d.toFixed(1) : null, reverse: c.reverse, gear: c.gear,
+               throttle: +c.throttle.toFixed(2), brake: +c.brake.toFixed(2),
+               onGround: c.onGround, dry: !!(W.fuel && W.fuel.dry),
+               sink: +(c.y - c.terrain.height(c.x, c.z)).toFixed(2) }; })()`);
+    check('G engages auto-drive and it drives', autoState.on && autoState.kph > 4,
+      `${autoState.kph} km/h under auto — on ${autoState.on}, at ${autoState.x},${autoState.z}, ` +
+        `onRoad ${autoState.onRoad}, ${autoState.d} m from the centreline, reverse ${autoState.reverse}, ` +
+        `gear ${autoState.gear}, throttle ${autoState.throttle}, brake ${autoState.brake}, ` +
+        `onGround ${autoState.onGround}, ${autoState.sink} m above the ground, dry ${autoState.dry}` +
+        (autoState.reason ? `, said "${autoState.reason}"` : ''));
     await shot('03-autodrive');
     await tap(evalJs, 'KeyG');
 
@@ -977,7 +993,23 @@ async function main() {
       if (vTop < 45) await reset();
     }
     const pBrake = await evalJs(`(() => { const c = window.WANDEROAD.car; return { x: c.x, z: c.z }; })()`);
-    await hold(evalJs, 'KeyS', 6000);
+    /* Hold the brake only until the car has actually stopped. Holding S at a standstill now
+     * DRIVES THE CAR BACKWARDS — that is the operator's own ask ("push and hold S to reverse,
+     * simple as that") — so a fixed 6 s hold ends this measurement with the car reversing at
+     * 11 km/h and the <3 km/h assertion failing on a stop that was perfect. Release at the
+     * stop; the brake distance itself is unchanged. */
+    await evalJs(`(async () => {
+      const c = window.WANDEROAD.car;
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyS', bubbles: true }));
+      const t0 = performance.now();
+      try {
+        while (performance.now() - t0 < 6000 && c.kph > 1.5)
+          await new Promise(r => setTimeout(r, 60));
+      } finally {
+        window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyS', bubbles: true }));
+      }
+      await new Promise(r => setTimeout(r, 400));
+    })()`);
     const afterBrake = await evalJs(`(() => { const c = window.WANDEROAD.car;
       return { kph: +c.kph.toFixed(1), x: c.x, z: c.z }; })()`);
     const brakeDist = Math.hypot(afterBrake.x - pBrake.x, afterBrake.z - pBrake.z);

@@ -97,6 +97,11 @@ def main():
     with sftp.open(posixpath.join(REMOTE_BASE, ".htaccess"), "w") as f:
         f.write(htaccess)
 
+    # The branded URL: /cozydriver is the SAME deployment via symlink — one docroot, two
+    # paths, nothing to drift. /wanderoad stays live (it is on the competition form and in
+    # every link shared so far).
+    run(ssh, f"ln -sfn {REMOTE_BASE} {posixpath.dirname(REMOTE_BASE)}/cozydriver")
+
     run(ssh, f"chown -R admin:admin {REMOTE_BASE} {REMOTE_DATA}")
     run(ssh, f"chmod -R 755 {REMOTE_BASE}; chmod 775 {REMOTE_DATA}")
 
@@ -113,8 +118,7 @@ def main():
 
     print("smoke test…")
     time.sleep(1)
-    for path in ["", "api/state.php?since=0"]:
-        url = PUBLIC_URL + path
+    for url in [PUBLIC_URL, PUBLIC_URL + "api/state.php?since=0", "https://crumbtown.org/cozydriver/", "https://crumbtown.org/cozydriver/social.jpg"]:
         r = subprocess.run(
             ["curl", "-s", "-o", os.devnull, "-w", "%{http_code}", f"{url}{'&' if '?' in url else '?'}cb={int(time.time())}"],
             capture_output=True,

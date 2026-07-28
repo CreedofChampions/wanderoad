@@ -98,9 +98,22 @@ export class Rescue {
    * @param {Function} [opts.say]    one short line of HUD text
    * @param {boolean} [opts.keepHeading]  leave the driver's heading alone on the way out.
    *                                 Only ever false so a bench can measure the old snap.
+   * @param {(inWater: boolean, depth: number) => boolean} [opts.skip]
+   *        docs/BOAT-PLAN.md, "Rescue integration": once the boat exists it — not this
+   *        teleport — owns the water, both while actually afloat (`boatMode.active`) and
+   *        for the whole approach once the boat is unlocked (`wallet.boatUnlocked &&
+   *        inDeepWater`), so a driver who has earned the boat can steer into a lake without
+   *        this class snatching them back to the road first. Called with the SAME `inWater`/
+   *        `depth` this update() has just computed off the SAME gates the file header
+   *        documents ("BOTH gates, and the road one is the load-bearing half") — main.js
+   *        wires `skip: (inWater) => boatMode.active || (wallet.boatUnlocked && inWater)`,
+   *        so "in deep water" is asked exactly once per frame, not defined a second time
+   *        against a second, possibly-drifting threshold. Left `null` (never skips) for
+   *        every caller that has no boat, including every existing bench and the browser
+   *        acceptance suite, so this is a pure addition to the class's behaviour.
    */
   constructor({ recover, say = null, contact = CONTACT, hold = HOLD, lift = LIFT, cooldown = COOLDOWN,
-                keepHeading = true } = {}) {
+                keepHeading = true, skip = null } = {}) {
     this.recover = recover;
     this.say = say;
     this.contact = contact;
@@ -108,6 +121,7 @@ export class Rescue {
     this.lift = lift;
     this.cooldown = cooldown;
     this.keepHeading = keepHeading;
+    this.skip = skip;
 
     /** 'dry' | 'sinking' | 'lifting' | 'settling' */
     this.state = 'dry';
@@ -206,6 +220,14 @@ export class Rescue {
      * beside them is doing. Lowering the depth gate does not weaken that at all; it is a
      * separate test and it is still first past the post. */
     const inWater = d > this.contact && (surf ? surf.onRoad : 0) < ON_ROAD;
+
+    /* The boat has this one. Reset rather than freeze: a driver who leaves the boat later,
+     * near a different shore, should find the timer at zero, not still primed from whatever
+     * it was doing the moment the boat took over — see the constructor's own comment. */
+    if (this.skip && this.skip(inWater, d)) {
+      this.reset();
+      return false;
+    }
 
     if (this.state === 'dry') {
       // The timer runs on being IN it, not on having been in it: come back out and it starts

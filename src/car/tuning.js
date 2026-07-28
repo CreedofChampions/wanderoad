@@ -252,6 +252,12 @@ export const BRAKE = {
 export const REVERSE = {
   maxSpeed: 8, // m/s, ~29 km/h — a real reverse gear, not a sprint
   taperBand: 3, // m/s over which the force eases out approaching maxSpeed
+  // How close to a standstill the car must be, moving FORWARDS, before holding the brake
+  // engages reverse rather than just braking. Only gates the transition INTO reverse — once
+  // `this.reverse` is already true this is never consulted again, so it does not clip the
+  // reverse governor's own top speed. 0.6 m/s (~2.2 km/h) is "at or near a standstill" without
+  // being so tight that ordinary suspension/creep noise near 0 flickers the arm check.
+  armSpeed: 0.6,
 };
 
 /* ── gearbox ────────────────────────────────────────────────────────────── */
@@ -299,7 +305,31 @@ export function curveAt(curve, x) {
 /* ── body attitude ──────────────────────────────────────────────────────── */
 export const BODY = {
   rollOmega: 8.4,
-  rollZeta: 0.85,
+  /* OSCILLATION, not amplitude — the operator's own words: "Car still wobbles left to right
+   * immensely, like a scooter." An earlier audit measured worst-case roll (8.98° peak) and
+   * called it fine, which is the wrong number for a "wobble": a single 9° lean into a corner
+   * that holds and comes back is body roll doing its job, not a wobble. What actually reads as
+   * a wobble is the roll RATE reversing sign over and over — measured directly, driving dead
+   * straight down a real road with nothing but the ordinary micro-corrections a driver (or the
+   * autopilot's own steering) makes: at the old zeta of 0.85 (mildly UNDERdamped — see the pole
+   * arithmetic below) the spring lean rings on every one of those tiny corrections instead of
+   * settling, adding its own zero-crossings on top of the ground-following term's. Measured
+   * with `tools/diag-roll-oscillation.mjs`: 1.84 crossings/s before this change, against a
+   * >2/s "sustained wobble" bar from the operator's own framing — already close to it, and the
+   * lean spring alone (isolated from the ground-following term) was crossing MORE often than
+   * the ground term was (45 vs 34 zero-crossings over the same 35 s run).
+   *
+   * Fix: overdamp the spring rather than change what it targets. At omega 8.4 the two rules
+   * — critically damped (zeta = 1, no ringing at all, slowest possible non-oscillatory
+   * settle) vs zeta = 1.3 — put the slow pole's time constant at 1/(omega·(zeta−√(zeta²−1))):
+   * 0.119 s at zeta = 1 against 0.254 s at zeta = 1.3, i.e. still settling inside a quarter of
+   * a second, well within "feels immediate" for a body-roll cue, while zeta > 1 makes the
+   * response monotone by construction — it can no longer overshoot its own target and swing
+   * back, which is exactly the mechanism producing the extra crossings. Nothing about the
+   * PHYSICS changes: `_loadLat`, the tyre forces and the solver's own yaw/slip numbers are
+   * untouched, only how briskly the cosmetic lean spring is allowed to ring on its way to a
+   * target that itself has not moved. */
+  rollZeta: 1.3,
   pitchOmega: 10.5,
   pitchZeta: 0.85,
   divePerG: (1.6 * Math.PI) / 180,
@@ -310,7 +340,14 @@ export const BODY = {
   pitchRate: (35 * Math.PI) / 180,
   visualRollMul: 1.3, // readability only; never fed back into the solver
   loadTauPitch: 0.12,
-  loadTauRoll: 0.15,
+  /* Was 0.15 s. The lean spring's TARGET (`_loadLat`, itself a filtered copy of `latAccel`)
+   * is where a fast, high-frequency wiggle in the steering (a keyboard correction, or the
+   * autopilot's own controller) shows up first — filtering it a little harder here means the
+   * spring above is not being ASKED to chase noise in the first place, which is the other half
+   * of the same oscillation fix: a slower spring stops it ringing on a jittery target, a
+   * slower target stops the jitter arriving at all. Still well inside "feels immediate" — 0.22
+   * s is a fifth of a second, not a lag anyone will name. */
+  loadTauRoll: 0.22,
   rollStiffFront: 0.55,
   /* How fast the DISPLAYED ground-following roll/pitch is allowed to move, rad/s — see the
    * "what the renderer reads" comment in vehicle.js for the measurement this comes from.

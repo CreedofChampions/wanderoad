@@ -192,13 +192,19 @@ function addHull(M, cx, cy, cz, yaw, L, B, H, hullCol, deckCol) {
   return { P, gun, hz };
 }
 
-/** One boat, built into the shared builder `M` at its own world position. */
+/** One boat, built into the shared builder `M` at its own world position.
+ *
+ * `spec.L`/`spec.hullCol`, if present, PIN the length and hull colour instead of deriving
+ * them from `scaleT`/`hue` — the one thing buildPlayerBoat() (below) needs that an anchored
+ * ship never does: a fixed, car-scale hull in the fleet's own paintC, not a random one from
+ * the lattice's own rng. Every anchored ship (evaluateShipSite's own specs, above) never sets
+ * either field, so this is a pure addition — `git diff` on the anchored path is empty. */
 function buildBoat(M, spec) {
   const { x, y, z, yaw, scaleT, hue, trimT, hasCabin, hasMast } = spec;
-  const L = lerp(6.5, 11, scaleT);
+  const L = spec.L != null ? spec.L : lerp(6.5, 11, scaleT);
   const B = L * 0.33;
   const H = L * 0.17;
-  const hullCol = HULL_PALETTE[Math.min(HULL_PALETTE.length - 1, (hue * HULL_PALETTE.length) | 0)];
+  const hullCol = spec.hullCol || HULL_PALETTE[Math.min(HULL_PALETTE.length - 1, (hue * HULL_PALETTE.length) | 0)];
   const cabinCol = mixc(LC('wallA'), LC('wallB'), trimT);
 
   const { P, gun } = addHull(M, x, y, z, yaw, L, B, H, hullCol, DECK_COL);
@@ -217,6 +223,56 @@ function buildBoat(M, spec) {
     const pC = P(0, gun + L * 0.47, -L * 0.05);
     ptri(M, pA, pB, pC, hullCol, MAT.MATTE);
   }
+}
+
+/** Car-scale length for the player's own boat — small enough to thread a river mouth, still
+ *  read as a boat next to the (6.5-11 m) anchored fleet. See docs/BOAT-PLAN.md workstream C. */
+export const PLAYER_BOAT_LENGTH = 5.2;
+/** A fixed, pleasant cabin trim. The anchored fleet's `trimT` is an rng draw per ship because
+ *  there are dozens of them; there is exactly one player boat, so a single chosen constant
+ *  (not 0, not 1 — the midpoint blend of wallA/wallB) is honester than dressing up one number
+ *  as if it were still a draw. */
+const PLAYER_TRIM_T = 0.5;
+
+/**
+ * The player's own boat — built once (main.js constructs it lazily, the first time
+ * `wallet.boatUnlocked` goes true) and repositioned every frame like the car model is,
+ * never rebuilt. Same low-poly hull `buildBoat()` above draws for the anchored fleet, pinned
+ * to car-scale (`PLAYER_BOAT_LENGTH`) with the cabin and the mast+pennant always present —
+ * the anchored fleet only has them SOMETIMES (hasCabin/hasMast are rng draws over dozens of
+ * hulls); the one boat the player actually drives should always read as a complete little
+ * boat, not the stripped-down rowing-skiff end of that draw. Hull colour is `paintC`, the
+ * fleet's own trim colour (car/model.js's PAINTS), so the boat reads as "your car's own boat"
+ * rather than a piece of anchored scenery.
+ *
+ * Built at the local origin with yaw 0, exactly like car/model.js's buildCar() — main.js
+ * positions and rotates the returned Mesh's own `.position`/`.rotation` every frame instead
+ * of baking a world transform in here.
+ *
+ * @param {THREE.Material} [material] shared painted-solid material — pass the live `Ships`
+ *        instance's own `.material` so the player's boat and the anchored fleet render off
+ *        ONE compiled program rather than a second one for a single extra mesh; falls back to
+ *        a fresh `createPaintedMaterial()` for a caller (a future standalone tool, a bench)
+ *        with no `Ships` instance to hand.
+ * @returns {THREE.Mesh}
+ */
+export function buildPlayerBoat(material = createPaintedMaterial()) {
+  const M = PB();
+  buildBoat(M, {
+    x: 0,
+    y: 0,
+    z: 0,
+    yaw: 0,
+    L: PLAYER_BOAT_LENGTH,
+    hullCol: LC('paintC'),
+    trimT: PLAYER_TRIM_T,
+    hasCabin: true,
+    hasMast: true,
+  });
+  const geom = finishPainted(M);
+  const mesh = new Mesh(geom, material);
+  mesh.name = 'playerBoat';
+  return mesh;
 }
 
 /* ── the live set ─────────────────────────────────────────────────────────── */

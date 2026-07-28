@@ -50,6 +50,12 @@ const RANGE = 1180;
 const SKIP_FRAME = 1 / 45;
 /** How many petrol stations a session remembers. 192 covers roughly a 40 km drive. */
 const KNOWN_STATIONS = 192;
+/** How far a forecourt slab may be graded away from the road it serves, in metres, so it can
+ *  meet the ground it stands on. The access spur (buildAccessSpur, ~10 m of run) ramps it, and
+ *  bench-props measures the resulting rise against the 3 m a driveway may climb. See the
+ *  clamp in _bake for why a slab pinned to the road was the other half of the buried-station
+ *  bug (src/world/props.js STATION_MAX_STEP is the first half). */
+const PAD_STEP = 1.2;
 /** The gentle bob a floating can does — "cozy, not garish": a few centimetres, a little
  *  under one cycle every two seconds. Applied to the finished mesh's own transform each
  *  frame, on top of its baked, already-hovering (+CAN_HOVER) position — see buildFuelCan. */
@@ -1251,15 +1257,30 @@ function buildAccessSpur(M, mouthX, mouthZ, hRoad, apronX, apronZ, hApron, hostW
  * The open apron itself, the canopy's open air, and the access spur stay deliberately clear —
  * a forecourt (or a driveway) you cannot drive onto is not a station you can visit.
  *
- * Same convention as every other building in the catalogue (a barn, a cottage): a real
- * collider, but not `solid: true`. You scrape and slide off it exactly like every other piece
- * of roadside architecture, not a tree's dead stop — a fumbled approach to the pumps stays a
- * bump, never a wall, which is the whole COZY brief.
+ * SOLID, since the operator reported the collisions "still non-existent" a second time. These
+ * used to be registered without `solid: true`, i.e. as scrape-and-slide roadside architecture.
+ * Driven for real (tools/bench-props.mjs's station section, which now runs the full approach
+ * on the real heightfield rather than a 14 m nudge on a flat stub) that reads as nothing at
+ * all. A/B on one station, everything else identical: without the flag a 44.0 km/h arrival
+ * scrubs to 2.70 km/h and grinds on along the face of the building; with it, 44.0 -> 0.00. Let
+ * go of the wheel instead of steering back into it and the un-flagged version simply slides off
+ * the pump island and drives on across the forecourt at full speed, which is precisely the
+ * "collisions are non-existent" being reported. A kiosk is a BUILDING; you stop. Same treatment a
+ * tree gets and it inherits the same cozy let-offs from game/collide.js for free — under
+ * STOP_CLOSING (2.5 m/s ≈ 9 km/h closing) it is still only a nudge, and a glancing contact
+ * under GRAZE still slides — so nosing up to the pumps to refuel is unchanged, and only
+ * actually driving INTO the building stops you.
  */
 const STATION_HITBOXES = [
   // the kiosk hut (gHut w=4.0, d=2.8, h=2.4, pitch=0.9), blit at local (0, -AD+2.2), rotated
   // by pi — a rotation by pi does not change a symmetric footprint's circumscribed radius.
-  { dx: 0, dz: -(STATION_APRON_HALF_DEPTH - 2.2), r: 2.5, h: 3.6 },
+  // 2.8, not the 2.44 the bare 4.0 x 2.8 hut footprint circumscribes: gHut's `porch: true`
+  // pushes the drawn structure to 2.78 from the blit point at bumper height (measured, see the
+  // silhouette slice at the end of tools/bench-props.mjs — the same method diag-collide.mjs
+  // uses on trunks). Enclosing rather than splitting the difference, for the reason
+  // collide.js's TRUNK_R comment gives: stopping a few centimetres early is invisible, driving
+  // through a wall is not.
+  { dx: 0, dz: -(STATION_APRON_HALF_DEPTH - 2.2), r: 2.8, h: 3.6 },
   // the pump island and the two pumps standing on it, as one cylinder
   { dx: 0, dz: 1.0, r: 1.55, h: 2.0 },
   // the four canopy posts (CW=5.2, CD=3.4, offset +1.0 in local z)
@@ -1287,6 +1308,9 @@ export function stationSolids(stations) {
         r: b.r,
         h: b.h,
         kind: 'station',
+        // See STATION_HITBOXES' own comment: a forecourt structure stops the car dead, the
+        // same as a trunk, with collide.js's own STOP_CLOSING/GRAZE let-offs still applying.
+        solid: true,
       });
     }
   }
@@ -1716,7 +1740,14 @@ export class Props {
         if (g < lo) lo = g;
         if (g > hi) hi = g;
       }
-      const y = clamp(hi + 0.04, s.y - 0.7, s.y + 0.3);
+      /* ...within PAD_STEP of the road, which is what the access spur has to ramp. The band
+       * used to be (-0.7, +0.3) and it is the second half of the buried-forecourt fix: the
+       * placement now guarantees the ground under the apron is within STATION_MAX_STEP of the
+       * road (src/world/props.js), so a WIDER band here is what lets the slab actually come up
+       * (or down) and meet it instead of being pinned to the road while the hill walks away
+       * from it. Bounded, not free: bench-props measures the resulting spur rise and holds it
+       * under the 3 m a driveway may climb. */
+      const y = clamp(hi + 0.04, s.y - PAD_STEP, s.y + PAD_STEP);
       const L = PB();
       buildStation(L, rng(hash3i(Math.round(s.x), Math.round(s.z), 0x5747, this.seed)), y - lo + 0.4);
       blit(M, L, s.x, y, s.z, s.yaw, 1);

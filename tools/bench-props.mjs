@@ -15,15 +15,17 @@
 import { Object3D } from 'three';
 import {
   PROP_KINDS, PROP_IDS, PROP_BY_ID, propsInBox, stationsInBox, stationSpacing, fuelCansInBox,
-  CAN_HOVER, CAN_RADIUS, CAN_FRACTION, CAN_FOOT, STATION_MAX_GRADE, STATION_APRON_HALF_DEPTH,
-  nearestStation, stationSpur,
+  CAN_HOVER, CAN_RADIUS, CAN_FRACTION, CAN_FOOT, STATION_MAX_GRADE, STATION_APRON_HALF_DEPTH, STATION_APRON_HALF_WIDTH,
+  nearestStation, stationSpur, STATION_MAX_STEP,
 } from '../src/world/props.js';
-import { Props, missingGeometry, measureAll, CAN_BOB_AMP } from '../src/render/props.js';
+import { Props, missingGeometry, measureAll, CAN_BOB_AMP, stationSolids, buildStation } from '../src/render/props.js';
+import { PB } from '../src/render/painted.js';
 import { Terrain } from '../src/world/terrain.js';
 import { waterLevelAt, BIOME_COUNT, BIOME_NAMES } from '../src/world/biomes.js';
 import { edgesInBox } from '../src/world/roads.js';
 import { Solids } from '../src/game/collide.js';
 import { Vehicle } from '../src/car/vehicle.js';
+import { clamp, rng, hash3i } from '../src/core/math.js';
 
 const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 const TILE = 512;
@@ -282,20 +284,49 @@ console.log('\n── rarity, clearance and seating (a 4 x 4 km sweep) ───
    * above: it would push the whole distribution toward the LOW end, which already has less
    * room on this check (min observed 1.28 against a 0.9 floor) than the props check does, for
    * a problem that is not actually about how many cans get OFFERED. `3.9` clears the measured
-   * max (3.55) with real margin. */
-  check(canPerKm > 0.9 && canPerKm < 3.9, 'cans per km of road', canPerKm.toFixed(2), '0.9 .. 3.9 (denser than the ambient props, still not a station)');
+   * max (3.55) with real margin.
+   *
+   * HALVED, on the operator's instruction ("Cans a bit too abundant — reduce by 50%"):
+   * CAN_SLOT_P went [0.35, 0.42] -> [0.175, 0.21] and this band came down WITH it, by the same
+   * factor, rather than being left wide enough to pass either way. Re-measured on this exact
+   * check, five seeds, everything else unchanged: 20260726 3.53 -> 1.62, and the new spread
+   * across 7 / 424242 / 991 / 20260101 is 1.41 .. 1.86. The band is the old one halved
+   * (0.45 .. 1.95, rounded to 2.0), so the CEILING is now a materially TIGHTER check than the
+   * 3.9 it replaces — it fails if the halving is ever quietly undone — while the floor keeps
+   * the same proportional headroom the 601-seed sweep above earned. */
+  check(canPerKm > 0.45 && canPerKm < 2.0, 'cans per km of road', canPerKm.toFixed(2), '0.45 .. 2.0 (half the old density, on purpose)');
   check(cans.length > 20, 'sample size', cans.length, '> 20');
 
   let canOnRoad = 0;
   let canWorstClear = Infinity;
   let canFloatWorst = 0;
   let canBuryWorst = 0;
+  /* ── can you get one WITHOUT breaking your streak ──────────────────────────
+   * Operator: "Gas cans need to be accessible from the road, otherwise you have to break your
+   * streak to get a gas can. Self-defeating."
+   *
+   * Measured, not asserted, and measured against game/streak.js's OWN rule rather than a
+   * plausible-looking distance. streak.js breaks when `surf.onRoad < ON_ROAD` at the car's
+   * centre or at any of the four wheels; `onRoad` is roads.js's
+   * `edge = 1 - smoothstep(half - 0.4, half + 0.35, d)`, which crosses 0.45 within 5 mm of
+   * `d = half`. So the furthest a wheel may be from the centreline is `half`, a wheel is
+   * WHEEL_HALF off the car's own centreline, and the furthest a LEGAL driving line can be from
+   * this can is therefore `canOffset - half + WHEEL_HALF`. If that is under CAN_RADIUS the can
+   * is collectable from the tarmac; if it is not, taking it costs you the streak, which is the
+   * bug the operator reported. `carve().d` is the real distance to the real centreline of the
+   * road this can hangs off — the same RoadField everything else in this project reads. */
+  const WHEEL_HALF = 0.8;
+  let canWorstReach = 0;
+  let canUnreachable = 0;
   for (const c of cans) {
     const t = c._terr;
     const cc = t.roads.carve(c.x, c.z);
     if (cc.edge > 0.001) canOnRoad++;
     const clear = cc.d - cc.width * 0.5 - CAN_FOOT;
     if (clear < canWorstClear) canWorstClear = clear;
+    const reach = cc.d - cc.width * 0.5 + WHEEL_HALF;
+    if (reach > canWorstReach) canWorstReach = reach;
+    if (reach >= CAN_RADIUS) canUnreachable++;
     // The PLACEMENT height (before the render-side hover is added) must sit on the real
     // ground exactly like any other prop's — see the file comment in world/props.js for why
     // hover is deliberately NOT part of this number.
@@ -309,6 +340,9 @@ console.log('\n── rarity, clearance and seating (a 4 x 4 km sweep) ───
   check(canFloatWorst < 0.05, 'placement float above the ground, BEFORE the render-side hover (m)', canFloatWorst.toFixed(3), '< 0.05');
   check(canBuryWorst < 0.6, 'placement burial below the ground (m)', canBuryWorst.toFixed(3), '< 0.6');
   console.log(`       CAN_HOVER ${CAN_HOVER} m (added at render time, src/render/props.js), CAN_RADIUS ${CAN_RADIUS} m, CAN_FRACTION ${CAN_FRACTION} of a tank`);
+  console.log(`       furthest any can sits from a streak-legal driving line: ${canWorstReach.toFixed(2)} m, against a ${CAN_RADIUS} m pickup`);
+  check(canUnreachable === 0, 'cans that cost you the streak to collect', canUnreachable, '0 of ' + cans.length);
+  check(canWorstReach < CAN_RADIUS - 2, 'worst reach from the tarmac to a can (m)', canWorstReach.toFixed(2), `< ${CAN_RADIUS - 2} (CAN_RADIUS with 2 m of margin)`);
 
   // Determinism: the same argument as the props check above, because a can is exactly as
   // capable of being emitted twice or drifting between boxes as anything else in this file.
@@ -351,6 +385,27 @@ console.log('\n── petrol stations ──────────────
   let worstGrade = 0;
   let worstSpurRamp = 0;
   let worstSpurEndFinite = true;
+  /* ── the buried forecourt, which is why "the collisions are non-existent" ──
+   * Operator, twice: "The collisions of fuel stations are still non-existent." The hitboxes
+   * (render/props.js STATION_HITBOXES) were registered on every baked tile the whole time —
+   * `solids.count` proves that and always did. What was NOT true is that they could be hit:
+   * game/collide.js drops any collider the car is flying over (`car.y - 0.4 > s.y + s.h`),
+   * which is right, and a forecourt graded to a road 19 m away on a hillside is UNDERGROUND,
+   * so every hitbox on it was correctly and invisibly discarded.
+   *
+   * So this measures the actual mechanism, on real stations, with the real Terrain: how far
+   * the ground stands above the pad the station is drawn on, and how many of its seven
+   * colliders collide.js would therefore throw away for a car sitting on that ground. Before
+   * the fix (STATION_MAX_STEP in world/props.js + PAD_STEP in render/props.js), across three
+   * seeds and 30 stations: worst burial 11.27 m, 24.3% of all hitboxes gated out, and at 12 of
+   * the 30 stations 4-6 of the 7 were gone. After: 0.95 m and 0.0%. */
+  // The identical clamp render/props.js's _bake applies. If PAD_STEP ever moves there this
+  // copy has to move with it; there is no way to import it, deliberately, since nothing but
+  // the bake may choose a pad height.
+  const PAD_STEP = 1.2;
+  let worstBury = 0;
+  let gatedOut = 0;
+  let hitboxes = 0;
   for (const s of a.slice(0, 12)) {
     const terr = new Terrain(SEED, s.x - 40, s.z - 40, s.x + 40, s.z + 40, 40);
     const ca = Math.cos(s.yaw);
@@ -362,9 +417,18 @@ console.log('\n── petrol stations ──────────────
       lo = Math.min(lo, g);
       hi = Math.max(hi, g);
     }
-    const pad = Math.min(Math.max(hi + 0.04, s.y - 0.7), s.y + 0.3);
+    const pad = Math.min(Math.max(hi + 0.04, s.y - PAD_STEP), s.y + PAD_STEP);
     worstStep = Math.max(worstStep, Math.abs(pad - s.y));
     worstGrade = Math.max(worstGrade, s.grade);
+
+    // Every hitbox this station will register, against the ground actually under each one.
+    for (const b of stationSolids([{ ...s, padY: pad }])) {
+      hitboxes++;
+      const g = terr.height(b.x, b.z);
+      if (g - pad > worstBury) worstBury = g - pad;
+      // A car resting on that ground: Vehicle.y sits ~0.45 m over its contact patch.
+      if (g + 0.45 - 0.4 > b.y + b.h) gatedOut++;
+    }
 
     /* The access spur's own ramp, measured the way buildAccessSpur (src/render/props.js)
      * actually computes it: the REAL road-carve height at the mouth (never s.y, which is only
@@ -378,8 +442,25 @@ console.log('\n── petrol stations ──────────────
     if (!isFinite(hRoad)) worstSpurEndFinite = false;
     else worstSpurRamp = Math.max(worstSpurRamp, Math.abs(hRoad - pad));
   }
-  check(worstStep <= 0.71, 'worst step from road to forecourt (m)', worstStep.toFixed(2), '<= 0.7');
+  check(worstStep <= 1.21, 'worst step from road to forecourt (m)', worstStep.toFixed(2), '<= 1.2 (PAD_STEP)');
   check(worstGrade <= STATION_MAX_GRADE, 'steepest road a station sits on', worstGrade.toFixed(3), `<= ${STATION_MAX_GRADE} (STATION_MAX_GRADE)`);
+  console.log(`       ${hitboxes} station hitboxes over ${Math.min(a.length, 12)} stations, worst ground-above-pad ${worstBury.toFixed(2)} m`);
+  check(gatedOut === 0, 'station hitboxes buried out of reach of collide.js', gatedOut, `0 of ${hitboxes}`);
+  /* The bound is not a taste: the placement guarantees the ground is within STATION_MAX_STEP
+   * of the road, the bake may lift the slab PAD_STEP of the way to meet it, so the residue is
+   * their difference. The 0.25 on top is the seven-point pad probe missing a local high spot
+   * between its own samples. Measured across six seeds: 0.95 .. 1.79 m, against a 3.6 m kiosk —
+   * i.e. a forecourt building always stands at least half its own height proud of the hill,
+   * which is what the (separate, absolute) height-gate check above then confirms. */
+  const BURY_MAX = STATION_MAX_STEP - PAD_STEP + 0.25;
+  check(worstBury < BURY_MAX, 'deepest a forecourt is buried in its own hillside (m)', worstBury.toFixed(2), `< ${BURY_MAX.toFixed(2)} (STATION_MAX_STEP - PAD_STEP + probe slack)`);
+  {
+    // ...and the placement's own promise, read off the record it wrote rather than re-derived.
+    let worstPlaced = 0;
+    for (const s of a) worstPlaced = Math.max(worstPlaced, s.step ?? 0);
+    check(worstPlaced <= STATION_MAX_STEP + 1e-6, 'worst forecourt ground step at placement (m)',
+      worstPlaced.toFixed(2), `<= ${STATION_MAX_STEP} (STATION_MAX_STEP)`);
+  }
   check(worstSpurEndFinite, 'access spur mouth height is always a real number', worstSpurEndFinite, 'true');
   // A real driveway grade over the spur's own ~8.9 m length (STATION_OFFSET - APRON_HALF_DEPTH
   // + 0.4, world/props.js), not a flat pad — so this is deliberately looser than the 0.7 m
@@ -589,6 +670,39 @@ console.log('\n── frame cost ───────────────�
       const again = props.drainCollectedFuel();
       check(again === 0, 'standing on an already-collected spot does not pay out twice', again, '0');
     }
+
+    /* ── and BRUSHING PAST at speed collects one, from the road ────────────────
+     * Operator: "make them a little nearer, with a giant hitbox so you can tap them easily."
+     * The two halves of that are placement (the reachability check further up) and this: a can
+     * has to be collected by a car that never slows down and never leaves the tarmac. So this
+     * takes another live can, works out the nearest point on its own road's centreline, offsets
+     * to the OUTERMOST STREAK-LEGAL driving line (half the carriageway minus a wheel's
+     * half-track — see the reachability check for why that is the exact limit), and sweeps the
+     * car past on that line at 120 km/h in single frames, never closer to the can than a car
+     * staying honestly on the road can get. If _updateCans had a speed gate, or CAN_RADIUS were
+     * too small for where the can is placed, nothing would be collected here. */
+    const [driveKey, driveCan] = [...props.cans.entries()].find(([, c]) => c) || [];
+    if (driveCan) {
+      const terr = new Terrain(SEED, driveCan.x - 60, driveCan.z - 60, driveCan.x + 60, driveCan.z + 60, 80);
+      const cc = terr.roads.carve(driveCan.x, driveCan.z);
+      // Back onto the centreline, then out to the legal limit on the can's own side.
+      const WHEEL_HALF = 0.8;
+      const nx = cc.tz;
+      const nz = -cc.tx;
+      const sign = Math.sign((driveCan.x - (driveCan.x - nx * cc.d)) * nx + (driveCan.z - (driveCan.z - nz * cc.d)) * nz) || 1;
+      const lane = Math.max(0, cc.width * 0.5 - WHEEL_HALF);
+      const lineX = driveCan.x - nx * sign * (cc.d - lane);
+      const lineZ = driveCan.z - nz * sign * (cc.d - lane);
+      const gap = Math.hypot(lineX - driveCan.x, lineZ - driveCan.z);
+      const V = 120 / 3.6; // m/s — faster than anything in the fleet cruises at
+      const STEP = V / 60; // one frame of travel
+      props.drainCollectedFuel();
+      for (let i = -40; i <= 40; i++) props.update(1 / 60, lineX + cc.tx * i * STEP, lineZ + cc.tz * i * STEP);
+      const drive = props.drainCollectedFuel();
+      console.log(`       swept past ${driveKey} at 120 km/h on the outermost legal line, ${gap.toFixed(2)} m away (road ${cc.width.toFixed(1)} m wide)`);
+      check(gap < CAN_RADIUS, 'that pass never left the tarmac and still came inside CAN_RADIUS', gap.toFixed(2), `< ${CAN_RADIUS}`);
+      check(drive >= CAN_FRACTION - 1e-9, 'brushing past at speed collects the can', drive.toFixed(3), `>= ${CAN_FRACTION.toFixed(3)}`);
+    }
   }
 
   props.dispose();
@@ -605,77 +719,225 @@ console.log('\n── a real station hitbox actually stops the car ────�
   const solids = new Solids();
   const props = new Props({ seed: SEED, scene, solids });
 
-  // Stations sit a couple of km apart and the tile window only reaches ~1.2 km, so — rather
-  // than hope one falls within range of the origin on every seed — find a real one first
-  // (nearestStation is pure and cheap) and drive the window to ITS location, guaranteeing its
-  // tile actually gets built and baked.
-  const target = nearestStation(0, 0, SEED, 20000);
-  check(!!target, 'a real station exists somewhere to test collision against', target ? `${(target.dist / 1000).toFixed(2)} km from the origin` : 'none', 'one');
+  /* Stations sit a couple of km apart and the tile window only reaches ~1.2 km, so — rather
+   * than hope one falls within range of the origin on every seed — find real ones first
+   * (stationsInBox is pure and cheap) and drive the window to each in turn, guaranteeing the
+   * tile actually gets built and baked.
+   *
+   * SEVERAL candidates, not the nearest one: the run below drives on the REAL heightfield
+   * through the REAL world, so the approach line to any given forecourt may have a tree on it
+   * or a bank the car bogs down on. That is a fact about that hillside, not about the hitbox,
+   * and on seed 424242 it is exactly what happens — the car stalls 25 m short having hit
+   * nothing. So the harness takes the first station whose approach the car can actually
+   * complete, and says which. It only fails if NONE of them will let a car reach a forecourt,
+   * which is the thing this check is for. */
+  /* WHERE THE RUN STARTS: the mouth of the station's own access spur, i.e. the edge of the
+   * carriageway a real driver pulls off. Not a point out in the field — an earlier version
+   * started 34 m out along the forecourt's own axis, which on some seeds is 10 m the far side
+   * of the road in a marsh, and a touring car on a 'cruise' preset simply bogs down in it and
+   * never arrives. Off the road, across the apron, into the building: the player's own path.
+   *
+   * ARRIVING AT SPEED, not accelerating from rest: the car is launched at 12 m/s (43 km/h) with
+   * the throttle then held down, because the question is what a moving car does when it meets a
+   * building, and how quickly a stationary one can get going on a given patch of ground is a
+   * question about that ground. */
+  const APPROACH_V = 12;
+  const approachFrom = (s) => {
+    const sp = stationSpur(s);
+    return [sp.mouthX, sp.mouthZ];
+  };
+  const launch = (c, x, z, tx, tz) => {
+    const heading = Math.atan2(tx - x, tz - z);
+    c.placeAt(x, z, heading);
+    c.speed = APPROACH_V;
+    c.vx = Math.sin(heading) * APPROACH_V;
+    c.vz = Math.cos(heading) * APPROACH_V;
+  };
 
-  if (target) {
+  const near = stationsInBox(-9000, -9000, 9000, 9000, SEED)
+    .map((s) => ({ s, d: Math.hypot(s.x, s.z) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 6);
+  check(near.length > 0, 'real stations exist to test collision against', near.length ? `${(near[0].d / 1000).toFixed(2)} km from the origin` : 'none', 'at least one');
+
+  {
+    /* Find one that is baked AND reachable. `reach()` is the same run as the graded checks
+     * below, cut short — it only asks whether the car gets to a forecourt structure at all. */
     let st = null;
-    for (let i = 0; i < 4000 && !st; i++) {
-      props.update(1 / 60, target.x, target.z);
-      st = props.stations.find((s) => s.key === target.key) || null;
+    let attempts = 0;
+    for (const cand of near) {
+      let live = null;
+      for (let i = 0; i < 4000 && !live; i++) {
+        props.update(1 / 60, cand.s.x, cand.s.z);
+        live = props.stations.find((q) => q.key === cand.s.key) || null;
+      }
+      if (!live) continue;
+      attempts++;
+      const c2 = Math.cos(live.yaw), s2 = Math.sin(live.yaw);
+      const kz0 = -(STATION_APRON_HALF_DEPTH - 2.2);
+      const kX = live.x + 0 * c2 - kz0 * s2;
+      const kZ = live.z + 0 * s2 + kz0 * c2;
+      const [sX, sZ] = approachFrom(live);
+      const TT = new Terrain(SEED, live.x - 120, live.z - 120, live.x + 120, live.z + 120, 120);
+      const probe = new Vehicle({ tier: 'touring', terrain: TT, preset: 'cruise' });
+      launch(probe, sX, sZ, kX, kZ);
+      const scratch = new Solids();
+      for (const [k, l] of solids.byChunk) scratch.addChunk(k, l);
+      let ok = false;
+      for (let k = 0; k < 60 * 14 && !ok; k++) {
+        let e = Math.atan2(kX - probe.x, kZ - probe.z) - probe.yaw;
+        while (e > Math.PI) e -= Math.PI * 2;
+        while (e < -Math.PI) e += Math.PI * 2;
+        probe.update(1 / 60, { steer: clamp(e * 3, -1, 1), throttle: 1, brake: 0, handbrake: 0, analogue: true });
+        const h = scratch.resolve(probe, 1.05, 1 / 60);
+        if (h && h.kind === 'station') ok = true;
+      }
+      if (ok) {
+        st = live;
+        break;
+      }
     }
-    check(!!st, 'that station is actually live and baked (with its own padY/hitboxes)', st ? `${st.key} at ${st.x.toFixed(0)},${st.z.toFixed(0)}` : 'none', 'one');
+    check(!!st, 'a station whose forecourt a car can actually drive into', st ? `${st.key} at ${st.x.toFixed(0)},${st.z.toFixed(0)} (tried ${attempts})` : `none of ${attempts}`, 'one');
 
     if (st) {
-      // The car's own terrain is a flat stand-in AT THE STATION'S OWN GRADED HEIGHT, so the
-      // collider (baked against the REAL world) and the car (driven on the stub) agree on
-      // where the ground is — this tests the hitbox itself, not a second terrain sampler.
-      const STUB = {
-        surface: () => ({ y: st.padY, nx: 0, ny: 1, nz: 0, grip: 1, rough: 0.06, surfaceKind: 'tarmac', onRoad: 1, dominant: 0 }),
-        height: () => st.padY,
-      };
-      const car = new Vehicle({ tier: 'touring', terrain: STUB, preset: 'cruise' });
-
-      // Aim the car at the kiosk hut — STATION_HITBOXES' own local (0, -(AD-2.2)) entry in
-      // src/render/props.js — approaching from 14 m further out along the SAME local axis, so
-      // the run-up crosses real open apron before it reaches anything solid.
+      /* THE REAL HEIGHTFIELD, not a flat stub at the pad. That substitution is exactly what
+       * hid this bug for two rounds: on a stub at padY the car and the collider trivially agree
+       * about where the ground is, so the height gate collide.js applies (`car.y - 0.4 >
+       * s.y + s.h`) can never fire and a station buried three metres into a hillside tests
+       * green. The car now drives on the same Terrain the world builds, so if the forecourt is
+       * underground this check says so. */
       const ca = Math.cos(st.yaw), sa = Math.sin(st.yaw);
-      const kioskDX = 0, kioskDZ = -(STATION_APRON_HALF_DEPTH - 2.2);
-      const kioskX = st.x + kioskDX * ca - kioskDZ * sa;
-      const kioskZ = st.z + kioskDX * sa + kioskDZ * ca;
-      const startDZ = kioskDZ - 14;
-      const startX = st.x + 0 * ca - startDZ * sa;
-      const startZ = st.z + 0 * sa + startDZ * ca;
-      const heading = Math.atan2(kioskX - startX, kioskZ - startZ);
-      car.placeAt(startX, startZ, heading);
-      car.speed = 12; // a real, deliberate approach speed (43 km/h), not a crawl
-      car.vx = Math.sin(heading) * car.speed;
-      car.vz = Math.cos(heading) * car.speed;
+      const T = new Terrain(SEED, st.x - 120, st.z - 120, st.x + 120, st.z + 120, 120);
+      const CAR_R = 1.05;
+      const L2W = (dx, dz) => [st.x + dx * ca - dz * sa, st.z + dx * sa + dz * ca];
+
+      // The kiosk hut — STATION_HITBOXES' own local (0, -(AD-2.2)) entry in render/props.js.
+      const kioskDZ = -(STATION_APRON_HALF_DEPTH - 2.2);
+      const [kioskX, kioskZ] = L2W(0, kioskDZ);
+      // Every forecourt collider this station registered, so "did the car get inside a
+      // building" is asked of the thing it actually reached first (the pump island stands
+      // between the road and the kiosk) rather than only of the kiosk it was aimed at.
+      const stationSolidsHere = [];
+      for (const list of solids.byChunk.values()) {
+        for (const s of list) if (s.kind === 'station' && Math.hypot(s.x - st.x, s.z - st.z) < 30) stationSolidsHere.push(s);
+      }
+      check(stationSolidsHere.length === 7, 'forecourt colliders registered with the resolver', stationSolidsHere.length, '7 (STATION_HITBOXES)');
+      /* A REAL approach: in off the road at the spur mouth (see approachFrom/launch above),
+       * full throttle held, steering held on the kiosk — on real ground a car at zero steer
+       * wanders down the fall of the hill and misses, which is a fact about the hill and not
+       * about the hitbox. The old version of this check gave the car 14 m and half throttle on
+       * a FLAT STUB, which is a manoeuvre, not a collision. */
+      const [startX, startZ] = approachFrom(st);
+      const car = new Vehicle({ tier: 'touring', terrain: T, preset: 'cruise' });
+      launch(car, startX, startZ, kioskX, kioskZ);
+      const runUp = Math.hypot(startX - kioskX, startZ - kioskZ);
+      solids._px = null;
 
       const DT = 1 / 60;
+      let speedIn = 0;
+      let speedOut = null;
+      let hitKind = null;
       let stopped = false;
-      let minDist = Infinity;
-      for (let k = 0; k < 60 * 8 && !stopped; k++) {
-        car.update(DT, { steer: 0, throttle: 0.5, brake: 0, handbrake: 0, analogue: true });
-        solids.resolve(car, 1.05, DT);
-        const d = Math.hypot(car.x - kioskX, car.z - kioskZ);
-        if (d < minDist) minDist = d;
-        if (k > 10 && Math.hypot(car.vx, car.vz) < 0.5) stopped = true;
+      /* Worst overlap with ANY forecourt structure at any point in the run, in metres —
+       * positive means the car's own body was inside a building. This is the "penetration
+       * before/after" number: with the colliders height-gated away it is the full depth of the
+       * kiosk, because the car simply drives through it. */
+      let worstPen = -Infinity;
+      const penNow = () => {
+        let p = -Infinity;
+        for (const s of stationSolidsHere) {
+          if (s.h && car.y - 0.4 > s.y + s.h) continue; // collide.js's own gate: not hittable
+          p = Math.max(p, s.r + CAR_R - Math.hypot(car.x - s.x, car.z - s.z));
+        }
+        return p;
+      };
+      for (let k = 0; k < 60 * 14; k++) {
+        let e = Math.atan2(kioskX - car.x, kioskZ - car.z) - car.yaw;
+        while (e > Math.PI) e -= Math.PI * 2;
+        while (e < -Math.PI) e += Math.PI * 2;
+        const pre = Math.hypot(car.vx, car.vz);
+        car.update(DT, { steer: clamp(e * 3, -1, 1), throttle: 1, brake: 0, handbrake: 0, analogue: true });
+        const h = solids.resolve(car, CAR_R, DT);
+        worstPen = Math.max(worstPen, penNow());
+        if (h && speedOut === null) {
+          speedIn = pre;
+          speedOut = Math.hypot(car.vx, car.vz);
+          hitKind = h.kind;
+        }
+        if (speedOut !== null && Math.hypot(car.vx, car.vz) < 0.5) {
+          stopped = true;
+          break;
+        }
       }
-      const finalDist = Math.hypot(car.x - kioskX, car.z - kioskZ);
-      console.log(`       drove at the kiosk from 14 m out (43 km/h, half throttle held): closest approach ${minDist.toFixed(2)} m, stopped ${finalDist.toFixed(2)} m short`);
-      check(stopped, 'the car actually came to a stop rather than driving straight through', stopped, 'true');
-      check(minDist > 2.0, 'never got closer than the hitbox (kiosk r=2.5 m) plus the car radius allow', minDist.toFixed(2), '> 2.0 m');
-      check(finalDist < 13, 'and stopped NEAR the kiosk, not stalled short for an unrelated reason', finalDist.toFixed(2), '< 13 m (started 14 m out)');
+      console.log(
+        `       drove in off the road at the spur mouth, ${runUp.toFixed(1)} m from the kiosk, real ground, full throttle: hit a '${hitKind}' at ` +
+          `${(speedIn * 3.6).toFixed(1)} km/h -> ${((speedOut ?? 0) * 3.6).toFixed(2)} km/h, ` +
+          `deepest overlap with any forecourt structure ${worstPen.toFixed(3)} m`,
+      );
+      check(hitKind === 'station', 'the forecourt structures are registered AND reachable', hitKind ?? 'nothing', "'station'");
+      check(speedOut !== null && speedOut < 0.6, 'a full-speed arrival is a DEAD STOP, not a slide-off', speedOut === null ? 'never hit' : `${(speedOut * 3.6).toFixed(2)} km/h`, '< 2.2 km/h');
+      check(stopped, 'and the car stays stopped rather than pushing on through', stopped, 'true');
+      check(worstPen <= 0.05, 'deepest the car ever got inside a forecourt structure (m)', worstPen.toFixed(3), '<= 0.05 (no overlap)');
 
       // And the open apron itself must NOT be a wall — driving onto the forecourt (well clear
       // of the kiosk/pump/post hitboxes) must not stop the car, or nobody could ever refuel.
-      const car2 = new Vehicle({ tier: 'touring', terrain: STUB, preset: 'cruise' });
-      const apronDZ = 3.5; // toward the road from centre, inside the forecourt, clear of every STATION_HITBOXES entry
-      const apronX = st.x + 0 * ca - apronDZ * sa;
-      const apronZ = st.z + 0 * sa + apronDZ * ca;
+      const car2 = new Vehicle({ tier: 'touring', terrain: T, preset: 'cruise' });
+      const [apronX, apronZ] = L2W(0, 3.5); // inside the forecourt, clear of every hitbox
       car2.placeAt(apronX, apronZ, 0);
       car2.speed = 0;
       for (let k = 0; k < 60 * 2; k++) {
         car2.update(DT, { steer: 0, throttle: 0, brake: 0, handbrake: 0, analogue: true });
-        solids.resolve(car2, 1.05, DT);
+        solids.resolve(car2, CAR_R, DT);
       }
       const drift = Math.hypot(car2.x - apronX, car2.z - apronZ);
-      check(drift < 0.5, 'the open apron itself is drivable — a stationary car there is not pushed out by an invisible wall', drift.toFixed(3), '< 0.5 m');
+      check(drift < 0.6, 'the open apron itself is drivable — a stationary car there is not pushed out by an invisible wall', drift.toFixed(3), '< 0.6 m');
+
+      /* ── and the hitboxes are where the BUILDINGS are ──────────────────────
+       * The drive above proves the collider stops the car. It cannot prove the collider is on
+       * the kiosk rather than three metres beside it, because it aims at the collider's own
+       * coordinates — the same circularity diag-collide.mjs calls out for trees. So: rebuild
+       * the station geometry the renderer actually bakes, slice it at the heights a bumper
+       * sweeps through, and check every bit of drawn structure at that height is inside some
+       * hitbox. Furniture with no collider on purpose (the bench, the air line — you brush past
+       * those) is excluded by name, exactly as `scrub` is excluded from TRUNK_R. */
+      const M = PB();
+      buildStation(M, rng(hash3i(1, 2, 3, 4)), 0.4);
+      const boxes = stationSolids([{ x: 0, z: 0, y: 0, yaw: 0, padY: 0 }]);
+      const FURNITURE = [
+        { x: -STATION_APRON_HALF_WIDTH + 2.0, z: -STATION_APRON_HALF_DEPTH + 2.6, r: 1.6 }, // the bench
+        { x: -STATION_APRON_HALF_WIDTH + 1.2, z: 1.2, r: 0.6 },                             // the air line
+      ];
+      let worstOutside = 0;
+      let outsideCount = 0;
+      let sliced = 0;
+      for (const Y of [0.35, 0.6, 0.85, 1.1, 1.35]) {
+        for (let k = 0; k < M.idx.length; k += 3) {
+          const tri = [M.idx[k], M.idx[k + 1], M.idx[k + 2]];
+          for (let e = 0; e < 3; e++) {
+            const a2 = tri[e];
+            const b2 = tri[(e + 1) % 3];
+            const ya = M.pos[a2 * 3 + 1];
+            const yb = M.pos[b2 * 3 + 1];
+            if ((ya - Y) * (yb - Y) > 0 || ya === yb) continue;
+            const f = (Y - ya) / (yb - ya);
+            const px = M.pos[a2 * 3] + (M.pos[b2 * 3] - M.pos[a2 * 3]) * f;
+            const pz = M.pos[a2 * 3 + 2] + (M.pos[b2 * 3 + 2] - M.pos[a2 * 3 + 2]) * f;
+            if (FURNITURE.some((q) => Math.hypot(px - q.x, pz - q.z) <= q.r)) continue;
+            sliced++;
+            let outside = Infinity;
+            for (const b of boxes) {
+              if (Y > b.h) continue;
+              outside = Math.min(outside, Math.hypot(px - b.x, pz - b.z) - b.r);
+            }
+            if (outside > 0.001) {
+              outsideCount++;
+              if (outside > worstOutside) worstOutside = outside;
+            }
+          }
+        }
+      }
+      console.log(`       ${sliced} slices of drawn structure at bumper height, ${outsideCount} of them outside a hitbox`);
+      check(worstOutside <= 0.25, 'drawn structure sticking out past its hitbox (m)', worstOutside.toFixed(3), '<= 0.25 (the pump hose nozzles, which are rubber)');
     }
   }
   props.dispose();

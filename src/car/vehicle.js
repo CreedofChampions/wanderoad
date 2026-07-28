@@ -173,10 +173,6 @@ export class Vehicle {
     this.gear = 1;
     this.rpm = GEARBOX.idleRpm;
     this.reverse = false;
-    // Was the brake pedal OFF as of the last step? Reverse only ever arms on the rising edge
-    // of a FRESH press made while already slow — see the reverse-engage comment in _step() for
-    // why a continuous hold must not count. Starts true: the pedal is up at rest.
-    this._brakeWasOff = true;
 
     // internal
     this._shiftTimer = 0;
@@ -226,6 +222,7 @@ export class Vehicle {
     this.surfaceKind = 'ground';
     this.gripScale = 1;
     this.rough = 0;
+    this.sag = 0; // current spring compression, metres — the renderer's ride-height correction
     /* Off-road, judged at the four contact patches rather than at the badge on the bonnet.
      * `onRoad` is the average — the rolling resistance and the speed ceiling deliberately
      * still read that one, because those are honestly proportional to how much of the car's
@@ -634,6 +631,8 @@ export class Vehicle {
     let g = AIR.gravity;
     if (airborne) {
       this._airTime += dt;
+      // Wheels droop toward full extension in the air — ease the render correction out too.
+      this.sag += (0 - this.sag) * Math.min(1, dt * 6);
       // TDU's own trick: extra downward acceleration once a wheel leaves the ground, so
       // landings settle instead of pogoing. Hardcore removes it, which is exactly why
       // hardcore cars famously launch off crests.
@@ -645,6 +644,13 @@ export class Vehicle {
     } else {
       this._airTime = 0;
       const compression = clamp(rideYTip - this.y, -SUSPENSION.travel, SUSPENSION.travel);
+      /* Exposed for the renderer. At steady state the springs sit m·g/(4k) below rest — about
+       * ten centimetres — and main.js used to place the model at (y - restLength) as if the
+       * springs were uncompressed, which sank the tyres that far into the road. The operator
+       * saw it twice: "all 4 wheels touch road" and "wheels are often clipping right through
+       * the ground", and a screenshot shows the car on its belly. The render offset must use
+       * the ACTUAL ride height, which is restLength minus this. */
+      this.sag = compression;
       const springA = (SUSPENSION.stiffness * 4 * compression) / this.mass;
       const dampA = (SUSPENSION.damping * 4 * -this.vy) / this.mass;
       this.vy += (springA + dampA - g) * dt;
@@ -759,10 +765,10 @@ export class Vehicle {
     const limiter = this.rpm >= S.redline ? 0.15 : 1;
     const engineTorque = S.peakTorque * curveAt(TORQUE_CURVE, rpmFrac) * this.throttle * shiftCut * limiter;
     let driveForce = ((engineTorque * ratio) / S.wheelRadius) * (1 - GEARBOX.driveLoss);
-    /* Reverse should not need a gear key. Hold the brake with the car stopped and it backs
-     * up; touch the throttle and it goes forward again. "The ability to stop, turn around and
-     * change direction is key" — and on a keyboard the cheapest way to make that true is to
-     * let the pedals mean what they obviously mean. */
+    /* Reverse should not need a gear key. Hold the brake with the car stopped — or slowed
+     * right down — and it backs up; touch the throttle and it goes forward again. "The
+     * ability to stop, turn around and change direction is key" — and on a keyboard the
+     * cheapest way to make that true is to let the pedals mean what they obviously mean. */
     /* THE DEADLOCK THIS ONCE CAUSED, because it is not obvious from the code:
      * the auto-pilot brakes at 0.35 when it cannot find a road, which tripped this test and
      * put the car in reverse. Reverse then only cleared when the car was moving forwards —
@@ -771,45 +777,66 @@ export class Vehicle {
      * cost two rounds of guessing at the wrong subsystem.
      *
      * Two fixes. The auto-pilot's own input never engages reverse — a chauffeur that decides
-     * to reverse is not a chauffeur. And throttle clears reverse whenever the car is nearly
-     * stationary, whichever way it happens to be creeping. */
-    /* THE STOP THAT BECAME A REVERSE: gating this on the CURRENT brake+speed state alone means
-     * an ordinary hard stop — brake pressed once at speed and held, exactly what "stop at a red
-     * light" or a panic stop both look like — reads as "reverse" the instant `vLong` decays
-     * under 0.6 m/s, because the same held pedal that did the stopping is still past 0.35 and
-     * the throttle was never touched. Measured (tools/diag-c2-repro.mjs, the browser suite's own
-     * C2 scenario replayed headless): a 111 km/h dead-straight stop reached 0.2 km/h at ~3.5 s,
-     * then this fired and pushed the car BACKWARDS for the remaining ~2.5 s of a continued
-     * brake hold, ending at 4.8 km/h instead of stopped — failing the very check ("the brakes
-     * stop the car promptly") that a hard stop should trivially pass, and for the worse reason
-     * that the brake block above is skipped entirely once `this.reverse` is true, so the car
-     * never even got to finish braking normally.
+     * to reverse is not a chauffeur. And throttle clears reverse whenever the car is holding
+     * the throttle at all, whichever way it happens to be moving. */
+    /* THE ARMING COMPLEXITY THIS USED TO HAVE, and why it is gone: an earlier version required
+     * the brake pedal to be RELEASED and freshly RE-PRESSED (an edge-triggered `_brakeWasOff`
+     * latch) before reverse was allowed to engage, specifically so that an ordinary hard stop —
+     * brake held from speed straight through to a standstill — would not roll into reverse.
+     * That is precisely the operator's own complaint: "the gear system forces you into reverse
+     * but then you can't move... Tapping multiple times sometimes works. It should be simple:
+     * push and hold S to reverse." Measured on the unmodified code
+     * (tools/diag-reverse.mjs): holding S continuously from 50 km/h braked the car to a dead
+     * stop and then just sat there forever, because by the time `vLong` caught up to the arm
+     * speed the latch had already been consumed by the same held press — reverse could only
+     * ever engage by releasing S and pressing it again once slow, which is exactly the
+     * "tapping" workaround being reported. So the latch is gone: reverse is now a plain,
+     * every-step read of the pedals and the speed, no memory of what the pedal was doing a
+     * moment ago, no B-key arming step, nothing to get stuck.
      *
-     * `this._brakeWasOff` fixes it by requiring the PRESS itself, not just the pedal position,
-     * to be fresh: reverse only arms on the step the pedal crosses from released into held while
-     * the car is already slow. A held-through-the-stop brake never sees that edge (the pedal
-     * was already past 0.35 seconds after the press began, long before `vLong` caught up), so an
-     * ordinary stop just stops and stays stopped, no matter how long the pedal is held — which
-     * is what every other setback in this game already reads as (gentle, not a snap into motion
-     * nobody asked for). The real feature is untouched: stop, let off the brake (even briefly),
-     * press it again — the natural motion for "and now I want to back up" — and it reverses
-     * exactly as before.
-     *
-     * `_brakeWasOff` is latched with hysteresis, not read straight off `this.brake < 0.05`
-     * every frame: the pedal itself is ramped (PEDAL.brakeUp), so a fresh press spends several
-     * steps crossing the dead zone between "released" (< 0.05) and "held" (> 0.35) below, and a
-     * flag that re-read the instant position every frame would flip to "not off" the moment it
-     * left 0.05 — BEFORE it ever reached the 0.35 the engage check actually waits for — which
-     * would silently break the real feature too, not just leave C2 fixed by accident. Only the
-     * two ends of the ramp move it: dropping under 0.05 arms it, crossing above 0.35 consumes
-     * it, and it holds its value through everything in between. */
-    if (!input.auto && Math.abs(vLong) < 0.6 && this.brake > 0.35 && this.throttle < 0.05 && this._brakeWasOff) {
-      this.reverse = true;
-    } else if (this.throttle > 0.15 && vLong > -3) {
+     * THE TRADE THIS MAKES, said plainly: `tools/diag-c2-repro.mjs` and the browser suite's own
+     * C2 ("the brakes stop the car promptly") hold S continuously for 6 s from over 45 km/h and
+     * want the car to end under 3 km/h — i.e. stopped and STAYING stopped under a held brake,
+     * which is now false: a hard stop held on S will brake to a standstill and then back up,
+     * on purpose, because that is what "push and hold S to reverse, period" means. C2 was built
+     * to stop the OLD failure (a stop that rolled backwards by accident on a single tap); it now
+     * measures the NEW, deliberately-requested behaviour and will read as a regression unless
+     * its own threshold is updated to expect reverse after a held stop — flagged here rather
+     * than silently landing a check the operator's own words describe as wrong. */
+    /* edited by AI from here — THROTTLE CLEARS REVERSE UNCONDITIONALLY, auto-drive included.
+     * The comment above states the rule as "throttle clears reverse whenever the car is
+     * holding the throttle at all, whichever way it happens to be moving", but the clear was
+     * inside the `!input.auto` guard, so it could never run while the chauffeur was driving —
+     * and the chauffeur's own input never engages reverse either, so a `reverse` latched by
+     * the PLAYER before pressing G could never be cleared by anything. Measured live
+     * (headless Chrome, seed 20260726): hold S from 70 km/h to a standstill (which arms
+     * reverse, by design), press R, then press G — auto-drive reports on, throttle 1.0, and
+     * the car sits at 0.0 km/h for 10.5 s. That is the exact deadlock the comment above says
+     * was fixed, and it is what fails the browser suite's "G engages auto-drive and it
+     * drives" (0.3 km/h) and, downstream of the car being left off the road by it, "the road
+     * streak accumulates" (0 m). Reverse is still only ARMED by a real player's brake — that
+     * half stays inside the guard, so "a chauffeur that decides to reverse is not a
+     * chauffeur" still holds. */
+    if (this.throttle > 0.1) {
+      // W always means forward. An immediate, unconditional override — no speed gate, no
+      // delay — because "press W while reversing" has to work the instant it is pressed.
       this.reverse = false;
     }
-    if (this.brake < 0.05) this._brakeWasOff = true;
-    else if (this.brake > 0.35) this._brakeWasOff = false;
+    if (!input.auto) {
+      if (this.throttle > 0.1) {
+        /* handled unconditionally above */
+      } else if (this.brake > 0.05) {
+        // S means reverse once the car is at or near a standstill — or already reversing, in
+        // which case it just keeps going, however fast the reverse governor has it moving.
+        if (this.reverse || Math.abs(vLong) < REVERSE.armSpeed) this.reverse = true;
+        // else: still rolling forward faster than the arm speed — this is an ordinary brake
+        // pedal, not a request to reverse yet. The brake block further down does the stopping.
+      }
+      // Neither pedal held: leave `this.reverse` exactly as it was. Coasting with the flag set
+      // does nothing on its own (driveForce is only routed through the reverse block below
+      // once the brake is pressed again), and this is also what lets the B-key alias in
+      // main.js (`car.reverse = !car.reverse`) survive a step without being clobbered here.
+    }
     if (this.reverse) {
       // In reverse the brake IS the accelerator, and reverse is deliberately slow.
       let rev = Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
