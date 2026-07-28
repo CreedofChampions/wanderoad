@@ -7,3 +7,8 @@ base44/.app.jsonc
 .env
 *.log
 wanderoad-extension-*.zip
+
+# Headless Chrome profiles from ad-hoc probe scripts (any name, not just .chrome-*)
+.cp1prof/
+.chrome-*/
+*-prof/
