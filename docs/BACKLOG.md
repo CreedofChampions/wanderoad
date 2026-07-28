@@ -39,6 +39,14 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
+- [ ] **Downhill bounce (operator GIF, 28 July).** Repeated airborne/land pogo descending steep
+      alpine roads at speed. Stills look fine — it is temporal. Verify's alpine AUTODRIVE watch
+      saw none (35–38 km/h, 100% on carriageway), so it needs SPEED + descent: the ground falls
+      away faster than gravity + the extra-air-gravity assist can bring the car down, so it
+      cycles airborne/land. Candidate fix: a downforce/suction term while |vy| is small and the
+      ground is receding, inside SUSPENSION.travel. bench-car is the hard gate; vehicle.js was
+      heavily edited this round — rebase carefully.
+
 ### Playtest round 3 — from the operator's own screenshots, 27 July
 
 Everything here was READ OFF REAL SCREENSHOTS he sent, not inferred. Each is its own
