@@ -639,7 +639,13 @@ export class Vehicle {
      * wherever the surface is wet. `wetHere` is reused by the suction below. */
     const _wy = surf && surf.w ? waterLevelAt(surf.w, surf.y) : null;
     const wetHere = _wy !== null && _wy > surf.y;
-    const airborne = gap > (wetHere ? 0.06 : SUSPENSION.travel);
+    /* REVERTED to the original tight threshold. Widening it to the full droop band fixed the
+     * bounce but let the spring chase the LAKE BED wherever the water test could not see the
+     * water — bench-boat's fixture surface has no biome-weight array, so the dry/wet gate
+     * silently read "dry" and the car sank to 1.13 m against a 1.0 m bar. A gate that depends
+     * on a field a caller may not supply is the "stub probe lies" trap this repo has paid for
+     * before. The suction and rebound-clamp below carry the bounce fix on their own. */
+    const airborne = gap > 0.06;
     this.onGround = !airborne;
 
     // Vertical: a spring to the ride height plus gravity, with the suspension travel
