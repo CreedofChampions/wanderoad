@@ -76,10 +76,31 @@ checkpoint and ships on its own.
       200, lanes 288-345), stations 2391 m of arterial apiece (bar 1500-5000),
       `bench-props.mjs` full pass, browser 40/40, live 40/40.
 
-- [ ] **A station "town" with no road to it.** Screenshot: pumps, canopy, buildings, poles and a
-      parked truck sitting in open grassland, with the nearest road far off to one side and no
-      connection at all. So the access-spur work does not cover every station. Same root area as
-      the item above and probably the same fix — but confirm, do not assume.
+- [x] **A station "town" with no road to it — DOES NOT REPRODUCE.** Measured rather than
+      assumed, and the numbers say the connection is sound:
+
+      - **99 of 99 stations** across 5 seeds have their access-spur mouth ON a road. Worst
+        mouth-to-road distance **4.77 m**, inside the road's own width.
+      - **234 town props** across 3 seeds (48 / 63 / 123): worst distance to a road **53 m**, and
+        **zero** props further than 60 m from one — which is the `TOWN_MAX_OFFSET` the system is
+        built around, working as designed.
+
+      The likeliest explanation for the screenshot is that it predates the access-spur work, or
+      the connecting road was out of frame. Reopen with a seed and coordinates if it recurs —
+      that is all this needs to become reproducible.
+
+      **THE REAL LESSON IS MY OWN MEASUREMENT ERROR, and it is worth writing down because it
+      would have produced a confident, completely wrong bug report.** My first harness passed
+      `stationTownInBox` a stub probe returning only `{ y }`. The town placer asks the probe for
+      `site(x,z).wy` — the WATER HEIGHT — and compares ground against it. `undefined` fails that
+      comparison, so **every candidate read as underwater**: 0 town props placed, `rejectWater`
+      64–73%. That looks exactly like the reported bug and would have "confirmed" it.
+
+      Two things saved it: a rejection tally that named `rejectWater` specifically, and the fact
+      that 73% of ground being underwater next to stations built on dry roads is not a believable
+      number. **A stub probe that silently omits a field does not fail — it lies.** Any future
+      harness calling into props.js must build the probe the way `src/render/props.js` does
+      (`weights()` into a copied scratch array, then `waterLevelAt`), not a convenient stub.
 
 - [x] **Roads go AROUND lakes now.** Over the 144 km² box at the default spawn: non-wetland road
       over open water **56.19 km -> 2.33 km** (-96%), separate causeway runs over 150 m
