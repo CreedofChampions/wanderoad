@@ -44,15 +44,37 @@ every node-side check that was run against it.
 Everything here was READ OFF REAL SCREENSHOTS he sent, not inferred. Each is its own
 checkpoint and ships on its own.
 
-- [ ] **BLOCKING-ish — roads end in the middle of nowhere.** Reported twice now, and a
-      screenshot pins it: a paved spur with a proper painted give-way bar simply STOPS in open
-      grass, going nowhere. The likeliest source given what landed recently is the station
-      ACCESS SPUR — a spur whose station failed its placement tests (grade, water, freeboard)
-      would leave the spur behind with nothing on the end of it. Check that the spur is only
-      ever built when its station is, and that lattice leaf-node dead ends (which are legitimate
-      by construction — a hashed lattice always has some) are visually terminated rather than
-      just stopping mid-carriageway. Autopilot already refuses to drive off a road end; this is
-      the WORLDGEN half of the same complaint.
+- [x] **Roads ending in the middle of nowhere — culled.** Interior dead ends over a 4 km box on
+      the shipped seed: **6 -> 1**, and cliffs got BETTER on the way (0.009% -> **0.004%** over
+      45 degrees, since a culled lane is an embankment that never gets built).
+
+      **Both of my first two theories were wrong, and measuring is what killed them.** It was
+      not a station access spur orphaned by a failed station — the spur and the station are
+      built in the same loop with no early-continue between them, so one cannot exist without
+      the other. And the raw dead-end count looked like 31, which would have been an emergency —
+      but an endpoint near the query box is a CLIPPED edge, not a dead end. Excluding the
+      boundary gives the real figure: **6 per 16 km², every one a tier-1 lane, zero arterials.**
+      So the cruising network was already fully connected; only lanes stopped dead.
+
+      Fixed with a local `degreeAt()` (four hash tests — the lattice connection rule is pure and
+      local, which is the only reason this is affordable) and a one-ply `isLeafLane()` cull at
+      edge emission. Arterials are deliberately untouched: they had no dead ends, and thinning
+      them would move the road density every other system is tuned against.
+
+      **Deliberately one ply, not a fixed point.** Culling a leaf can orphan its neighbour, so
+      chasing it to convergence is a global solve — on an infinite, hashed, deterministic
+      lattice there is no global anything. One ply removes 5 of 6 and keeps the function pure.
+      The residual 1 is recorded rather than hidden.
+
+      **Checked for the expensive failure mode:** node tangents still average over culled links,
+      so a surviving lane leaves a junction on a tangent shaped partly by a road that is no
+      longer drawn. That is a small curvature difference, NOT a ribbon-vs-carve divergence —
+      the renderer and the terrain carve read the same edge geometry from the same functions,
+      so they cannot disagree. `diag-seam.mjs` clean confirms it.
+
+      Gates: `npm test` green, 0 underwater road samples, curvature **234-262 deg/km** (bar is
+      200, lanes 288-345), stations 2391 m of arterial apiece (bar 1500-5000),
+      `bench-props.mjs` full pass, browser 40/40, live 40/40.
 
 - [ ] **A station "town" with no road to it.** Screenshot: pumps, canopy, buildings, poles and a
       parked truck sitting in open grassland, with the nearest road far off to one side and no
