@@ -704,11 +704,51 @@ function stationForEdge(e, seed, stats = null) {
     return null;
   }
 
-  const sideSign = rnd() < 0.5 ? 1 : -1;
+  /* WHICH SIDE OF THE ROAD, and the water test that the road point alone cannot make.
+   *
+   * The candidate loop above tests water at the ROAD point. The forecourt does not sit on the
+   * road — it sits `e.width/2 + STATION_OFFSET` (~19 m) to one side with STATION_RADIUS of
+   * apron around it, so a station can pass every test above and still have its apron running
+   * down into a lake. Measured before this existed: 4 of 128 stations across 7 seeds had apron
+   * within the road's own 1.6 m freeboard of open water, the worst clearing it by only 0.76 m.
+   * The operator's screenshot is one of them — a forecourt at the very edge of the water.
+   *
+   * The side was already a free coin flip, so it costs nothing to spend it usefully: try the
+   * chosen side, and if that apron is too near the water, take the other one. Only if BOTH
+   * sides are wet is the station dropped, which keeps stations dense (they are the thing the
+   * player hunts for) while removing the ones that look wrong. */
+  const off = e.width * 0.5 + STATION_OFFSET;
+  /* Deepest water intrusion over the apron: its centre plus its rim. `water()` returns null on
+   * dry ground. Positive means the water plane is ABOVE the graded forecourt height. */
+  const apronWater = (ax, az) => {
+    let worst = -Infinity;
+    for (let i = 0; i < 9; i++) {
+      const a = i ? ((i - 1) / 8) * Math.PI * 2 : 0;
+      const r = i ? STATION_RADIUS : 0;
+      const w = water(ax + Math.cos(a) * r, az + Math.sin(a) * r);
+      if (w !== null) worst = Math.max(worst, w - best.y);
+    }
+    return worst;
+  };
+  // Same freeboard the road itself uses, so a forecourt is held to the road's own standard.
+  const FREEBOARD = -1.6;
+  const first = rnd() < 0.5 ? 1 : -1;
+  let sideSign = 0;
+  for (const s of [first, -first]) {
+    const ax = best.x + best.tz * s * off;
+    const az = best.z + -best.tx * s * off;
+    if (apronWater(ax, az) < FREEBOARD) {
+      sideSign = s;
+      break;
+    }
+  }
+  if (!sideSign) {
+    tally('rejectApronWater'); // both sides put the forecourt in the water
+    return null;
+  }
   // Same right-hand ground normal as propsInBox and render/road.js: (tz, -tx).
   const rx = best.tz * sideSign;
   const rz = -best.tx * sideSign;
-  const off = e.width * 0.5 + STATION_OFFSET;
   const x = best.x + rx * off;
   const z = best.z + rz * off;
   tally('placed');

@@ -202,9 +202,23 @@ checkpoint and ships on its own.
       claimed as a fix in its own right — if the tail needs to go below 8% it will need a real
       angle-based rejection, and `node tools/diag-crossing-angle.mjs` is the tool for it.
 
-- [ ] **A station forecourt built at the very edge of the water,** with the apron running right
-      down into a lake. Station placement checks grade, water and freeboard at the forecourt
-      centre; it evidently does not check the whole apron footprint.
+- [x] **A station forecourt at the very edge of the water — fixed.** Apron within the road's own
+      1.6 m freeboard of open water: **4 of 128 stations -> 0**, across 7 seeds.
+
+      Cause: the candidate loop tested water at the ROAD point, but the forecourt sits about
+      19 m to one side (`e.width/2 + STATION_OFFSET`) with `STATION_RADIUS` of apron around it,
+      and the apron position was computed AFTER the tests, so it was never checked at all. A
+      station could pass every test and still run its apron into a lake. Worst measured case
+      cleared the water by only 0.76 m where the road demands 1.6 m.
+
+      The fix spends something the code was already throwing away: which side of the road the
+      forecourt sits on was a free coin flip. Now it tries the chosen side, takes the other if
+      that apron is too near the water, and only drops the station when BOTH sides are wet.
+      That matters because stations are the thing the player hunts for — **126 of 128 kept**,
+      so the side-flip rescued all but two rather than thinning the network.
+
+      Gates: `node tools/bench-props.mjs` full pass (arterial per station 2252 m, bar
+      1500–5000), `npm test` green, browser 40/40, live 40/40.
 
 - [ ] **Objects fall from the sky as they spawn.** Operator, verbatim: *"I see objects spawning
       by falling from the sky!"* Props/scatter are presumably being instanced at a height and
