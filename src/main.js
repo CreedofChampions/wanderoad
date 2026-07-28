@@ -617,7 +617,7 @@ async function boot() {
     post.speed = sNorm;
     post.limit = car.limit;
 
-    hud.update(dt, { car, streak, surface: surf, remotes, netState });
+    hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name });
     fuelGauge.update(dt, fuel, car);
     post.render(scene, camera);
     input.endFrame();

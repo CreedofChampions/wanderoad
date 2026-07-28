@@ -247,7 +247,7 @@ export class Hud {
     this.root.style.pointerEvents = on ? 'none' : '';
   }
 
-  update(dt, { car, streak, surface, remotes, netState }) {
+  update(dt, { car, streak, surface, remotes, netState, myName = '' }) {
     // ── speed ──
     const kph = Math.round(car.kph);
     this.kph.textContent = kph;
@@ -376,16 +376,29 @@ export class Hud {
       }
     }
 
-    // ── other people ──
+    /* ── who is here, INCLUDING YOU ──
+     *
+     * This list used to render remotes only, so your own name appeared nowhere in the game at
+     * all. The operator, driving two windows: "names are a problem in multiplayer -- who is each
+     * player when u cant see your own name?" Exactly right — with one name per window and no
+     * self, there is no way to tell which car is yours, and the whole list is unreadable.
+     *
+     * You are always first, always marked, and always shown even when nobody else is about —
+     * a name you can see is how you know what the other person is looking at when they say it. */
     if (remotes) {
       const list = remotes.list ? remotes.list() : [];
-      if (list.length) {
-        this.players.innerHTML = list
-          .slice(0, 6)
-          .map((p) => `<div>${escapeHtml(p.name)} <span class="dist">${Math.round(p.dist)} m</span></div>`)
-          .join('');
-      } else if (this.players.childNodes.length) {
-        this.players.innerHTML = '';
+      const mine = myName
+        ? `<div class="me">${escapeHtml(myName)} <span class="dist">you</span></div>`
+        : '';
+      const others = list
+        .slice(0, 6)
+        .map((p) => `<div>${escapeHtml(p.name)} <span class="dist">${Math.round(p.dist)} m</span></div>`)
+        .join('');
+      const html = mine + others;
+      // Only touch the DOM when the text actually changes — this runs every frame.
+      if (html !== this._playersHtml) {
+        this._playersHtml = html;
+        this.players.innerHTML = html;
       }
     }
     if (netState && netState !== this._lastNet) {
