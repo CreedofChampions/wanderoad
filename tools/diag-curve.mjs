@@ -211,6 +211,44 @@ for (let s = 0; s < 8; s++) {
   console.log(`R2 crossings out of level: ${mismatched}/${crossings}, worst ${worstStep.toFixed(2)} m (want 0)`);
 }
 
+/* ── the number that actually predicts R5 ────────────────────────────────────────────────
+ *
+ * Everything above measures the box at SPAWN, and that is the blind spot that let a failure
+ * through: the box at spawn read 229-241 deg/km while the browser check, run after the drive
+ * tests had moved the car, read 116. R5 does not measure the network. It measures whatever
+ * edges are loaded in the 840 m box around wherever the car happens to be, and an 840 m box
+ * can hold ONE two-kilometre arterial and nothing else — in which case the check is reading a
+ * single edge and the network median is irrelevant.
+ *
+ * So: walk the road network, stand the car on it at a few hundred points, and report the WORST
+ * window. That is the figure that has to clear 200, because the car can be at any of them.
+ */
+{
+  const PAD = 80; // RoadField's own CARVE_REACH — the pad main.js's Terrain ends up using
+  const box = 2000;
+  const es = edgesInBox(-box - 500, -box - 500, box + 500, box + 500, SEED);
+  let worst = { deg: Infinity };
+  const all = [];
+  for (const e of es) {
+    const m = e.pts.length / 2;
+    for (let k = 0; k < m; k += Math.max(1, Math.floor(m / 6))) {
+      const x = e.pts[k * 2],
+        z = e.pts[k * 2 + 1];
+      if (Math.abs(x) > box || Math.abs(z) > box) continue;
+      const c = curvature(edgesInBox(x - 420, z - 420, x + 420, z + 420, SEED, PAD));
+      all.push(c.degPerKm);
+      if (c.degPerKm < worst.deg) worst = { deg: c.degPerKm, km: c.km, x: Math.round(x), z: Math.round(z) };
+    }
+  }
+  all.sort((a, b) => a - b);
+  console.log(
+    `\non-road windows swept: ${all.length} over a ${(2 * box) / 1000} km square` +
+      `\n  worst ${worst.deg} deg/km over ${worst.km} km at (${worst.x},${worst.z})` +
+      `  p5 ${all[Math.floor(0.05 * all.length)]}  median ${all[Math.floor(0.5 * all.length)]}`
+  );
+  console.log(`R5 worst window (the real check) = ${worst.deg} deg/km — want > 200`);
+}
+
 console.log(`\nTIERS ${JSON.stringify(TIERS)}`);
 console.log(`\nR5 (car box, default seed) = ${primary} deg/km — want > 200`);
 console.log(`R5 worst of 8 seeds        = ${worstSeed} deg/km`);

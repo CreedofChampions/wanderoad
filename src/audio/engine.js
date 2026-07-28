@@ -278,6 +278,65 @@ export class EngineAudio {
     o.stop(t + 0.65);
   }
 
+  /**
+   * Picking up a can of fuel. A clear, positive, unmistakable little arpeggio.
+   *
+   * NOTE ON HISTORY: this file briefly carried TWO pickup() methods — two agents built the
+   * same backlog line in the same hour, and in a JS class the second definition silently wins,
+   * so the first was dead code that read as live. One source of truth: this is the one, the
+   * duplicate was deleted, and the caller (src/main.js's `collectCans`) reaches this.
+   *
+   * Playtest report, verbatim: "a clear, positive pick-up sound when you collect a fuel can",
+   * and the audit found the pickup wired as `collectCans: () => props.drainCollectedFuel()`
+   * with no audio call anywhere near it — seven cans collected live through the real path and
+   * not one sound function invoked. This is that sound.
+   *
+   * SYNTHESISED, like every other sound in this game. There are no audio files in this
+   * project and there will not be one for this: the operator offered credentials for a
+   * sound-effects service and the answer is that the WebAudio graph two lines above already
+   * makes an engine, a radio, surf and birdsong out of oscillators, so a three-note chime is
+   * not the thing to break that for.
+   *
+   * WHY IT IS DIFFERENT FROM chime() AND ping(), all three of which live in this file:
+   *   ping()   settles DOWN (D5 -> B4) — "you have let go of the wheel".
+   *   chime()  is two notes rising, soft and slow — a milestone, seen out of the corner of
+   *            the eye while driving.
+   *   pickup() is three notes rising fast (E5 - B5 - E6, an open fifth then the octave) with
+   *            a short bright attack. It is an EVENT: it happened just now, it happened
+   *            because of something you did, and it is over in under half a second. That is
+   *            what makes a collect sound read as a collect sound rather than as ambience.
+   *
+   * Loudness is deliberately just above chime() and well under the horn: at 0.115 peak it
+   * carries over engine and wind at cruise without ever being the loudest thing in the mix.
+   * Cozy is the filter; this is bright, not loud.
+   */
+  pickup() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    for (const [f, delay, gain] of [
+      [659.25, 0, 0.085],    // E5
+      [987.77, 0.075, 0.100], // B5
+      [1318.51, 0.15, 0.115], // E6 — the top of the arpeggio is the one you actually notice
+    ]) {
+      const o = ctx.createOscillator();
+      // Triangle rather than sine: one extra odd harmonic is the difference between a note
+      // that sits under the tyre roar and one that sits on top of it, at the same peak gain.
+      o.type = 'triangle';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t + delay);
+      g.gain.linearRampToValueAtTime(gain, t + delay + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + delay + 0.34);
+      o.connect(g).connect(this.master);
+      o.start(t + delay);
+      o.stop(t + delay + 0.4);
+    }
+    /* Diagnostics only — tools and the live probe read this to prove the sound was actually
+     * invoked on a real collection rather than believe a code path. Never read by the game. */
+    this.pickups = (this.pickups || 0) + 1;
+  }
+
   /** A soft two-note rise. Used once per streak milestone and never otherwise. */
   chime() {
     const ctx = this.ctx;

@@ -63,6 +63,52 @@ const DRIFT = {
   fov: 3.5, // a slightly wider lens. More world, less car.
 };
 
+/* ── the auto-drive SHOT LIST: what makes it cinematic rather than merely drifting ─────────
+ *
+ * The operator asked, in his own words, that when auto-drive is on "the camera goes
+ * cinematic". The playtest audit measured what actually happened and reported it precisely:
+ * "cine.active was false in ~100 consecutive samples during auto-drive; what actually happens
+ * is chase.driftW ramping 0 -> 1.0 and the camera-to-car distance widening to 10.1-21.3 m."
+ * That is a true description of a nice camera and it is NOT a cinematic. The thing missing is
+ * the one thing every piece of film language is built on: A CUT.
+ *
+ * Two ways to add one were open. Hand the camera to game/cinematic.js — rejected, and not for
+ * effort: that programme is SCOUTED once, at boot, around the spawn point (its own header's
+ * fourth rule is that it never samples the world per frame), so replaying it 40 km away flies
+ * a crane over a valley that is not there. It also owns an overlay, a skip hint, a HUD dim and
+ * a document-wide "any key ends it" listener, none of which belongs on a camera the player is
+ * meant to sit inside while still steering if they want to.
+ *
+ * So the cuts live here, in the rig that is already running. A SHOT is a static framing —
+ * where the boom sits, how long it is, how high, where the lens is pointed, what focal length
+ * — held for ten to sixteen seconds and then CUT, not eased, to the next one. The slow orbit
+ * above keeps running underneath every shot, so nothing is ever a locked-off still; what the
+ * shot list adds is composition and change. That combination is what a cinematic is.
+ *
+ * THE CUT IS A REAL CUT. The spring is snapped and the look target is snapped on the frame a
+ * shot changes (see `_cut` in update()), because a two-second slide between two framings is a
+ * camera MOVE and reads as the rig being dragged, whereas an instant change reads as an edit.
+ * This is the single most load-bearing line in the feature.
+ *
+ * COZY IS STILL THE FILTER. Ten to sixteen seconds is a long hold — a television edit is two
+ * to four. Nothing here is fast, nothing whips, no shot puts the camera in front of the car
+ * looking back (which reads as a chase), and the widest shot is 21 m out rather than 60. Every
+ * framing is one somebody would choose to look out of a window at.
+ */
+const SHOTS = [
+  // name          orbit   boom  lift  side   up    fov   secs
+  { name: 'wide', orbit: 0.0, boom: 1.0, lift: 1.0, side: 0.0, up: 0.0, fov: 0.0, secs: 13.5 },
+  { name: 'high and back', orbit: -0.34, boom: 1.45, lift: 2.3, side: 0.9, up: 1.6, fov: 2.5, secs: 15.0 },
+  { name: 'low quarter', orbit: 0.72, boom: 0.72, lift: -0.55, side: -1.5, up: -0.4, fov: -1.5, secs: 11.0 },
+  { name: 'over the shoulder', orbit: -0.86, boom: 0.62, lift: 0.35, side: 1.7, up: 0.5, fov: -2.0, secs: 12.0 },
+  { name: 'the long lens', orbit: 0.26, boom: 1.75, lift: 1.5, side: -0.7, up: 1.1, fov: -4.5, secs: 16.0 },
+  { name: 'roadside', orbit: 1.15, boom: 0.95, lift: -0.2, side: -2.1, up: 0.2, fov: 1.0, secs: 10.5 },
+];
+/** Orbit offsets above are RADIANS added to the rig yaw, and the widest of them (1.15 rad,
+ *  66°) is a genuinely different angle on the car rather than a nudge — a shot list whose
+ *  members all look the same is a slideshow of one picture. */
+export const SHOT_NAMES = SHOTS.map((s) => s.name);
+
 export class ChaseCamera {
   constructor(camera, { mode = 'sport' } = {}) {
     this.camera = camera;
@@ -85,12 +131,38 @@ export class ChaseCamera {
     /** 0..1 blend onto the auto-drive rig. 0 is exactly the sport camera. */
     this.driftW = 0;
     this._driftT = 0;
+
+    /* ── the shot director's live state ────────────────────────────────────────
+     * All four are PUBLIC and named for what they are, because the last audit of this feature
+     * could only measure `driftW` and a camera-to-car distance and had to report "not
+     * cinematic" from that. These are the readout: `cinematic` is true exactly while the
+     * auto-drive rig owns the frame, `shot` is the framing currently on screen by name, and
+     * `cuts` counts real edits. A flag being set is not a thing being visible — but a cut
+     * COUNTER that climbs while the name changes is a thing that can be checked against a
+     * screenshot, which is the point. */
+    /** True while the shot list is running — i.e. the camera is in its cinematic mood. */
+    this.cinematic = false;
+    /** The framing on screen right now, by name. '' when the player has the wheel. */
+    this.shot = '';
+    /** How many times the camera has actually CUT this session. */
+    this.cuts = 0;
+    this._shotI = 0;
+    this._shotT = 0;
+    this._cut = false;
   }
 
   cycle() {
     this.mode = MODES[(MODES.indexOf(this.mode) + 1) % MODES.length];
     return this.mode;
   }
+
+  /* NOTE: `cinematic` is a PLAIN PUBLIC FIELD set in the constructor and maintained by the shot
+   * director in update() — see the SHOTS block at the top of this file. A `get cinematic()`
+   * accessor briefly lived here as well, added in the same hour by a second agent solving the
+   * same audit finding, and it was not merely redundant: a prototype getter with no setter makes
+   * the constructor's own `this.cinematic = false` throw a TypeError in strict mode, which is
+   * every ES module, which is this whole game. It was removed rather than reconciled. One source
+   * of truth for the flag, and it is the field. */
 
   /**
    * Where this rig sits, and what it looks at, with the car standing still and no drift.
@@ -198,17 +270,73 @@ export class ChaseCamera {
     // weight in a camera rig is the kind of thing that costs an afternoon.
     const dw = C.behind > 1 ? this.driftW : 0;
     const ct = this._driftT;
+
+    /* ── the shot director ────────────────────────────────────────────────
+     * See SHOTS at the top of this file for why the cut, and not the drift, is what makes
+     * this cinematic. Three rules, all of them consequences of that:
+     *
+     *   - The clock only runs while the rig actually owns the frame (dw > 0.02). A shot must
+     *     not silently expire while the player is driving and then be "already half over"
+     *     when they hand the wheel back.
+     *   - Engaging auto-drive does NOT cut. It resets to shot 0 and rides the 3.4 s ramp in
+     *     from the sport pose, because a cut at the same instant as a mode change reads as a
+     *     glitch rather than as an edit.
+     *   - Disengaging clears the state, so taking the wheel and giving it back later starts a
+     *     fresh programme rather than resuming mid-shot.
+     */
+    if (dw > 0.02) {
+      if (!this.cinematic) {
+        this.cinematic = true;
+        this._shotI = 0;
+        this._shotT = 0;
+      }
+      this._shotT += dt;
+      if (this._shotT >= SHOTS[this._shotI].secs) {
+        this._shotT = 0;
+        this._shotI = (this._shotI + 1) % SHOTS.length;
+        this.cuts++;
+        this._cut = true; // consumed by the spring below — this is the actual edit
+      }
+      this.shot = SHOTS[this._shotI].name;
+    } else if (this.cinematic) {
+      this.cinematic = false;
+      this.shot = '';
+      this._shotT = 0;
+      this._cut = false;
+    }
+    /* The framing itself, faded in by the SAME dw the drift uses. At dw = 0 every term is
+     * exactly zero and what remains is the sport camera byte for byte — the property this
+     * file's own header calls the important part, and the reason a shot list can live in the
+     * gameplay rig at all instead of needing a second camera. */
+    /* Latched once, here, because the position spring, the look-at and the FOV limiter all
+     * have to snap on the SAME frame and the spring branch below clears the flag. A cut whose
+     * aim or focal length arrives a third of a second late is not a cut. */
+    const cutNow = this._cut;
+    const S = this.cinematic ? SHOTS[this._shotI] : null;
+    const shotOrbit = S ? dw * S.orbit : 0;
+    const shotBoom = S ? dw * (S.boom - 1) * DRIFT.boomBase : 0;
+    const shotLift = S ? dw * S.lift : 0;
+    const shotSide = S ? dw * S.side : 0;
+    const shotUp = S ? dw * S.up : 0;
+    const shotFov = S ? dw * S.fov : 0;
     /* Sines for the orbit and the look offset, MINUS COSINES for the boom and the lift. That
      * is not decoration: -cos starts at the bottom of its swing, so the first moment of a
      * drift is the sport camera plus a metre and a half, and the rig opens out from there.
      * Starting them on a sine would have the boom want to be 12 m long the instant you press
      * the key, which is a lurch backwards, not a camera drifting. */
     const orbit =
-      dw * (DRIFT.yawA * Math.sin((ct / DRIFT.yawP) * TAU) + DRIFT.yawA2 * Math.sin((ct / DRIFT.yawP2) * TAU));
-    const boom = dw * (DRIFT.boomBase - DRIFT.boomA * Math.cos((ct / DRIFT.boomP) * TAU));
-    const lift = dw * (DRIFT.liftBase - DRIFT.liftA * Math.cos((ct / DRIFT.liftP) * TAU));
-    const lookSide = dw * DRIFT.lookA * Math.sin((ct / DRIFT.lookP) * TAU);
-    const lookUp = dw * DRIFT.lookUpA * Math.sin((ct / DRIFT.lookUpP) * TAU);
+      dw * (DRIFT.yawA * Math.sin((ct / DRIFT.yawP) * TAU) + DRIFT.yawA2 * Math.sin((ct / DRIFT.yawP2) * TAU)) +
+      shotOrbit;
+    /* The slow swing keeps running INSIDE each shot — that is what stops a fifteen-second
+     * hold being a locked-off still — and the shot's own framing is added on top of it. Both
+     * halves are already weighted by dw, so the sum is too. `Math.max(0, ...)` on the boom:
+     * the tightest shot in the list multiplies the base boom by 0.62 while the swing can be
+     * at the bottom of its own arc at the same moment, and a negative boom would put the
+     * camera through the bonnet. */
+    const boom = Math.max(0, dw * (DRIFT.boomBase - DRIFT.boomA * Math.cos((ct / DRIFT.boomP) * TAU)) + shotBoom);
+    const lift = dw * (DRIFT.liftBase - DRIFT.liftA * Math.cos((ct / DRIFT.liftP) * TAU)) + shotLift;
+    const lookSide = dw * DRIFT.lookA * Math.sin((ct / DRIFT.lookP) * TAU) + shotSide;
+    const lookUp = dw * DRIFT.lookUpA * Math.sin((ct / DRIFT.lookUpP) * TAU) + shotUp;
 
     /* ── rest pose ────────────────────────────────────────────────────── */
     const behind = C.behind + (C.stretch || 0) * sNorm + boom;
@@ -225,11 +353,50 @@ export class ChaseCamera {
     let wantY = car.y + above;
 
     /* ── spring ───────────────────────────────────────────────────────── */
-    if (this._first) {
+    if (this._first || this._cut) {
+      /* THE CUT. This one branch is what makes the shot list an EDIT rather than a camera
+       * move: the rig is placed at the new framing in a single frame and its spring velocity
+       * is thrown away, so the next shot begins from rest instead of arriving with the last
+       * shot's momentum still in it. Easing between two framings over a second and a half is
+       * a dolly, and a dolly between compositions reads as the rig being dragged around; a
+       * cut reads as somebody choosing a different angle. `_lookX/Y/Z` are snapped alongside
+       * it a little further down for the same reason — a cut whose AIM slides afterwards is
+       * a cut followed by a whip pan.
+       *
+       * It shares the `_first` path deliberately: a teleport (reset(), backToRoad(), the
+       * water rescue) has always snapped the camera, and a cut is exactly the same operation
+       * with a different cause. One implementation, no second way to be placed. */
       this.px = wantX;
       this.py = wantY;
       this.pz = wantZ;
+      /* THE CUT INHERITS THE CAR'S VELOCITY. A teleport (`_first`) genuinely starts from
+       * rest, but a cut does not: the subject is doing 90 km/h and the new camera is
+       * supposed to be travelling with it from the first frame. Starting the spring at zero
+       * leaves the rig standing still in world space while the car drives out from under it,
+       * and at a six-metre boom that is 110 deg/s of bearing change over the next tenth of a
+       * second — measured, in tools/diag-cinematic.mjs, which is exactly the whip the rig's
+       * whole design budget exists to prevent. So the new shot is handed the car's own
+       * velocity and tracks immediately.
+       *
+       * The rig is also placed a spring-lag BEHIND the pose rather than exactly on it. A
+       * critically-damped follower chasing a target moving at V settles a constant
+       * 2*zeta*V/omega behind it; landing exactly on the pose therefore means the first
+       * thing the new shot does is drift backwards into that lag, which reads as the camera
+       * losing ground the instant it cuts. Landing IN the lag means the shot is already in
+       * its steady state and simply holds. */
+      if (cutNow && C.springOmega) {
+        const lag = (2 * C.springZeta) / C.springOmega;
+        this.vxs = car.vx || 0;
+        this.vys = car.vy || 0;
+        this.vzs = car.vz || 0;
+        this.px -= this.vxs * lag;
+        this.py -= this.vys * lag;
+        this.pz -= this.vzs * lag;
+      } else {
+        this.vxs = this.vys = this.vzs = 0;
+      }
       this._first = false;
+      this._cut = false;
     } else if (C.springOmega) {
       const w = C.springOmega;
       const z = C.springZeta;
@@ -286,9 +453,16 @@ export class ChaseCamera {
     const lx = car.x + Math.sin(car.yaw) * C.lookAhead + cy * lookSide;
     const lz = car.z + Math.cos(car.yaw) * C.lookAhead - sy * lookSide;
     const ly = car.y + C.lookHeight + lookUp;
-    this._lookX = damp(this._lookX || lx, lx, 14, dt);
-    this._lookY = damp(this._lookY || ly, ly, 10, dt);
-    this._lookZ = damp(this._lookZ || lz, lz, 14, dt);
+    if (cutNow) {
+      // Snapped, not damped — see the note at the cut in the spring block above.
+      this._lookX = lx;
+      this._lookY = ly;
+      this._lookZ = lz;
+    } else {
+      this._lookX = damp(this._lookX || lx, lx, 14, dt);
+      this._lookY = damp(this._lookY || ly, ly, 10, dt);
+      this._lookZ = damp(this._lookZ || lz, lz, 14, dt);
+    }
 
     /* ── FOV ──────────────────────────────────────────────────────────── */
     // Sublinear, so most of the gain arrives in the 0–120 km/h band where cruising happens.
@@ -300,9 +474,17 @@ export class ChaseCamera {
       this._kick = damp(this._kick, 0, 1 / CAMERA.sport.fovKickTau, dt);
       wantFov += this._kick;
     }
-    wantFov += DRIFT.fov * dw;
-    const maxFovStep = 12 * dt;
-    this.fov += clamp(wantFov - this.fov, -maxFovStep, maxFovStep);
+    wantFov += DRIFT.fov * dw + shotFov;
+    // 12 deg/s exists so the lens never pumps during driving. A CUT is the one case where the
+    // rate limit is wrong: a 4.5 deg change arriving over the next third of a second is a
+    // small zoom immediately after an edit, which is exactly the thing an edit is supposed to
+    // avoid. Snap on the cut frame, rate-limit every other frame.
+    if (cutNow) {
+      this.fov = wantFov;
+    } else {
+      const maxFovStep = 12 * dt;
+      this.fov += clamp(wantFov - this.fov, -maxFovStep, maxFovStep);
+    }
 
     /* ── shake ────────────────────────────────────────────────────────── */
     // Only above 170 km/h, and tiny. It is a speed cue, not an earthquake — "Chase camera is

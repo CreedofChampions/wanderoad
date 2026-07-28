@@ -136,6 +136,100 @@ const tap = async (evalJs, code) => {
   await evalJs(KEY(code, 'keyup'));
 };
 
+/* ── a hand on the keyboard, for the streak run ───────────────────────────────
+ * Drives the car down the road for `ms` using nothing but W, S, A and D — real KeyboardEvents
+ * at the window, exactly like every other control in this file, never a call into the car.
+ *
+ * It exists because the streak is now FROZEN under auto-drive (src/game/streak.js, opts.paused
+ * — the operator's rule: auto-drive accrues "no streak"), so the check that measures the streak
+ * can no longer press G and watch. Something has to hold the road by hand.
+ *
+ * It runs INSIDE the page on a 40 ms interval rather than as a CDP round trip per decision,
+ * because 25 decisions a second over the wire is 25 chances for a 200 ms stall to put the car
+ * in a hedge, and a check that measures the debugger's latency measures the wrong thing.
+ *
+ * THE SIGN, which this project has now paid for four times: three.js puts +X on your LEFT
+ * looking down +Z, so `lateral` is positive when the car is LEFT of the centreline, and A
+ * (positive steer — see poll() in src/car/input.js) also turns LEFT. Being left of the line
+ * must therefore ask for RIGHT, so the cross-track term is NEGATED. Identical subtraction, for
+ * the identical reason, to autopilot.js's `-OMEGA*OMEGA*lateral`.
+ *
+ * The speed window is cozy on purpose and it is MEASURED, not guessed: W below 45 km/h, eased
+ * to 36 whenever the line is more than 1.6 m wide of the middle, a dab of S past cap + 15. The
+ * streak needs 8 m/s (29 km/h) before it accrues anything at all, and a bang-bang keyboard
+ * cannot hold a 6 m lane at 80. Swept offline over 20 roads on this game's default seed: at 55
+ * km/h the worst road banked 82 m, at 45 it banked 124 m, and 45 also lifted the median from
+ * 158 to 207. Slower is both cozier and stronger here, which is the whole thesis of the game.
+ *
+ * Eighteen seconds rather than twelve for the same reason, also measured: at 12 s the worst
+ * road across five seeds banked 49 m and would have failed a check about nothing — most of
+ * that road's twelve seconds went on getting up to 29 km/h in the first place. At 18 s the
+ * same road banks 83 m. The bar it is measured against did not move.
+ *
+ * ONE R, AND NOT NEAR THE END. If the car is genuinely off the carriageway for more than 0.6 s
+ * it presses R, which is what R is for and what a player does. Once only, and never in the
+ * last ten seconds: R sets you down stopped, and a reset with four seconds left cannot rebuild
+ * anything, so a thrashing rescue is worse than none — measured, 9 resets and 0 m banked. On
+ * this game's default seed it never fires at all. It is insurance against a worldgen round
+ * moving the roads, not a crutch this depends on.
+ *
+ * KEEP IN STEP WITH tools/diag-manual-streak.mjs, which runs this same law offline against the
+ * real vehicle, terrain and streak, and proves it banks on five different roads. That file is
+ * why this one is allowed to be trusted. */
+const DRIVE_BY_HAND = (ms) => `(() => new Promise((done) => {
+  const W = window.WANDEROAD, c = W.car;
+  const send = (code, type) => window.dispatchEvent(
+    new KeyboardEvent(type, { code, bubbles: true, cancelable: true }));
+  const held = new Set();
+  const set = (code, want) => {
+    if (want && !held.has(code)) { held.add(code); send(code, 'keydown'); }
+    else if (!want && held.has(code)) { held.delete(code); send(code, 'keyup'); }
+  };
+  let ticks = 0, on = 0, worst = 0, kphSum = 0, lost = 0, rescues = 0;
+  const t0 = performance.now();
+  const id = setInterval(() => {
+    const since = performance.now() - t0;
+    try {
+      const q = c.terrain.roads.query(c.x, c.z);
+      const kph = Math.abs(c.kph);
+      ticks++; kphSum += kph;
+      const off = !isFinite(q.d) || q.d > q.width * 0.5 + 1.5;
+      lost = off ? lost + 0.04 : 0;
+      if (lost >= 0.6 && rescues < 1 && since < ${ms} - 10000) {
+        // Genuinely off the road, early enough that a restart can still bank. Press R.
+        send('KeyR', 'keydown'); send('KeyR', 'keyup');
+        rescues++; lost = 0;
+        set('KeyA', false); set('KeyD', false); set('KeyS', false); set('KeyW', true);
+      } else if (isFinite(q.d)) {
+        if (q.d <= q.width * 0.5) on++;
+        worst = Math.max(worst, q.d);
+        let tx = q.tx, tz = q.tz;
+        const fx = Math.sin(c.yaw), fz = Math.cos(c.yaw);
+        if (fx * tx + fz * tz < 0) { tx = -tx; tz = -tz; }
+        const lateral = (c.x - q.qx) * tz - (c.z - q.qz) * tx;
+        let head = Math.atan2(tx, tz) - c.yaw;
+        while (head > Math.PI) head -= Math.PI * 2;
+        while (head < -Math.PI) head += Math.PI * 2;
+        const want = -lateral * 0.30 + head * 2.4;
+        set('KeyA', want > 0.16);
+        set('KeyD', want < -0.16);
+        const cap = Math.abs(lateral) > 1.6 ? 36 : 45;
+        set('KeyW', kph < cap);
+        set('KeyS', kph > cap + 15);
+      } else {
+        // No road within reach. Do not saw at a road that is not there.
+        set('KeyA', false); set('KeyD', false); set('KeyS', false); set('KeyW', kph < 40);
+      }
+    } catch (e) { /* one bad frame must not leave the keys jammed down */ }
+    if (since >= ${ms}) {
+      clearInterval(id);
+      for (const code of Array.from(held)) set(code, false);
+      done({ ticks, onRoadPct: +((on / Math.max(ticks, 1)) * 100).toFixed(1),
+             worst: +worst.toFixed(1), kph: +(kphSum / Math.max(ticks, 1)).toFixed(1), rescues });
+    }
+  }, 40);
+}))()`;
+
 /** Is an element genuinely on screen? Computed style AND a real box, never the attribute. */
 const VISIBLE = (sel) => `(() => { const e = document.querySelector('${sel}'); if (!e) return null;
   const cs = getComputedStyle(e); const r = e.getBoundingClientRect();
@@ -563,16 +657,42 @@ async function main() {
     check('Escape closes the garage', (await evalJs(VISIBLE('#menu'))) === false);
 
     /* ── 6. the game rules ──────────────────────────────────────────────── */
-    /* Use auto-drive to stay on the road while measuring the streak. Holding W in a straight
-     * line does not test the streak, it tests whether the road happened to be straight — the
-     * earlier version passed on luck and started failing the moment the car got faster and
-     * left the bend sooner. What we want to know is whether distance banks while you are on
-     * the road, so let something that stays on the road do the driving. */
+    /* THE METHOD OF THIS CHECK CHANGED, AND THE ASSERTION DID NOT. Here is why.
+     *
+     * It used to press G and let auto-drive do the driving, on the stated grounds that holding
+     * W in a straight line does not test the streak, it tests whether the road happened to be
+     * straight. That reasoning still stands — but src/game/streak.js now FREEZES the streak
+     * whenever auto-drive has the wheel (update()'s `opts.paused`), which is the operator's
+     * rule stated verbatim: auto-drive should accrue "no streak". So the old method asked the
+     * game for a number the game is now deliberately holding at zero, and the failure said so
+     * in as many words — "0 m banked ... auto true". The feature is right; the method was.
+     *
+     * `streak.km > 0.05` is untouched, and so is the point of it: distance must bank while you
+     * are on the road. What changed is who is holding the keys — a hand now, which is the only
+     * thing the streak has ever been willing to count.
+     *
+     * Driving by hand is still not "hold W and hope". DRIVE_BY_HAND below reads the road under
+     * the car and answers with the same four keys a player has, re-decided 25 times a second,
+     * so a bend is driven round rather than fallen out of. It is real input: genuine
+     * KeyboardEvents at the window, the same ones every other check here uses, never a call
+     * into the car. tools/diag-manual-streak.mjs runs the SAME law offline against the same
+     * vehicle, terrain and streak and proves it banks on five different roads — keep the two
+     * in step. */
     await tap(evalJs, 'KeyR');
     await sleep(700);
-    await evalJs(`(() => { const W = window.WANDEROAD; if (!W.auto.on)
+    /* Auto-drive off, whatever the G check above left behind: this must measure a hand. */
+    await evalJs(`(() => { const W = window.WANDEROAD; if (W.auto.on)
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', bubbles: true })); })()`);
-    await sleep(12000);
+    await sleep(200);
+    /* Bank and clear whatever the earlier manoeuvres happened to leave on the counter, so the
+     * metres this check reads are the metres THIS drive earned and not a residue. flush() is
+     * the game's own end-of-session commit (main.js calls it on page hide), not a test-only
+     * back door, and it is a strengthening: without it 49 m of leftovers plus 6 m of driving
+     * would pass. */
+    await evalJs(`window.WANDEROAD.streak.flush()`);
+    /* Returns what the hand actually did, so a failure below can say whether the driver lost
+     * the road or never found it. No new check — this suite counts 40 and it still does. */
+    const hand = await evalJs(DRIVE_BY_HAND(18000));
     /* When this fails it must say WHY. The streak needs three things at once — on the
      * carriageway, on the ground, and above 8 m/s — and "0 m banked" does not say which one
      * was missing, which cost a whole diagnostic round. */
@@ -585,7 +705,11 @@ async function main() {
       'the road streak accumulates',
       streak.km > 0.05,
       `${(streak.km * 1000).toFixed(0)} m banked — onRoad ${streak.onRoad}, ${streak.kph} km/h, ` +
-        `onGround ${streak.onGround}, ${streak.roadDist} m from the centreline, auto ${streak.auto}`
+        `onGround ${streak.onGround}, ${streak.roadDist} m from the centreline, auto ${streak.auto}` +
+        (hand && hand.ticks
+          ? ` — driven by hand: ${hand.onRoadPct}% of ${hand.ticks} decisions on the carriageway, ` +
+            `worst ${hand.worst} m off, mean ${hand.kph} km/h, ${hand.rescues} R`
+          : ` — the hand driver returned ${JSON.stringify(hand)}`)
     );
 
     /* ── collision reconciles against what is DRAWN ──────────────────────────
@@ -1063,7 +1187,26 @@ async function main() {
         const n = e.pts.length / 2;
         for (let k0 = 0; k0 < n - 1; k0++) {
           const dx0 = e.pts[k0*2+2] - e.pts[k0*2], dz0 = e.pts[k0*2+3] - e.pts[k0*2+1];
-          const l0 = Math.hypot(dx0, dz0) || 1;
+          /* A ZERO-LENGTH SEGMENT HAS NO DIRECTION, and \`|| 1\` handed this one (0, 0) — which
+           * is not a direction, it is a full stop. The walk below then sampled the SAME POINT
+           * 63 times, every sample was of course still on the carriageway, and the segment
+           * reported the maximum possible 496 m of "clear straight". The search takes the
+           * first candidate over 280 m, so one duplicated vertex anywhere in the 6.4 km box
+           * beat every real straight in it. Measured on the shipped seed by
+           * \`node tools/diag-o2-live.mjs --audit\`, which lifts THIS block out of this file and
+           * runs it against the real Terrain: 3 zero-length segments in 5376, and the finder
+           * picked one in two of the three boxes audited — in the third, which has none, the
+           * guarded and unguarded searches return the identical stretch, so this costs nothing
+           * where the defect is absent. The car was then teleported onto it facing
+           * atan2(0, 0) = 0 — due +Z whichever way the road actually ran — onto a stretch where
+           * the steered run-up spent 51% of its eight seconds AIRBORNE and topped out at
+           * 76 km/h. That is the depressed baseline O2's ratio was failing against: the same
+           * car, the same run-up code, does 103 km/h once the placement lands on a real
+           * straight. NOTHING about the assertion below changes — only that the "straight" it
+           * is measured on is a straight rather than a single point.
+           */
+          const l0 = Math.hypot(dx0, dz0);
+          if (l0 < 1e-3) continue;
           const ux = dx0 / l0, uz = dz0 / l0;
           const sx0 = e.pts[k0*2], sz0 = e.pts[k0*2+1];
           let clear = 0;

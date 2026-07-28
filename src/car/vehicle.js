@@ -36,6 +36,12 @@ const noiseAt = (x, z) => (hash2i(Math.round(x), Math.round(z), 0x5eed) / 429496
 
 const TWO_PI = Math.PI * 2;
 
+/** Ceiling on the loose-surface bump, in m/s² of vertical acceleration. See the loose-surface
+ *  block in `_step` for the measurement this comes from; `tools/diag-bump.mjs` re-measures it.
+ *  6 m/s² is 0.61 g — a firm shove through the seat, and short of the 1 g it would take to
+ *  unload the suspension and put the car in the air. */
+const BUMP_MAX_A = 6;
+
 /* The tyre curve is written in NORMALISED slip, u = α / α_peak, and in two explicit pieces
  * rather than as a raw magic formula. The reason is that the magic formula with a high
  * curvature factor (E = 0.92, which is what gives the long plateau we want) is NOT monotone
@@ -981,12 +987,35 @@ export class Vehicle {
      * Gated on the WORST wheel, not the four-wheel average. The average diluted a single
      * wheel sitting flat in the grass (onRoad 0) against three still on tarmac down to 0.75 —
      * nowhere near the 0.6 line below, so a wheel could hang off the verge all day and cost
-     * nothing. A driver does not average their tyres; the one that is off is off. */
+     * nothing. A driver does not average their tyres; the one that is off is off.
+     *
+     * THE BUMP IS AN ACCELERATION AND IT IS NOW BOUNDED — measured, `tools/diag-bump.mjs`.
+     * `0.055 * dt * 60` is `3.3 * dt`, so the old line was a vertical acceleration of
+     * `wob * loose * vMag * 3.3` m/s²: at this car's own off-road terminal speed of 12.2 m/s
+     * that is 40 m/s², FOUR GRAVITIES, and `wob`'s dominant half is a hash of `x * 0.31`,
+     * which only changes value every 1/0.31 = 3.2 m — a quarter of a second at that speed. A
+     * quarter of a second of net UPWARD acceleration at 4 g is not a bump, it is a launch, and
+     * that is exactly what it did: on DEAD FLAT, LEVEL ground with the terrain contributing
+     * nothing at all, a straight off-road run spent 23% of its time genuinely airborne and got
+     * 0.60 m of air. A car in the air has no tyres on anything, so it does not steer, it does
+     * not brake and it does not turn — which is how "C3 you can stop and turn around" came to
+     * read 61 deg: the U-turn was being attempted by a car that was off the ground for a third
+     * of it (`tools/diag-c3-turn.mjs`, `ground 0` in the trace).
+     *
+     * So the shake stays and the flight goes. Same term, same units, same `* dt` — this is a
+     * CLIP on it, not a rescaling, so it is still exactly as frame-rate independent as it was
+     * and everything below 6 km/h is bit-for-bit unchanged (a full-amplitude `wob` only
+     * reaches the ceiling at 1.8 m/s, and the field is rarely at full amplitude). Above that
+     * only the peaks are shaved, at 0.61 g — a firm shove through the seat, and short of the
+     * 1 g it would take to unload the springs and put the wheels in the air. Nothing else in
+     * the block changes: the same hash, the same deterministic field, the same steering and
+     * grip penalties. */
     if (contact && onRoadMin < 0.6) {
       const loose = 1 - onRoadMin;
       const wob =
         noiseAt(this.x * 0.31, this.z * 0.31) * 0.6 + noiseAt(this.x * 1.13 + 11.7, this.z * 1.13 - 4.2) * 0.4;
-      this.vy += wob * loose * Math.min(vMag, 24) * 0.055 * dt * 60;
+      const bumpA = wob * loose * Math.min(vMag, 24) * 3.3;
+      this.vy += clamp(bumpA, -BUMP_MAX_A, BUMP_MAX_A) * dt;
       // Loose gravel does not steer. This is on top of the grip loss, and it is what makes
       // rejoining the road something you plan rather than something you flick.
       fyFront *= 1 - 0.34 * loose;

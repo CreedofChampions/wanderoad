@@ -139,6 +139,42 @@ for (const name of Object.keys(TERRAINS)) {
   );
 }
 
+/* ── W5, the other way round: is there a MASSIF on the skyline? ──────────────
+ *
+ * The column above measures the biggest visible RISE within 4 km, in metres, and it is not the
+ * same question. An audit stood at the old default spawn — where that column read a healthy
+ * 314 m — photographed all four cardinal directions, and reported flat plains on three of them
+ * and "faint hills lost in haze". Both readings were honest: 314 m at 2.8 km is 6.3° spread
+ * across a broad swell, which is scenery, not a destination.
+ *
+ * So this prints what the requirement actually asks for — "a TALL DISTANT LANDMARK visible from
+ * spawn so there is somewhere to head towards" — as the two numbers that decide it: how tall
+ * the NEAREST massif is, and how many degrees of sky the most dominant one fills. At the old
+ * spawn the nearest massif was 104 m, which is the very bottom of the 90–330 m range, and that
+ * is the number that matches what the photographs showed.
+ *
+ * Read the two blocks TOGETHER. `findSpawn` now scores this (see terrain.js), and the two
+ * metrics genuinely trade against each other: moving the spawn under a near massif can lower
+ * the best-rise-within-4-km figure while raising the dominance of the thing on the skyline.
+ */
+console.log('\nW5 again — the massif on the skyline (what "somewhere to head for" actually means)');
+console.log('preset     nearest massif        most dominant massif in view');
+for (const name of Object.keys(TERRAINS)) {
+  if (ONLY && name !== ONLY) continue;
+  applyTerrain(name);
+  setBiomeBias(terrainBias(name));
+  const sp = findSpawn(SEED, 0, 0, TERRAINS[name]?.spawn || {});
+  const { nearestLandmark, landmarkView } = await import('../src/world/landmarks.js');
+  const n = nearestLandmark(sp.x, sp.z, SEED);
+  const v = landmarkView(sp.x, sp.z, SEED, sp.y);
+  console.log(
+    `${name.padEnd(10)} ${n.h.toFixed(0).padStart(4)} m at ${(n.d / 1000).toFixed(2)} km   ` +
+      (v.site
+        ? `${v.site.h.toFixed(0).padStart(4)} m at ${(v.site.d / 1000).toFixed(2)} km = ${v.deg.toFixed(1).padStart(4)}° of sky`
+        : 'none in range')
+  );
+}
+
 /* ── steep ground, per preset ────────────────────────────────────────────────
  * tools/diag-cliffs.mjs only ever measures the default world, because it never calls
  * applyTerrain. Alpine runs 1.12x the biome amplitude AND 1.7x the massif height, so it is

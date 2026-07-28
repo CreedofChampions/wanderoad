@@ -49,11 +49,11 @@ function build() {
    * contract). `terrain=meadow` is untouched by that change and still the right calm land. */
   dock.innerHTML = `
     <div class="wr-bar">
-      <span class="wr-title">Wanderoad</span>
+      <span class="wr-title">Cozy Driver</span>
       <button class="wr-flip" title="Move to the other side">&#8646;</button>
       <button class="wr-close" title="Close">&#215;</button>
     </div>
-    <iframe class="wr-frame" title="Wanderoad"
+    <iframe class="wr-frame" title="Cozy Driver"
             src="${chrome.runtime.getURL('game/index.html')}?offline&car=estate&terrain=meadow"
             allow="gamepad *; autoplay"></iframe>
     <div class="wr-grip" title="Drag to resize"></div>`;
@@ -150,8 +150,8 @@ function placeButton() {
   const btn = document.createElement('button');
   btn.id = BTN;
   btn.type = 'button';
-  btn.title = 'Wanderoad — drive while you watch';
-  btn.setAttribute('aria-label', 'Open Wanderoad');
+  btn.title = 'Cozy Driver — drive while you watch';
+  btn.setAttribute('aria-label', 'Open Cozy Driver');
   btn.innerHTML =
     '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
     '<path fill="currentColor" d="M5 15.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0m11 0a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0"/>' +

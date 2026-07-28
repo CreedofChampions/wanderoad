@@ -194,8 +194,14 @@ export class Hud {
      * the biome/coords block down at the very edge. No animation is written for it here — it
      * gets its "fade in on first load" for free from #hud's own existing cinematic dim-then-
      * lift (see setCinematic below), the same way every other instrument on this screen
-     * already arrives, and then it just sits there, quiet, forever after. */
-    this.title = el('div', 'gameTitle', 'Cozy Drive');
+     * already arrives, and then it just sits there, quiet, forever after.
+     *
+     * THE NAME IS "Cozy Driver" — the operator's rebrand, and the single source of truth for
+     * it in the running game. The stylesheet gives it the cozy serif, the palette green and
+     * the slow grow-and-settle (#gameTitle in src/ui/style.css); everything else that shows
+     * the name (index.html's <title> and loading card, the extension manifest and panel) is a
+     * static string that has to match this one. tools/diag-hud.mjs asserts all of them. */
+    this.title = el('div', 'gameTitle', 'Cozy Driver');
     this.root.appendChild(this.title);
 
     this._blip = 0;
@@ -279,7 +285,16 @@ export class Hud {
       this.streakKm.textContent = fmtDistance(this._shownKm * 1000);
       // The caption is what makes the big number mean anything. It says the mechanic out loud
       // once, quietly, forever — which is cheaper than a tutorial and calmer than a pop-up.
-      this.streakCap.textContent = s.grace ? 'off the road…' : 'without leaving the road';
+      /* `paused` comes first because it OVERRIDES the other two: while auto-drive has the wheel
+       * the streak is frozen (src/game/streak.js), so neither "without leaving the road" nor
+       * "off the road…" is true — the number on screen is not moving and the caption has to be
+       * the one line that explains why. A big figure that has visibly stopped counting with no
+       * explanation under it is exactly the sort of thing that reads as a bug. */
+      this.streakCap.textContent = s.paused
+        ? 'held while auto-drive has the wheel'
+        : s.grace
+          ? 'off the road…'
+          : 'without leaving the road';
       this.streakMul.textContent = s.multiplier > 1.02 ? `×${s.multiplier.toFixed(2)}` : '';
       this.streakPts.textContent = s.score > 5 ? fmtScore(s.score) : '';
     } else {

@@ -292,6 +292,9 @@ export class Fuel {
       sharesGiven: 0,
       sharesReceived: 0,
       resets: 0,
+      /** Seconds of driving that cost nothing because the car was driving itself — see the
+       *  `opts.burn` note on update(). */
+      freeSeconds: 0,
     };
   }
 
@@ -372,9 +375,19 @@ export class Fuel {
    * One tick. Call BEFORE the car is stepped, so `gate()` reflects this frame's tank.
    * @param {number} dt seconds
    * @param {object} car the Vehicle
+   * @param {object} [opts]
+   * @param {boolean} [opts.burn] false while the car is driving ITSELF (auto-drive). Operator,
+   *        verbatim: auto-drive consumes "no fuel". Only the BURN is suppressed — cans are still
+   *        collected, shares still arrive, the station scan still runs and a pump still fills
+   *        the tank, because none of those is fuel being spent and switching them off would
+   *        quietly break the fuel gauge, the pickup chime and the nearest-pump readout for as
+   *        long as the chauffeur had the wheel. Time spent this way is counted on
+   *        `stats.freeSeconds` so a harness can prove the suppression happened rather than
+   *        infer it from a tank that merely did not move much.
    */
-  update(dt, car) {
+  update(dt, car, opts = null) {
     if (!(dt > 0)) return;
+    const burn = !opts || opts.burn !== false;
     const speed = Math.abs(car.speed || 0);
 
     /* Smoothed downhill signal for rate() below — see DESCENT_SMOOTH's own comment for why
@@ -489,10 +502,13 @@ export class Fuel {
     this._visiting = false;
 
     // ── burn ────────────────────────────────────────────────────────────────
-    if (this.seconds > 0) {
+    // ...unless somebody else is driving. See `opts.burn` on update() above.
+    if (this.seconds > 0 && burn) {
       const used = this.rate(car) * dt;
       this.seconds = Math.max(0, this.seconds - used);
       this.stats.burned += used;
+    } else if (!burn) {
+      this.stats.freeSeconds += dt;
     }
 
     // ── low, and then empty ─────────────────────────────────────────────────

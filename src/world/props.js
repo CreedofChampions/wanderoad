@@ -1018,10 +1018,49 @@ const TOWN_KIT = [
   ['telegraph_pole', STATION_APRON_HALF_WIDTH + 13, -4],
   ['shed', -(STATION_APRON_HALF_WIDTH + 7), -6],
   ['phone_box', STATION_APRON_HALF_WIDTH + 6, 5],
+  /* ── THE SILHOUETTE, added after an audit drove to a real station and looked back ──────
+   *
+   * Its verdict, and the numbers are the point: at 30 m the cluster is there and reads (a
+   * pole, a phone box, a shed roof, a bench); at 150 m down the road the station is "a small
+   * white smudge behind trees" and the town "adds essentially nothing to the silhouette — I
+   * only knew where to look because the HUD said 150 m". The operator asked for exactly the
+   * opposite: "hints that there's something there in that direction... so that they're easier
+   * to spot".
+   *
+   * The reason the old kit could not do that is arithmetic, not art. Its tallest piece is a
+   * 7.5 m telegraph pole. At 200 m that subtends 2.1° — under the angular size of the tree
+   * line it is standing behind. Nothing about placement or colour fixes an object that is
+   * shorter than its own backdrop; the kit needed something genuinely TALL.
+   *
+   * So: a clock tower (14 m) and a flagpole (7 m, but slender and clear of the canopy),
+   * chosen out of the EXISTING catalogue — this pass adds no new geometry family, same as the
+   * original kit — plus a second small building and a wall line so the base of the cluster
+   * reads as a settlement rather than as three separate objects. 14 m at 200 m is 4.0°, which
+   * is roughly double the tree line and is the whole difference.
+   *
+   * WHY THE TALL PIECES SIT FURTHEST OUT: `clock_tower` wants FLATTISH ground and has a 2.6 m
+   * footprint, and the ground immediately beside a forecourt is the apron's own batter. Out at
+   * 30 m it is on real ground, and the extra distance also spreads the cluster so it reads as
+   * a place rather than a pile.
+   *
+   * REDUNDANCY IS DELIBERATE. The audit measured the old kit delivering 2 of its 4 pieces at a
+   * real station — the shed and the second pole were both rejected by the placement tests,
+   * which are shared with propsInBox and are not going to be relaxed for this. A kit that
+   * needs every piece to land is a kit that usually looks half-built, so several entries below
+   * are near-duplicates on opposite sides: whichever side of a given station happens to be
+   * flat and dry, something tall lands there. Every piece still passes the identical
+   * footprint/water/slope/road-clearance discipline. */
+  ['clock_tower', -(STATION_APRON_HALF_WIDTH + 21), 14, 'tower'],
+  ['clock_tower', STATION_APRON_HALF_WIDTH + 22, 12, 'tower'],
+  ['flag_pole', STATION_APRON_HALF_WIDTH + 4, -11, 'flag'],
+  ['flag_pole', -(STATION_APRON_HALF_WIDTH + 5), 12, 'flag'],
+  ['shed', STATION_APRON_HALF_WIDTH + 9, -12],
+  ['drystone_wall', -(STATION_APRON_HALF_WIDTH + 13), -13],
 ];
 /** Furthest a town candidate can sit from the forecourt centre, and the query-box expansion —
- *  the widest TOWN_KIT offset above (STATION_APRON_HALF_WIDTH + 13 ~= 22.5) plus a margin. */
-const TOWN_MAX_OFFSET = 46;
+ *  the widest TOWN_KIT offset above (STATION_APRON_HALF_WIDTH + 22 + a 14 m dz ~= 34) plus a
+ *  margin for the piece's own footprint. */
+const TOWN_MAX_OFFSET = 60;
 
 /**
  * A station's own small landmark cluster, whose footprint lands inside the box. Same call
@@ -1053,8 +1092,13 @@ export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
     // One stream per station, drawn from in a fixed order (yaw jitter, then scale, then hue,
     // per candidate) — same discipline propsInBox documents for its own per-slot stream.
     const rnd = rng(hash3i(Math.round(st.x), Math.round(st.z), TOWN_SALT, seed));
+    /* Alternative sites for the same landmark, tried in kit order until one lands — see the
+     * REDUNDANCY note on TOWN_KIT. One clock tower per station, not one per side. Deterministic
+     * because the kit order is fixed and every test below is a pure function of position. */
+    const filled = new Set();
     for (let i = 0; i < TOWN_KIT.length; i++) {
-      const [id, ldx, ldz] = TOWN_KIT[i];
+      const [id, ldx, ldz, alt] = TOWN_KIT[i];
+      if (alt !== undefined && filled.has(alt)) continue;
       const kind = PROP_BY_ID[id];
       if (!kind) continue;
       tally('candidates');
@@ -1085,6 +1129,7 @@ export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
       // care (gPole is radially near-symmetric) but gets a deterministic yaw anyway.
       const yawLocal = Math.atan2(-ldx, -ldz);
       tally('placed');
+      if (alt !== undefined) filled.add(alt);
       out.push({
         id: kind.id,
         group: kind.group,

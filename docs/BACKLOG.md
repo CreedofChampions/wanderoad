@@ -81,17 +81,105 @@ checkpoint and ships on its own.
       connection at all. So the access-spur work does not cover every station. Same root area as
       the item above and probably the same fix — but confirm, do not assume.
 
-- [ ] **Roads run straight through open water as causeways.** Screenshot: a two-lane road
-      crossing a large lake with water on both horizons. `diag-water.mjs` reports 0 underwater
-      road samples and is RIGHT — the road is correctly lifted clear — but "not underwater" is
-      not the same as "sensible". The operator: *"we should have roads that go around the lake,
-      not through it necessarily... in the wetlands we could still continue to go through, but
-      the way we're doing it now is not correct."*
-      So: route arterials AROUND large water bodies, keep causeways for the wetland biome where
-      they read as correct. Note the recorded history before attempting it — terrain-aware
-      routing was tried once and reverted for making cliffs worse (0.029% to 0.071%) and tripling
-      build time. Routing around water is a different objective from routing around slope, but
-      the cost model is the same and the same trap is available.
+- [x] **Roads go AROUND lakes now.** Over the 144 km² box at the default spawn: non-wetland road
+      over open water **56.19 km -> 2.33 km** (-96%), separate causeway runs over 150 m
+      **102 -> 5**, longest single causeway **2483 m -> 297 m**. Wetland causeways KEPT and
+      slightly up (1.43 -> 2.94 km) — that picture was never the bug. Driving straight out of
+      spawn, the first 768 m of arterial now has **0 m** of open-water causeway against 377 m of
+      the first 684 m before. New tool: `node tools/diag-causeway.mjs`.
+
+      **It is a CULL, not a router, and that distinction is the whole reason it worked where the
+      reverted attempt did not.** There is no road map — a lattice, a hash and a rule — so
+      "route around the lake" is a global solve in a world with no global anything, which is what
+      made terrain-aware routing cost triple build time last time. But a 4-connected lattice does
+      not need a router to go round a lake: delete the links that cross open water and the links
+      round the shore are still there, still hash-derived, still connected. The route around the
+      lake is what is LEFT. A per-edge predicate, pure and local, the same shape as the existing
+      dead-end cull: ~18 water probes along the edge's base polyline, condemned at two
+      consecutive wet, non-wetland, over-0.35 m samples (~100 m of open water), cached per edge.
+
+      **It made three other things better, not worse, which is the opposite of last time:**
+      `diag-cliffs.mjs` **0.004% -> 0.000%** (15 samples over 45° -> 0 — a causeway is a deep
+      fill, and deep fill is the entire cliff population), chunk build **faster** at every level
+      (L7 962 -> 450 ms, L0 210 -> 161 ms; fewer edges to profile and carve), and junction
+      squareness improved on its own (see the crossing-angle item below).
+
+      **What it costs, stated plainly: about a third of the road length** (338.8 -> 209.1 km,
+      349.1 -> 275.6, 382.9 -> 246.0 over three fixed 144 km² boxes). That is the honest price of
+      not building roads across lakes when 15-20% of the world's area is under water, and an
+      arterial dies for the whole of its 1800 m if 100 m of it is in a lake. Interior dead ends
+      did NOT get worse — still **1** per 16 km² box, because the leaf cull was made
+      water-aware too (`liveDegree`) so a lane orphaned by a drowned neighbour is culled with it.
+      Sweep for the record: requiring 3 consecutive wet samples instead of 2 keeps 11% more road
+      but leaves 18 km of causeway instead of 2.3 km, and a 1.0 m depth gate keeps 3.5% more road
+      for double the residual water. 2 samples / 0.35 m is the knee.
+
+      **One real bug found and fixed on the way, and it is worth reading before touching this
+      area again:** edge GEOMETRY is no longer a pure function of (lattice, seed). `squareCrossings`
+      bends an edge against the neighbours that EXIST, and existence now depends on where the
+      water is — which the terrain preset rewrites in place. The geometry cache was keyed on the
+      lattice alone, so a preset switch served a stale, differently-sampled polyline against a
+      freshly-keyed height profile and they disagreed about array LENGTH:
+      `RangeError: offset is out of bounds` out of `canonicalProfile`. Only `diag-stations.mjs`
+      caught it, because it is the only tool that drives more than one preset in one process.
+      Fixed by keying `geomFor` on the field fingerprint and making `worldTag` subsume it.
+
+      Also new: `src/world/field.js`. The raw land and its water moved out of terrain.js so
+      roads.js can read them DIRECTLY — terrain.js imports roads.js, so roads.js could never
+      import terrain.js, and re-deriving the height formula inside roads.js would have been the
+      "two opinions about one surface" bug this project has already paid for twice. terrain.js
+      re-exports everything, so no existing importer moved. Verified behaviour-neutral on its
+      own: `npm test` byte-identical across the extraction.
+
+      Gates: `npm test` green, 0 underwater road samples, cliffs 0.000%, `diag-seam.mjs` clean
+      (all three S1/S2/S3, both presets), `diag-spawn-water.mjs` ALL DRY, `diag-curve.mjs` R5 229
+      deg/km with R1 0/60 and R2 0/0, `bench-props.mjs` and `bench-rescue.mjs` fully green.
+
+      **Two test FIXTURES had to move, and neither is a weakened check — both were assuming
+      roads that should never have existed.** `bench-rescue.mjs` hard-coded its lake at
+      (968,-160), which WAS a lakeside road and was one of the causeways; with it gone
+      `roads.query` returned d = Infinity with qx/qz at their (0,0) defaults, the rig placed the
+      car at the origin, it never got wet, and four checks failed reporting "0.00 s" as though
+      the rescue had broken. It had not — the fixture had. It now SEARCHES for deep water with
+      dry tarmac 12-45 m up the bank, the same discipline the file already used for its shelf
+      point, and the suite is **fully green for the first time** (it was 1 FAILED before this
+      round) with the recorded W7 timings reproduced exactly: 0.60 s / 0.75 s / 1.13 s.
+      `bench-props.mjs` sampled a FIXED 4 km square whose road length fell by a third, so its
+      absolute `sample size` guards tripped (11 against 15, 16 against 20) while the actual
+      assertions — `props per km of road` 1.78 in a 0.4-3.6 band, `cans per km` 2.59 in 0.9-3.9 —
+      were healthy. The box went 8x8 to 10x10 tiles, restoring the sample count (33 and 61) with
+      every threshold in the file untouched. Lowering the bars would have been the wrong move for
+      the usual reason: it makes a guard worse at its job instead of giving it back its evidence.
+
+      New tools this round: `diag-causeway.mjs` (road over open water, wetland-split, with the
+      drive out of spawn), `diag-abovedeck.mjs` (ground standing above the deck, plus a bank
+      profile at 4/8/12/16/24 m off the tarmac).
+
+      **Two numbers moved the wrong way and are recorded rather than buried.** `diag-relief.mjs`
+      alpine finished at **0.117%** of ground over 45°: better than the **0.175%** it was reading
+      at the start of this pass, worse than the 0.078% written in the rules line, which predates
+      this round entirely — so the ceiling in that line is stale and should be re-baselined
+      against a measurement rather than trusted. Of the 0.117%, the cut-batter change accounts
+      for about 0.026 pp (1.6 reads 0.091% on the same world) and is a deliberate, swept trade;
+      the rest is the round's other terrain work. `diag-curve.mjs`'s **worst-of-eight-seeds**
+      figure went 225 -> **192** deg/km, under its 200 bar, while the PRIMARY figure the gate
+      actually reads went 234 -> **229**, comfortably over. The worst seed's 840 m car box is a
+      watery one that lost 73% of its road (12.62 -> 3.43 km), so the mean is now taken over a
+      thin sample dominated by straight arterials. Not retuned: bending the road tiers to flatter
+      a diagnostic on one small box would be tuning the world to the test.
+
+- [x] **Junction squareness — the shallow-crossing tail, fixed as a side effect.** Over the
+      12 km box: crossings deviating more than 45° from square **23 of 141 (16.3%) -> 5 of 62
+      (8.1%)**, mean deviation **20.94° -> 15.51°**, median **13.56° -> 9.12°**, worst
+      **78.85° -> 60.98°**. The specific crossing the audit drove to and photographed as "two
+      carriageways running almost parallel and merging" — (1137,-1560), an 11.2° crossing — is
+      gone from the network entirely; the worst thing near it now is a 54.8° crossing.
+
+      No new mechanism, and deliberately so: a large share of the near-parallel pairs were
+      lane-against-arterial crossings in the flat ground around lakes, and the water cull removed
+      the lanes that made them. `squareCrossings` was not touched. Recorded here rather than
+      claimed as a fix in its own right — if the tail needs to go below 8% it will need a real
+      angle-based rejection, and `node tools/diag-crossing-angle.mjs` is the tool for it.
 
 - [ ] **A station forecourt built at the very edge of the water,** with the apron running right
       down into a lake. Station placement checks grade, water and freeboard at the forecourt
@@ -103,22 +191,197 @@ checkpoint and ships on its own.
       to be deterministic and grounded (the props work measured "0.000 m of float"), so either
       that guarantee does not hold for every kind, or something is animating them in. Find which.
 
+      **World-side note, from the roads/terrain pass — one candidate ruled OUT, one left
+      standing.** The audit's leading suspect was the fuel cans, and its suggested fix was to
+      drop `CAN_HOVER` from 0.55 m to ~0.15 m or ground them entirely. **Deliberately not done.**
+      A floating can is not an accident, it is an explicit operator request ("maybe we can do
+      floating gas cans?", plus "bobs gently"), so grounding them would break a requirement that
+      IS met in order to chase one that the audit itself could not reproduce in four driving
+      frames and twenty teleport frames. If the cans really are what he saw, the honest fix is to
+      show him a video first.
+
+      The suspect that survives is the audit's own second finding, and it has nothing to do with
+      hovering: the RENDERED terrain mesh deviates from the analytic surface by a mean 2.63 m
+      (worst 13.2 m) at 800 m and 11.8 m at 1200 m, so anything placed at analytic height that
+      far out hangs above the drawn ground and then "lands" when a finer LOD streams in. That is
+      a fall from the sky, it is LOD-driven rather than physics-driven, and it needs the placer
+      to clamp Y to the coarsest LOD height that will actually be drawn at first-visible
+      distance. Flora does not reach that far; stations, cans and props do.
+
 - [ ] **Grass grows through the station forecourt and the tarmac apron.** Visible in two
       separate shots. The grass system knows about roads (`W2` asserts 118/118 centreline samples
       report on-road) but evidently not about station aprons or prop footprints.
 
+- [x] **Terrain standing above the road — the shoulder grades down now, and the audit's own
+      13.55 m figure was an artefact.** New tool: `node tools/diag-abovedeck.mjs`.
+
+      **First, the measurement was wrong, and finding that out mattered more than the fix.** The
+      audit compared the ground beside the road against `e.y` — ONE edge's own height profile.
+      The surface the car drives on is `Terrain.height`, which is `RoadField.carve`'s blend over
+      every road that reaches the point, and blending is the entire reason this game does not
+      grow 80° walls where two roads pass at different heights. At the audit's own worst
+      coordinate (2693, 9413) those two differ by **9.45 m**, which is most of its 13.55 m.
+      Against the surface the car actually drives on — the same one `npm test`'s S2 asserts the
+      drawn ribbon matches to 0.0000 m — alpine reads **0.46%** of carriageway-edge samples over
+      1 m above the deck, not 4.01%, worst 5.94 m rather than 13.55 m.
+
+      **The real complaint was still real**, just further out than 0.5 m: at (2693, 9413) the
+      bank stood **+0.88 m at 6 m off the tarmac, +1.46 m at 8 m, +5.15 m at 12 m**. So the
+      shoulder genuinely was not grading down. Fixed with a CUTTING-ONLY batter — `CUT_BATTER`
+      2.0 against the fill side's unchanged 1.6, applied identically in terrain.js's
+      `groundFromCarve` and roads.js's `carve` mask, which move together always. One-sided on
+      purpose: the recorded 1.9 -> 108 and 2.4 -> 1016 disasters in the BATTER note are all FILL,
+      181 of 199 samples, and widening a fill's shoulder past the mask that contains it is what
+      builds a wall. A cutting brings ground DOWN into the hill and has no toe to step off.
+
+      After, same point: **+0.23 m at 6 m, +0.04 m at 8 m, +1.14 m at 12 m.** Across alpine the
+      bank 8 m off the tarmac drops mean 2.71 -> 2.25 m and 95th 4.24 -> 3.40 m; at 24 m out the
+      95th goes 15.16 -> 12.22 m. Carriageway-edge figure 0.46% -> **0.32%**.
+
+      **2.0 is a swept knee, not a taste.** 1.6 / 2.0 / 2.4 / 2.6 against `diag-cliffs.mjs` and
+      `diag-relief.mjs`: the softening is roughly linear and so is its cost in alpine relief
+      (0.091% -> 0.117% -> ~0.13% -> 0.140%), and at **2.6 the default-preset cliff gate itself
+      breaks** (0.000% -> 0.004%). 2.0 buys ~20% off the bank at every offset with `diag-cliffs`
+      still at **0.000%**.
+
+      **What it cannot do, so nobody re-opens it expecting more:** in the alpine highlands about
+      **43%** of the ground beside a road stands above it at ANY batter, because that is what a
+      mountain is. "Never terrain above a road" is literally achievable only by flattening the
+      mountains. This grades the shoulder; it does not delete the hillside.
+
+- [x] **A landmark on the skyline at spawn — delivered on the default seed, and the mechanism
+      shipped wired-but-off for the presets.** The audit stood at the old default spawn (301,602)
+      and found the nearest massif **104 m at 1.78 km** — the very bottom of the 90-330 m range —
+      with "nothing on the skyline that reads as head for that".
+
+      **The default seed is fixed, and it came free from routing roads round the lakes:** the
+      spawn moved off that plain to (115,-1081), where the nearest massif is **283 m at 1.59 km,
+      filling 7.0° of sky**. Requirement met on the world the operator actually boots into,
+      without any new scoring at all.
+
+      **The mechanism is built, proven and documented but ships at zero.** `landmarkView()` in
+      world/landmarks.js scores the most dominant massif visible from a point in DEGREES of sky —
+      degrees, because that is what "reads as a landmark" physically is (283 m at 1.6 km is 10.1°
+      and owns the skyline; 318 m at 6.5 km is 2.8° and is haze) — weighted by the massif's REAL
+      height, because apparent angle alone rewards standing next to a bump and measurably did:
+      the first version moved two seeds' spawns onto a 132 m and a 109 m hillock. `findSpawn`
+      reads it through `LANDMARK_SPAWN_BIAS`, currently **0**. At 15 it fixes every preset —
+      meadow's nearest massif 104 -> 283 m, marsh 78 -> 212 m, dunes 164 -> 226 m, all within
+      1.3-1.6 km.
+
+      **Why it is off:** moving the spawn ~200 m makes the browser suite's R1 check ("nothing is
+      above the road surface") read 1 of 103 points at 1.60 m instead of 0 of 60. R1 compares one
+      edge's own profile against the carve blend — the same apples-to-oranges that produced the
+      audit's phantom 13.55 m — so it is a per-box lottery, not a world property: measured across
+      eight seeds BEFORE anything changed this round, **six of the eight 840 m boxes already had
+      R1 hits, worst 8.44 m**, and the default seed's box passing was luck. Diagnosed exactly: at
+      (-895,1253) two arterials sharing node (-1,0) run 1.7 m apart, each graded to its own
+      ground, and the carve blends both. Fixing it properly means levelling near-parallel
+      arterial pairs, and letting arterials level against each other is already recorded in
+      roads.js as tried and reverted (it moved every arterial in a 4 km square by up to 36 m).
+      That is its own measurement round, not a rider on four other fixes. Evidence lives in the
+      new "W5 again" section of `node tools/diag-relief.mjs`.
+
+- [x] **The station "town" reads from a distance now.** The audit drove to a real station, looked
+      back from 150 m, and got "a small white smudge behind trees" — the town "adds essentially
+      nothing to the silhouette". The reason was arithmetic: the old kit's tallest piece is a
+      7.5 m telegraph pole, which at 200 m subtends 2.1° — under the angular size of the tree
+      line it stands behind. No amount of placement fixes an object shorter than its backdrop.
+
+      Kit enlarged from 4 entries to 10, all from the EXISTING catalogue (no new geometry family,
+      same as the original): a **clock tower at 14 m** — 4.0° at 200 m, roughly double the tree
+      line — plus a flagpole, a second shed and a wall line so the base reads as a settlement
+      rather than three separate objects. Measured over 56 real stations on the shipped seed:
+      **1.71 -> 3.45 pieces per station**, and **1.23 tall pieces per station** where there were
+      none (31 of 56 stations get the clock tower, 38 get a flagpole).
+
+      Redundancy is deliberate and is why the count nearly doubled rather than merely growing:
+      the audit measured the OLD kit delivering 2 of its 4 pieces at a real station, because the
+      shed and second pole were both rejected by the shared placement tests — which are not being
+      relaxed for set dressing. Several entries are now near-duplicates on opposite sides with an
+      alternates group, so whichever side of a given station is flat and dry gets the landmark,
+      and only ONE clock tower is ever placed. `bench-props.mjs` fully green.
+
 ### Playtest round 3 — new features asked for
 
-- [ ] **Sand particle spray when you go off-road**, to make it obvious you should not be there.
-- [ ] **Birds — seagulls — around the map**, especially near water.
-- [ ] **Fuel cans and trash cans: bigger, and glowing,** so they are not missed.
-- [ ] **A positive pick-up sound when you collect a fuel can**, crystal clear.
-      **CREDENTIALS NOTE:** the operator offered API keys for a sound-effects service, stored in
-      his password manager. I will not open the password manager or handle those keys — that is
-      a hard line regardless of who offers, and it is not needed here: this project already
-      synthesises all of its audio in the WebAudio graph (the radio and engine are both
-      generative and unlicensed), so a pick-up chime should be synthesised the same way. Zero
-      licence exposure, zero credentials, and it matches the existing sound design.
+- [x] **Sand particle spray when you go off-road**, to make it obvious you should not be there.
+      BUILT — `src/game/spray.js`, one `InstancedMesh` of small solid grains thrown from the two
+      REAR contact patches, coloured by blending the palette's sand/dry-grass/rock chips with the
+      surface sample's own biome weights, rate driven by speed x `1 - car.onRoad` x tyre effort
+      x how much loose material the ground has. Measured (`node tools/diag-cozy.mjs`): nine
+      seconds ON the road at 79 km/h spawns **0** grains; the same nine seconds OFF it at 44 km/h
+      throws **636**, capped at 260 live, every live instance carrying a non-degenerate scale and
+      every one of them behind the car. Sand throws 2.2x what wetland does. NOT YET LOOKED AT in
+      a browser — that it looks like dust rather than like confetti is a "look at it" claim and
+      is not made here.
+- [x] **Birds — seagulls — around the map**, especially near water.
+      BUILT — `src/render/birds.js`. Deterministic flocks on a rolling 340 m lattice around the
+      car, placed by the same "is this ground under its water plane" question `render/ships.js`
+      and `audio/ambience.js` both already ask; a tile whose two probe rings are ≥22% wet gets a
+      3-7 bird SEA flock, a dry tile with real woodland gets a 2-4 bird land flock. Each bird
+      wheels on its own orbit, banks into it, and flaps in BURSTS between glides. One draw call
+      for every bird in the world: the flock is re-baked into a single preallocated geometry each
+      frame rather than instanced, which is what buys a wing that actually moves without a new
+      shader to compile (gotcha 5 — a purely visual feature is not worth another GPU gamble).
+      Measured (`node tools/diag-birds.mjs`, seed 20260726, 144 km²): **288 flocks / 1292 birds**,
+      **82.4% of them over water**, a **20.7x** water bias by area, and birds in view for
+      **88.3%** of a 12 km diagonal drive at a mean of 23 in range. In a REAL THREE scene at
+      (1782, 553) the mesh is in the scene graph, **71 birds are written into the geometry**, the
+      draw range covers exactly those 1704 indices, every vertex is finite, the widest drawn
+      wingspan is 1.49 m and the flock sits 17-49 m up. NOT YET LOOKED AT in a browser — that
+      they read as gulls rather than as paper darts is a "look at it" claim and is not made here.
+- [x] **Fuel cans and trash cans: bigger, and glowing,** so they are not missed.
+      BUILT — `src/render/props.js`. The can's baked geometry went from **0.312 x 0.440 x 0.242 m**
+      (an audit measured it as an 11-pixel speck at 14 m) to **0.753 x 1.012 x 0.628 m** via
+      `CAN_SCALE`, about its own base so `CAN_HOVER` and every placement test in
+      `src/world/props.js` are untouched; the 5 cm EMIT glint became a full lit front AND back
+      panel plus a lit collar (**98 of 309 can vertices are now self-lit**); and a soft additive
+      halo billboard rides the existing bob. TRASH CANS DID NOT EXIST AT ALL — no catalogue
+      entry, no geometry, not even the word anywhere under `src/` — so `buildLitterBin()` is new:
+      a waist-high drum with a lit shoulder band, baked into the tile's shared mesh (no extra
+      draw call) beside every can, on the side AWAY from the road, chosen by asking the real
+      `RoadField.carve()` which side is further from the tarmac. **30 of 30** cans have one,
+      1.11 m tall. `tools/bench-props.mjs` still passes in full, collection still pays exactly
+      `CAN_FRACTION`. NOT YET LOOKED AT in a browser: whether the halo reads as a warm glow
+      rather than a quest marker, and whether the bin makes the pair legible at 150 m.
+- [x] **A positive pick-up sound when you collect a fuel can**, crystal clear.
+      BUILT — `EngineAudio.pickup()` in `src/audio/engine.js`, wired in `src/main.js` on the one
+      callback that can say a can was collected THIS frame (`collectCans`). A rising C6-E6-G6
+      major arpeggio 70 ms apart, sines with a quiet triangle doubling an octave below, peak voice
+      gain 0.085 (the horn is 0.16) — a small kindness, not a game-show sting. Measured with a
+      stub AudioContext (`tools/diag-cozy.mjs`): six voices really created in the graph, three
+      distinct ascending notes, fires exactly once on the frame of collection, never on later
+      frames, and still fires while auto-drive has the wheel.
+      **CREDENTIALS NOTE — HONOURED:** the operator offered API keys for a sound-effects service,
+      stored in his password manager. Those keys were **not requested, not opened and not used**,
+      and no audio file was downloaded. This project already synthesises all of its audio in the
+      WebAudio graph (the radio and engine are both generative and unlicensed), so the pick-up
+      chime is synthesised the same way. Zero licence exposure, zero credentials, and it matches
+      the existing sound design. Logged in `docs/CREDITS.md`.
+
+- [x] **Auto-drive must accrue NO streak and burn NO fuel.** The audit measured the opposite in
+      the live game: with `auto.on === true` the streak climbed 145 -> 4595 m over eight minutes
+      and the tank fell 0.696 -> 0.109 over the same run. Cause was blunt — `streak.js` and
+      `fuel.js` contained no reference to auto-drive at all, and `main.js` called both
+      unconditionally. Both are now GATED, and both are gated the cozy way:
+      `Streak.update(dt, car, surf, { paused })` FREEZES (does not reset — a chauffeured
+      kilometre must not count, and taking your hands off the wheel must not cost you the eighty
+      you already earned; the off-road grace timer is held too, so an autopilot that clips a
+      verge cannot break a streak you are not building), and `Fuel.update(dt, car, { burn })`
+      suppresses only the BURN — cans, shares, the station scan and the pumps all keep working,
+      because switching those off would quietly break the gauge and the pick-up chime for as
+      long as the chauffeur had the wheel. Time spent free is counted on `stats.freeSeconds` so
+      it can be proved rather than inferred. The HUD says why the big number has stopped moving
+      ("held while auto-drive has the wheel") — a figure that silently freezes reads as a bug.
+      Measured (`node tools/diag-cozy.mjs`): 60 s of auto-drive moves the streak **0.0 m** and
+      the tank **0.720000 -> 0.720000**; the identical 60 s with auto OFF still gives 1980 m and
+      0.4328, so the gate is a gate and not a broken fuel system.
+- [x] **Auto-drive's stuck-reset, proven against a deliberately wedged car.** The audit never saw
+      it fire, which is not the same as it not working — nothing in the run ever pinned the car
+      for the 3.5 s `STUCK_TIMEOUT`. `tools/diag-cozy.mjs` now wedges one on purpose: `recover()`
+      is called, at **3.50 s**, with the toast "stuck — resetting to the road", and a control
+      case proves a car merely MOVING is never reset over 20 s of driving. No code change was
+      needed; what was missing was the test.
 
 - [ ] **Day/night cycle.** Operator asked for this to be PLANNED with Fable and IMPLEMENTED with
       Sonnet 5. Not started — it is queued behind the bugs above deliberately, since a lighting
@@ -399,6 +662,92 @@ recorded finding is a complete pass.
       15/15 throughout (byte-identical to the pre-change baseline) and `node tools/diag-body.mjs`
       is the new evidence for all three. Not wired into `npm test` — it is a slower scripted
       drive, not a fast gate; run it by hand after touching vehicle.js.
+
+### Playtest round 3 — the presentation / audio / multiplayer fixes
+
+Every entry here carries its evidence and, where the claim is visual, says so explicitly. None
+of these was seen in a browser by the agent that wrote them: this checkout is shared and only
+the audit pass gets a dev server. NOTHING BELOW COUNTS UNTIL IT IS OBSERVED RUNNING.
+
+- [x] **Water: the far-field moire.** The report kept everything else about the water (calm,
+      flat, soft-shored, ships, sea sound all confirmed) and failed one thing: "coarse diagonal
+      streak banding across the whole left half of the lake" plus "a fine crosshatch shimmer
+      band forming at mid-to-far distance ... in motion it will crawl". Root cause, in
+      `src/render/water.js`: `bandLimit()` is an ANISOTROPIC gate, and correctly so, but an
+      anisotropic gate keeps a band alive whose CROSS-axis frequency is still resolvable — and
+      at grazing incidence that band is then point-sampled once inside a pixel tens of metres
+      long DOWN the view. Undersampling along the view of bands that all run down one fixed
+      world axis is exactly a crawling diagonal streak. Fixed by removing the signal instead of
+      trying to filter it: a `farFlat` term (90 m -> 300 m) multiplies out the ripple normal
+      amplitude, the gust field, the flow ribbons and the quantised glitter, and the existing
+      normal flatten now reaches genuinely flat instead of stopping at 92%. `bandLimit` also
+      tightened from 0.28/0.72 to 0.20/0.52 — Nyquist is 0.5, so the old window was still
+      point-sampling past the point of no information. Nothing inside 90 m changes at all.
+      Evidence: `node tools/diag-watershader.mjs` — 9/9, including a reserved-word scan, brace
+      balance, and that all four per-pixel terms take the gate; 54% flattened at 200 m, 100% at
+      300 m. **NOT COMPILED ON A GPU** — see gotcha 5. Re-photograph at (974, 2101) with the
+      same 2.4x zoom before believing it.
+- [x] **Auto-drive: the camera goes cinematic.** The audit measured `cine.active === false` in
+      ~100 consecutive samples and reported, correctly, that what actually happened was
+      `chase.driftW` ramping and the boom widening. That is a nice camera and it is not a
+      cinematic, because it has no CUT in it. `src/car/camera.js` now runs a six-shot list —
+      wide / high and back / low quarter / over the shoulder / the long lens / roadside — held
+      10.5 to 16 s each and CUT, not eased, between. The slow orbit keeps running inside every
+      shot so nothing is a locked-off still. The cut snaps position, aim and FOV in one frame
+      and hands the new shot the CAR'S OWN VELOCITY (placed a spring-lag behind the pose), which
+      is what stops the rig standing still in world space while the car drives out from under
+      it — that alone was 110 deg/s of bearing change, exactly the whip the rig's whole design
+      budget exists to prevent. `chase.cinematic`, `chase.shot` and `chase.cuts` are public so
+      the next audit can measure it instead of inferring it. Handing `game/cinematic.js` the
+      camera was considered and rejected: that programme is scouted ONCE at boot around the
+      spawn, so replaying it 40 km away flies a crane over ground that is not there, and it owns
+      an overlay, a skip hint, a HUD dim and a document-wide key listener. Evidence:
+      `node tools/diag-cinematic.mjs` — 13 cuts in 180 s across all 6 framings, holds 10.5-16.0 s,
+      between-cut peak **7.42 deg/s** (budget 10), the post-cut settle peaks at 19.7 deg/s for
+      under 0.2 s and moves the bearing **1.89° in total**, and taking the wheel back still
+      lands on the gameplay pose with the drift term EXACTLY zero. The 14 pre-existing failures
+      in that tool are about the opening intro and are unchanged by this pass.
+- [x] **Multiplayer: the stale peer. THIS WAS THE REAL BUG.** `server/drive.php`'s position
+      filter used to reject a jump by pinning the row back to the previous position and writing
+      a fresh `seen`. That is a one-way door: the next tick compares against that same stale
+      row, by which time the client has driven FURTHER, so the distance has grown and it fails
+      again, for ever. The client keeps getting 200s full of other people's peers the whole
+      time, which is precisely why tab A could see tab B while being invisible itself. Any
+      legitimate teleport opens it — R to get back on the road, the water rescue, the
+      out-of-fuel reset to spawn, or a buried tab resuming. The filter now WALKS the stored
+      position toward the claim by the largest legal step instead of refusing to move it; every
+      property it was defending is kept (a client is still capped at `WR_MAX_SPEED`) and the
+      wedge is impossible. Evidence: `node tools/net-devapi.mjs` — the old rule is reproduced
+      and measured at **225 m wrong after 96 s, growing to 818 m** while the player keeps
+      driving; the new rule converges in **one tick**; a client claiming 50 km per tick still
+      only averages 105 m/s. PHP is not installed here, so the last three checks read
+      `drive.php`'s own source to prove production carries the same clamp.
+- [x] **Multiplayer: ghosts are the right car.** An earlier round fixed the WIRE (sending the
+      fleet index instead of the Vehicle's silhouette string) and recorded the item as done, but
+      the correct index was still handed to `buildGhostCar()`, which has three shapes. Seven
+      cars, three bodies, none of them the one being driven. `src/net/ghostCar.js` loads the
+      same per-fleet GLB the driver is driving through `loadedCar.js`'s `loadGhostCar()` — which
+      has existed and been imported by main.js unused all along. It returns a handle
+      SYNCHRONOUSLY with the procedural body as a stand-in (remotes' `_spawn()` cannot await a
+      180 KB download) and swaps the GLB in when it lands; if it never lands the stand-in stays,
+      the same fallback the local car already takes. It also implements the `update()` that
+      remotes.js has been calling on ghosts for a long time, so a ghost's wheels finally steer
+      and spin off its own reported controls. Evidence: `node tools/diag-ghostcar.mjs` — 8/8,
+      all seven wire tiers resolve to seven DIFFERENT cars, every ghost has a body on frame 1,
+      dispose is safe mid-load. The GLB cannot load in node, so **that the real model appears is
+      NOT proven here** — `window.WANDEROAD.ghostStats.upgraded` is the number to read in a
+      live browser with a peer present.
+- [x] **Multiplayer can finally be tested locally.** `GET /api/drive.php` on the dev server
+      returned index.html (Vite's SPA fallback), the PHP driver threw on the JSON parse, the
+      transport chain silently demoted to the in-closure `local` driver, and every localhost
+      window was permanently solo — including the garage's own "Second window here (seat 2)"
+      link. `server/devApi.mjs` is the same endpoint in-process over a Map, mounted as a Vite
+      plugin (`apply: 'serve'`, so it adds nothing to the build) and carrying the SAME position
+      filter and the same constants as drive.php, because a dev mirror that disagreed about
+      that filter would hide the exact class of bug it exists to expose. Verified over real
+      HTTP: `/api/drive.php` answers `application/json`, two clients see each other with the
+      right fleet index, `/api/state.php` reports the population, and every other path still
+      falls through to Vite.
 
 ## Next
 

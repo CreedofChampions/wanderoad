@@ -22,7 +22,7 @@
  * shrine at four LODs for nothing.
  */
 
-import { Mesh, Object3D } from 'three';
+import { Mesh, Object3D, Sprite, SpriteMaterial, CanvasTexture, AdditiveBlending } from 'three';
 import { PB, pv, pq, pbox, pcyl, proof, pquad, finishPainted, createPaintedMaterial, MAT, LC, tint, mixc } from './painted.js';
 import { Terrain } from '../world/terrain.js';
 import { waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
@@ -55,6 +55,44 @@ const KNOWN_STATIONS = 192;
  *  frame, on top of its baked, already-hovering (+CAN_HOVER) position — see buildFuelCan. */
 export const CAN_BOB_AMP = 0.055;
 const CAN_BOB_HZ = 0.52;
+
+/* ── "bigger, and glowing, so they are not missed" ────────────────────────────
+ * Operator, docs/BACKLOG.md. Measured before the change: the can's geometry bounding box was
+ * 0.312 x 0.440 x 0.242 m — a real jerry can, correct next to a 4.5 m car and, at 14 m, an
+ * eleven-pixel red speck on a 1582 px frame. Correct scale was the wrong answer to "can you
+ * see it".
+ *
+ * Three changes, in the order they matter:
+ *   1. SIZE. Every dimension of the geometry x CAN_SCALE, about its own base, so the hover
+ *      height (CAN_HOVER, world/props.js) and the ground-contact `y` every placement test in
+ *      world/props.js reasons about are both untouched — the can grows upward out of the same
+ *      point on the ground, and nothing about where a can may legally be placed changes.
+ *   2. GLOW. A soft additive billboard behind it (CAN_HALO_*, `_haloTexture` below). Additive,
+ *      depth-TESTED so a hill still hides it, and no bigger than the can it surrounds: it is
+ *      a lantern, not a waypoint marker. It breathes on the same slow clock as the bob so the
+ *      two read as one object rather than two effects.
+ *   3. A NEIGHBOUR. Every can now stands beside a LITTER BIN (buildLitterBin below) — the
+ *      other half of the same backlog line, and the thing that makes a can legible from far
+ *      enough away to react to: a hovering 0.7 m can is a dot at 150 m, and a can plus a
+ *      waist-high bin with a lit band is a roadside STOP, which is a shape you recognise.
+ *      The bin bakes into the tile's shared mesh (no extra draw call, no bob), so it stays
+ *      after the can is taken — a bin is part of the road, not part of the pickup.
+ *
+ * COZY IS THE FILTER, and it is what sets the numbers: 2.3x rather than 3x (a jerry can the
+ * size of a wheelie bin is a joke, not a pickup), halo opacity 0.3 rather than 1, and a 0.55 Hz
+ * breath rather than a pulse. Nothing here flashes.
+ */
+export const CAN_SCALE = 2.3;
+/** Halo radius in metres — sized to sit just outside the scaled can, not to be seen from space. */
+const CAN_HALO_R = 1.35;
+/** Peak opacity of the halo, and how far it breathes either side of it. */
+const CAN_HALO_A = 0.3;
+const CAN_HALO_SWING = 0.09;
+/** Metres from the can to its litter bin. Far enough to read as two objects, close enough to
+ *  read as one stop — and inside the can's own VERGE_CLEAR + CAN_FOOT margin (2.7 m, see
+ *  world/props.js) so the bin cannot end up on the carriageway even in the worst case, which
+ *  is the whole reason the offset direction below is chosen AWAY from the road. */
+const BIN_OFFSET = 1.6;
 
 /* ── palette shortcuts ────────────────────────────────────────────────────────
  * Everything is a linear triple from src/core/palette.js. Props that need a colour the
@@ -1270,21 +1308,106 @@ export function stationSolids(stations) {
  */
 function buildFuelCan(M, r) {
   const y0 = CAN_HOVER;
+  /* Every offset and half-extent below is in the can's ORIGINAL, real-jerry-can metres and is
+   * multiplied by S here rather than being rewritten — so the shape stays the shape that was
+   * modelled and reviewed, and "how big is a can" remains one number (CAN_SCALE) instead of
+   * thirty edited literals that can drift apart. `y0 +` sits OUTSIDE every product on purpose:
+   * the scale is about the can's own base, not about the ground, so the hover gap is not
+   * scaled with it. */
+  const S = CAN_SCALE;
   const body = mixc(RED, INK, 0.1);
   const panel = mixc(body, CREAM, 0.3);
   // squat body, narrower at the neck — reads as a jerry can at a glance, not a box
-  pbox(M, 0, y0 + 0.16, 0, 0.14, 0.16, 0.095, 0, body, MAT.MATTE);
-  pbox(M, 0, y0 + 0.16, 0.096, 0.095, 0.11, 0.005, 0, panel, MAT.MATTE); // embossed panel, front
-  pbox(M, 0, y0 + 0.16, -0.096, 0.095, 0.11, 0.005, 0, panel, MAT.MATTE); // and back
-  pcyl(M, [0, y0 + 0.32, 0.015], [0, y0 + 0.4, 0.015], 0.04, 0.035, 6, body, MAT.MATTE, true, false);
-  pcyl(M, [0, y0 + 0.4, 0.015], [0, y0 + 0.44, 0.015], 0.044, 0.044, 6, CREAM, MAT.MATTE, true, true);
+  pbox(M, 0, y0 + 0.16 * S, 0, 0.14 * S, 0.16 * S, 0.095 * S, 0, body, MAT.MATTE);
+  pbox(M, 0, y0 + 0.16 * S, 0.096 * S, 0.095 * S, 0.11 * S, 0.005 * S, 0, panel, MAT.MATTE); // embossed panel, front
+  pbox(M, 0, y0 + 0.16 * S, -0.096 * S, 0.095 * S, 0.11 * S, 0.005 * S, 0, panel, MAT.MATTE); // and back
+  pcyl(M, [0, y0 + 0.32 * S, 0.015 * S], [0, y0 + 0.4 * S, 0.015 * S], 0.04 * S, 0.035 * S, 6, body, MAT.MATTE, true, false);
+  pcyl(M, [0, y0 + 0.4 * S, 0.015 * S], [0, y0 + 0.44 * S, 0.015 * S], 0.044 * S, 0.044 * S, 6, CREAM, MAT.MATTE, true, true);
   // carrying handle: a thin loop over the top
-  pbox(M, 0, y0 + 0.35, -0.045, 0.075, 0.018, 0.018, 0, body, MAT.MATTE);
-  for (const sx of [-1, 1]) pcyl(M, [sx * 0.075, y0 + 0.24, -0.045], [sx * 0.075, y0 + 0.35, -0.045], 0.013, 0.013, 4, body, MAT.MATTE, true, true);
-  // a warm glint on the panel — EMIT, the same trick a lantern's fire window uses, so a can
-  // reads from further away than its size alone would carry.
-  pbox(M, 0, y0 + 0.17, 0.099, 0.045, 0.045, 0.003, 0, GLOW, MAT.EMIT);
-  if (r() < 0.5) pball(M, 0.02, y0 + 0.02, 0.06, 0.05, 0.02, 0.05, mixc(body, INK, 0.4), MAT.MATTE, 6, 3); // a puddle-shaped drip, half the time
+  pbox(M, 0, y0 + 0.35 * S, -0.045 * S, 0.075 * S, 0.018 * S, 0.018 * S, 0, body, MAT.MATTE);
+  for (const sx of [-1, 1]) {
+    pcyl(M, [sx * 0.075 * S, y0 + 0.24 * S, -0.045 * S], [sx * 0.075 * S, y0 + 0.35 * S, -0.045 * S], 0.013 * S, 0.013 * S, 4, body, MAT.MATTE, true, true);
+  }
+  /* The lit panel. It used to be a 0.045 x 0.045 m chip — a 5 cm glint on a 30 cm object, which
+   * is why an audit that went looking for a glow found "no halo, no bloom, no pulse". It is now
+   * most of the front face (0.105 of 0.14 half-width), which is a can with a LIT PANEL rather
+   * than a can with a speck on it, and it still costs one quad. */
+  pbox(M, 0, y0 + 0.17 * S, 0.1 * S, 0.105 * S, 0.105 * S, 0.004 * S, 0, GLOW, MAT.EMIT);
+  pbox(M, 0, y0 + 0.17 * S, -0.1 * S, 0.105 * S, 0.105 * S, 0.004 * S, 0, GLOW, MAT.EMIT); // ...and the back, so it reads from either side
+  // A lit collar under the cap: a second, smaller light at a different height, which is what
+  // makes the object read as three-dimensional at distance instead of as a flat card.
+  pcyl(M, [0, y0 + 0.395 * S, 0.015 * S], [0, y0 + 0.415 * S, 0.015 * S], 0.05 * S, 0.05 * S, 8, GLOW, MAT.EMIT, true, true);
+  if (r() < 0.5) pball(M, 0.02 * S, y0 + 0.02 * S, 0.06 * S, 0.05 * S, 0.02 * S, 0.05 * S, mixc(body, INK, 0.4), MAT.MATTE, 6, 3); // a puddle-shaped drip, half the time
+}
+
+/* ── the litter bin ───────────────────────────────────────────────────────────
+ * The other half of the operator's line ("fuel cans and trash cans: bigger, and glowing, so
+ * they are not missed"). There was no trash can anywhere in the project — no catalogue entry,
+ * no geometry, no string — so this is built from scratch, in the same painted pipeline as the
+ * other hundred props, from the same palette. Nothing downloaded; see this file's own header
+ * for why that is the standing rule here.
+ *
+ * WHERE IT LIVES, and why it is not one of world/props.js's 100 catalogue kinds: it is placed
+ * against the fuel cans (see _bake), so it lands exactly where it is useful — beside the thing
+ * you are meant to spot — instead of being sprinkled at catalogue density across a wilderness
+ * that has no bins in it. It also means this whole feature is one file's change.
+ *
+ * WHAT IT LOOKS LIKE: a waist-high green drum, a slightly proud dark lid, a hoop foot, and a
+ * lit band around the shoulder. The band is the point. A bin is a silhouette you already know,
+ * and a horizontal lit line at 0.9 m is legible at a distance where the drum itself is four
+ * pixels of green against green.
+ */
+function buildLitterBin(M, r) {
+  const green = mixc(LC('tShade'), INK, 0.12);
+  const dark = mixc(green, INK, 0.45);
+  const R = 0.34;
+  const H = 1.02;
+  // the drum, very slightly tapered so it does not read as a pipe
+  pcyl(M, [0, 0.06, 0], [0, H, 0], R * 0.92, R, 10, green, MAT.MATTE, true, false);
+  // a hoop foot, and the lid
+  pcyl(M, [0, 0, 0], [0, 0.06, 0], R * 0.86, R * 0.9, 10, dark, MAT.MATTE, true, true);
+  pcyl(M, [0, H, 0], [0, H + 0.09, 0], R * 1.06, R * 0.86, 10, dark, MAT.MATTE, true, true);
+  // the lit band around the shoulder — EMIT, so it is warm at any hour, same trick the can's
+  // panel and a lantern's fire window both use
+  pcyl(M, [0, H - 0.2, 0], [0, H - 0.09, 0], R * 1.02, R * 1.02, 10, GLOW, MAT.EMIT, true, true);
+  // two vertical ribs, for something to catch the light on the drum itself
+  for (const a of [0.7, 0.7 + Math.PI]) {
+    pbox(M, Math.sin(a) * R * 0.97, 0.55, Math.cos(a) * R * 0.97, 0.03, 0.44, 0.03, a, dark, MAT.MATTE);
+  }
+  // a bag corner poking out under the lid, half the time — a bin somebody actually uses
+  if (r() < 0.5) pbox(M, R * 0.5, H + 0.02, 0, 0.12, 0.07, 0.1, r() * TAU, CREAM, MAT.MATTE);
+}
+
+/* ── the can's glow ───────────────────────────────────────────────────────────
+ * A single 64 px radial-gradient texture, built once, shared by every halo sprite in the game.
+ * Additive and depth-TESTED: it brightens what is behind it and a hill still hides it, which is
+ * the difference between a lantern and an objective marker.
+ *
+ * Guarded on `document` and cached in a module local, because this module is also imported by
+ * tools/bench-props.mjs, which builds real tiles in node with no DOM at all. No canvas, no
+ * halo, and every other measurement that harness makes is unaffected.
+ */
+let _haloTex;
+function haloTexture() {
+  if (_haloTex !== undefined) return _haloTex;
+  if (typeof document === 'undefined' || !document.createElement) return (_haloTex = null);
+  const n = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = n;
+  const g = c.getContext('2d');
+  if (!g) return (_haloTex = null);
+  const grad = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+  /* Warm amber in the middle, out to nothing. The stops are weighted to the INSIDE (0.28 is
+   * already at half brightness) so the halo has a small bright heart and a wide soft skirt —
+   * a hard-edged disc reads as a decal stuck on the world. */
+  grad.addColorStop(0.0, 'rgba(255,236,190,1)');
+  grad.addColorStop(0.28, 'rgba(255,198,110,0.5)');
+  grad.addColorStop(0.62, 'rgba(255,168,80,0.14)');
+  grad.addColorStop(1.0, 'rgba(255,150,60,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, n, n);
+  const tex = new CanvasTexture(c);
+  return (_haloTex = tex);
 }
 
 /* ── the scene-side manager ───────────────────────────────────────────────── */
@@ -1387,6 +1510,7 @@ export class Props {
       if (d <= CAN_RADIUS) {
         this.group.remove(c.mesh);
         c.mesh.geometry.dispose();
+        this._dropHalo(c);
         this.cans.delete(key);
         this._collectedCans.add(key);
         this._pendingFuel += CAN_FRACTION;
@@ -1395,9 +1519,28 @@ export class Props {
       // The can's geometry is already baked hovering at +CAN_HOVER above the ground (see
       // buildFuelCan); this is a SEPARATE, tiny delta on the mesh's own transform on top of
       // that, never touching the baked vertices.
-      c.mesh.position.y = Math.sin(this._bobT * CAN_BOB_HZ * TAU + c.phase) * CAN_BOB_AMP;
+      const bob = Math.sin(this._bobT * CAN_BOB_HZ * TAU + c.phase) * CAN_BOB_AMP;
+      c.mesh.position.y = bob;
       c.mesh.updateMatrix();
+      /* The halo rides the same bob and breathes on the same phase, a quarter turn behind it,
+       * so the can is brightest as it reaches the top of its rise. One clock for the whole
+       * object: two independent oscillators would beat against each other and read as a flicker,
+       * which is exactly the not-cozy failure this is meant to avoid. */
+      if (c.halo) {
+        c.halo.position.y = c.baseY + bob;
+        c.halo.material.opacity = CAN_HALO_A + CAN_HALO_SWING * Math.sin(this._bobT * CAN_BOB_HZ * TAU + c.phase - Math.PI / 2);
+      }
     }
+  }
+
+  /** Take a can's halo off the scene and free its material. The shared texture is NOT disposed —
+   *  it belongs to the module, not to any one can. Both places a can leaves the world (collected
+   *  in _updateCans, tile released in _release) go through this one function. */
+  _dropHalo(c) {
+    if (!c || !c.halo) return;
+    this.group.remove(c.halo);
+    c.halo.material.dispose();
+    c.halo = null;
   }
 
   /**
@@ -1589,6 +1732,49 @@ export class Props {
       buildAccessSpur(M, spur.mouthX, spur.mouthZ, hRoad, spur.apronX, spur.apronZ, y, s.width);
     }
 
+    /* A litter bin beside every fuel can — see buildLitterBin's own comment for what it is and
+     * why it is placed here rather than in world/props.js's catalogue.
+     *
+     * INTO THE SHARED TILE MESH, deliberately: a bin has no bob, no collection and no reason to
+     * be its own draw call, and baking it here means it survives the can being taken (the road
+     * keeps its bin) and is released with the tile like every other prop.
+     *
+     * WHICH SIDE. Straight-line offsets in the can's own random yaw would sometimes put a bin
+     * a metre from the tarmac. So the direction is chosen AWAY FROM THE ROAD, and it is
+     * measured, not guessed: the road field's carve() is asked for the distance to the
+     * centreline at both candidate positions and the further one wins. That is the same
+     * RoadField every other part of this project reads (gotcha 6 — one elevation/one road
+     * truth), never a second opinion about where the road is. Falls back to the can's own yaw
+     * if a probe without a road field is ever handed in (a harness fixture), which is still
+     * always at least 1.1 m clear of the tarmac — see BIN_OFFSET. */
+    const roads = job.terr && job.terr.roads;
+    const carveA = { edge: 0, d: Infinity, tier: 0, tx: 1, tz: 0 };
+    for (const c of cans) {
+      let dx = Math.sin(c.yaw);
+      let dz = Math.cos(c.yaw);
+      if (roads && roads.carve) {
+        const at = roads.carve(c.x, c.z, carveA);
+        // The two normals to the road's tangent. +X is on your LEFT looking down +Z (gotcha 1),
+        // so these are simply the tangent rotated both ways; which one points outward is what
+        // the two probes below decide, rather than a sign anyone has to get right by reasoning.
+        const nx = at.tz;
+        const nz = -at.tx;
+        const dA = roads.carve(c.x + nx * BIN_OFFSET, c.z + nz * BIN_OFFSET, carveA).d;
+        const dB = roads.carve(c.x - nx * BIN_OFFSET, c.z - nz * BIN_OFFSET, carveA).d;
+        const s = dA >= dB ? 1 : -1;
+        dx = nx * s;
+        dz = nz * s;
+      }
+      const bx = c.x + dx * BIN_OFFSET;
+      const bz = c.z + dz * BIN_OFFSET;
+      const L = PB();
+      // Same "keyed on rounded world position, not on build order" rule the props above use, so
+      // a bin keeps its variation across a tile rebuild.
+      buildLitterBin(L, rng(hash3i(Math.round(bx * 4), Math.round(bz * 4), 0x6a19, this.seed)));
+      // Facing the can, so the lit band and the ribs are square-on to a driver arriving at it.
+      blit(M, L, bx, height(bx, bz) - 0.02, bz, Math.atan2(-dx, -dz), 1);
+    }
+
     let mesh = null;
     if (M.n) {
       const geom = finishPainted(M);
@@ -1629,8 +1815,33 @@ export class Props {
       cmesh.updateMatrix();
       cmesh.renderOrder = 2;
       this.group.add(cmesh);
+      /* The glow. A separate additive billboard rather than more EMIT geometry, because EMIT is
+       * still an opaque painted face — it cannot bleed past its own silhouette, and "bleeds past
+       * its own silhouette" is the entire definition of a halo. renderOrder 3 puts it after the
+       * opaque pass; depthWrite off so it never occludes anything, depthTest ON so terrain
+       * still hides it. Null in node (no DOM, no canvas) — see haloTexture(). */
+      let halo = null;
+      const htex = haloTexture();
+      if (htex) {
+        halo = new Sprite(
+          new SpriteMaterial({
+            map: htex,
+            blending: AdditiveBlending,
+            transparent: true,
+            depthWrite: false,
+            opacity: CAN_HALO_A,
+          })
+        );
+        halo.scale.set(CAN_HALO_R * 2, CAN_HALO_R * 2, 1);
+        halo.renderOrder = 3;
+        // Centred on the middle of the scaled can, not on its base.
+        halo.position.set(c.x, c.y + CAN_HOVER + 0.2 * CAN_SCALE, c.z);
+        this.group.add(halo);
+      }
       this.cans.set(c.key, {
         mesh: cmesh,
+        halo,
+        baseY: c.y + CAN_HOVER + 0.2 * CAN_SCALE,
         x: c.x,
         z: c.z,
         // Own bob phase per can, keyed on position like the props' own sway phase above, so
@@ -1657,6 +1868,7 @@ export class Props {
       if (!c) continue; // already collected, and therefore already removed by _updateCans
       this.group.remove(c.mesh);
       c.mesh.geometry.dispose();
+      this._dropHalo(c);
       this.cans.delete(ck);
     }
     this.live.delete(key);

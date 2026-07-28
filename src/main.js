@@ -18,6 +18,7 @@ import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
 import { Water } from './render/water.js';
 import { Ships } from './render/ships.js';
+import { Birds } from './render/birds.js';
 import { Clouds } from './render/clouds.js';
 import { Flora } from './render/trees.js';
 import { Roads } from './render/road.js';
@@ -41,6 +42,7 @@ import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
+import { Spray } from './game/spray.js';
 import { Props } from './render/props.js';
 import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
@@ -50,6 +52,7 @@ import { Menu } from './ui/menu.js';
 import { MusicPanel } from './ui/musicPanel.js';
 import { createTransport } from './net/transport.js';
 import { Remotes } from './net/remotes.js';
+import { makeGhostFactory, ghostStats } from './net/ghostCar.js';
 import { identity } from './net/identity.js';
 import { WorldSave } from './net/save.js';
 import { EngineAudio } from './audio/engine.js';
@@ -121,6 +124,12 @@ async function boot() {
    * terrain streamer's onChunk (that file's own header explains why: a sparse feature tied to
    * the quadtree gets re-decided every time a chunk's LOD changes). */
   const ships = new Ships({ seed: SEED, scene });
+  /* Seagulls, and a few smaller land birds — src/render/birds.js. Same rolling lattice as the
+   * boats above, for the same reason, and placed off the same "is this wet" question the
+   * boats and the ambience layer both already ask. One draw call for every bird in the world;
+   * the flock is re-baked into one geometry each frame rather than instanced, which is what
+   * buys a wing that actually flaps without a new shader to compile. */
+  const birds = new Birds({ seed: SEED, scene });
   const flora = new Flora({ seed: SEED, scene });
   const solids = new Solids();
 
@@ -259,9 +268,20 @@ async function boot() {
    * re-deriving the road network — the pure lookups in world/props.js cost tens of
    * milliseconds. props.update() below is called with the car's own x/z every frame, so it
    * already knows when the car is near a can; drainCollectedFuel() just asks what it found. */
+  /* The off-road dust cue. Owns one InstancedMesh and nothing else; see src/game/spray.js. */
+  const spray = new Spray({ scene });
   const fuel = new Fuel({
     findStation: (x, z) => props.nearestStation(x, z),
-    collectCans: () => props.drainCollectedFuel(),
+    /* Picking up a can, with its sound. The audio hangs off THIS callback rather than off a
+     * flag polled somewhere else, because this is the one function in the game that can say
+     * "a can was collected on this exact frame" — game/fuel.js calls it once a tick and a
+     * non-zero answer means it happened. Synthesised in the existing WebAudio graph (see
+     * EngineAudio.pickup); no file is downloaded and no third-party service is involved. */
+    collectCans: () => {
+      const gained = props.drainCollectedFuel();
+      if (gained > 0) audio.pickup();
+      return gained;
+    },
     // remotes is constructed a little further down (it needs the transport/identity wiring
     // above it), but this callback is not CALLED until update() runs deep inside the frame
     // loop, well after boot() has finished — the same forward-reference pattern already used
@@ -349,6 +369,9 @@ async function boot() {
     }
     chase.reset();
     trail.reset(car);
+    // ...and drop any dust in flight, so a reset does not drag a comet tail of grass across the
+    // map from wherever the car used to be.
+    spray.reset();
     hud.say('back on the road', 2);
   }
 
@@ -363,6 +386,7 @@ async function boot() {
     car.placeAt(spawn.x, spawn.z, spawn.heading);
     chase.reset();
     trail.reset(car);
+    spray.reset();
   }
 
   /* The lakes have 35° banks and a flat bed you can drive along for ever, eleven metres
@@ -375,21 +399,26 @@ async function boot() {
     backend: OFFLINE ? 'none' : 'auto',
     phpBase: new URL('./api/', location.href).href,
   });
-  /* Ghosts still render through the one procedural body every local fallback car already uses
-   * (car/model.js's buildGhostCar — 3 silhouettes: gt/sports/hyper; there is no per-fleet GLB
-   * ghost yet, see docs/BACKLOG.md). What WAS broken: carPacket() below used to send car.tier,
-   * the Vehicle's own silhouette STRING ('gt'|'sports'|'hyper' — see car/vehicle.js setTier()),
-   * straight onto the wire. The server's `tier` column is INTEGER, and PHP casts a non-numeric
-   * string to 0 (wr_int() in server/drive.php), so every ghost, for every peer, rendered as
-   * CAR_TIERS[0] ('gt') regardless of what they were actually driving — the reported "wrong
-   * car". Sending the FLEET index instead (0..6, the same cars garage.js already numbers) is a
-   * lossless fit in the same wire field (still 0-63, no server change) and decodes back to the
-   * peer's real silhouette here. See tools/net-test.mjs's car-identity section. */
-  const buildGhostFromFleet = ({ tier, paint }) => {
-    const spec = FLEET[tier] || FLEET[0];
-    return buildGhostCar({ tier: spec.tier, paint });
-  };
-  const remotes = new Remotes({ scene, buildGhostCar: buildGhostFromFleet });
+  /* Ghosts are now the SAME loaded GLB the driver is actually driving — src/net/ghostCar.js,
+   * which has the whole story. Two separate bugs sat on top of each other here and only the
+   * first was fixed:
+   *
+   *   1. THE WIRE. carPacket() below used to send car.tier, the Vehicle's silhouette STRING
+   *      ('gt'|'sports'|'hyper'), into the server's INTEGER `tier` column; PHP casts a
+   *      non-numeric string to 0 (wr_int() in server/drive.php), so every ghost came back as
+   *      CAR_TIERS[0] regardless of what its driver had picked. Sending the FLEET INDEX
+   *      instead (0..6, the numbering garage.js already uses) fixed that, and it stays fixed.
+   *   2. THE MODEL. The correct index then went to car/model.js's buildGhostCar(), which only
+   *      has three procedural shapes. So seven cars still collapsed to three bodies and none
+   *      of them was the model being driven — a translucent angular sedan parked next to the
+   *      other player's solid GLB hatch, which is what the last playtest photographed.
+   *
+   * makeGhostFactory() closes (2) by loading the real per-fleet GLB through loadedCar.js's
+   * loadGhostCar(), which has existed and been imported here unused all along. It hands back a
+   * handle synchronously with the procedural body as a stand-in and swaps the GLB in when it
+   * arrives, because Remotes._spawn() cannot await anything. */
+  const ghostFactory = makeGhostFactory({ base: new URL('./models/cars/', location.href).href });
+  const remotes = new Remotes({ scene, buildGhostCar: ghostFactory });
   const save = new WorldSave({ seed: SEED, transport });
   await save.load().catch(() => {});
   /* Presence interest cells are 2048 m, rounded (not floored) so the 3x3 neighbourhood the
@@ -545,7 +574,10 @@ async function boot() {
      * already limited. It goes after the autopilot on purpose — a self-driving car runs out
      * of fuel too — and it gates rather than mutating, so the autopilot's own record of what
      * it asked for stays intact. */
-    if (!menu.open) fuel.update(dt, car);
+    /* `burn: !auto.on` — operator: auto-drive costs "no fuel". Only the burn is suppressed; cans,
+     * shares, the station scan and the pumps all still work while the chauffeur has the wheel.
+     * See game/fuel.js's update() for the whole reasoning. */
+    if (!menu.open) fuel.update(dt, car, { burn: !auto.on });
     if (!menu.open) car.update(dt, fuel.gate(drive));
 
     /* collisions — after the solver, before the camera, so the camera never chases a car
@@ -553,7 +585,10 @@ async function boot() {
     const hit = solids.resolve(car, 1.05, dt);
     if (hit && hit.severity > 0.35 && hit.speed > 9) {
       audio.thump(Math.min(1, (hit.severity * hit.speed) / 40));
-      streak.update(2, car, { onRoad: 0 }); // a real impact ends the streak immediately
+      // A real impact ends the streak immediately — unless the car is driving itself, in which
+      // case the streak is frozen and there is nothing to end. Same flag, same reasoning as the
+      // scoring call below; passing it here too is what stops the two disagreeing.
+      streak.update(2, car, { onRoad: 0 }, { paused: auto.on });
       hud.say('ouch', 1.4);
     }
 
@@ -563,8 +598,16 @@ async function boot() {
      * the terrain again — the water table is a function of the same biome weights. Frozen
      * with the garage, like the physics, so nobody is rescued while they are shopping. */
     if (!menu.open) rescue.update(dt, car, surf);
-    streak.update(dt, car, surf);
+    /* `paused: auto.on` — operator: auto-drive accrues "no streak". Frozen, not reset: see
+     * game/streak.js's update() for why a chauffeured kilometre must not count AND must not
+     * cost you the eighty you already have. */
+    streak.update(dt, car, surf, { paused: auto.on });
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
+    /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
+     * this frame's real speed and slip, and after the collision resolve so a car that has just
+     * been pushed out of a tree does not spray from where it briefly was. Frozen with the
+     * physics while the garage is open, like everything else that moves. */
+    if (!menu.open) spray.update(dt, car, surf, (x, z) => car.terrain.height(x, z));
 
     /* place the model. car.roll and car.pitch are the whole body attitude now — the ground
        under the four wheels, the springs, and a rollover — so nothing gets added on top of
@@ -603,6 +646,7 @@ async function boot() {
     flora.update(dt, camera.position);
     props.update(dt, car.x, car.z);
     ships.update(dt, car.x, car.z);
+    birds.update(dt, car.x, car.z);
     save.markVisited(car.x, car.z);
 
     /* net */
@@ -650,7 +694,13 @@ async function boot() {
          * exactly as it was. */
         cine.begin();
         if (CFG.feel !== 'road' || CFG.terrain !== 'rolling') {
-          hud.say(`${FEEL.label} · ${LAND.label}`, 4.5);
+          /* CAR.label, not FEEL.label. `FEEL` is applyCarFeel()'s return value, which is
+           * `car.feel` — the handling numbers (comfortG, buildRate, rearGrip, brakeMul,
+           * offRoad) and nothing else. It has never had a `label`, so this toast has been
+           * printing the literal string "undefined · Meadow" across the top of the screen
+           * on every start that is not the default car AND default land. The name lives on
+           * the fleet entry, which is what `CAR` is. */
+          hud.say(`${CAR.label} · ${LAND.label}`, 4.5);
         }
       }, 500);
     }
@@ -677,10 +727,23 @@ async function boot() {
     // ACTUALLY DREW rather than against a second opinion about what should be there.
     flora,
     remotes,
+    /* How many ghosts got their real GLB versus the procedural stand-in. Exposed because
+     * "the ghost is the wrong car" can only be answered with a count of models that actually
+     * loaded — see src/net/ghostCar.js. */
+    ghostStats,
     post,
     props,
     ships,
+    /* `birds` is exposed for the same reason `flora` and `ships` are: the only honest answer
+     * to "are there seagulls" is a live count of the ones the renderer ACTUALLY DREW this
+     * frame, which is birds.stats.drawn — not a flag, and not the number that exist. */
+    birds,
     fuel,
+    /* Here so a browser check can read the off-road dust cue's own live counts (`spray.count`,
+     * `spray.spawned`) at a real coordinate instead of trying to infer an emitter's existence
+     * from a scene census — which is exactly how the last audit had to establish it did not
+     * exist at all. Telemetry only; the game never reads window.WANDEROAD. */
+    spray,
     SEED,
     stats: () => streamer.stats,
     fps: () => fps,

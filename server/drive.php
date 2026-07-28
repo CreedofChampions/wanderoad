@@ -460,9 +460,52 @@ function wr_handle(): void
             // metres per request, 75 m/s at the cap.
             if ($dist / max($elapsed, 0.25) > WR_MAX_SPEED || $dist > $allowed) {
                 $rejected = true;
-                $x = (float) $prev['x'];
-                $y = (float) $prev['y'];
-                $z = (float) $prev['z'];
+
+                /* ── THE STALE-PEER BUG, AND WHY THIS IS A CLAMP AND NOT A FREEZE ──────
+                 *
+                 * This branch used to pin the stored position back to $prev and stop. That
+                 * is a PERMANENT WEDGE, and it is the whole of the reported "player 2 never
+                 * sees player 1". Two real browser tabs on the live build: tab A drove to
+                 * (400, 400) and kept ticking from there, while every other client kept
+                 * being handed A's SPAWN point, (301, 602), frozen for ninety seconds. The
+                 * mechanism is a one-way door:
+                 *
+                 *   1. the client's position legitimately jumps — R to get back on the road,
+                 *      the water rescue in game/rescue.js, the out-of-fuel reset to spawn in
+                 *      game/fuel.js, or simply a tab that was buried and resumed;
+                 *   2. the jump exceeds $allowed, so the row is written back at the OLD
+                 *      position with a FRESH `seen`;
+                 *   3. next tick, $prev is that same old position, and the client is now
+                 *      even further away — $dist has GROWN. It fails again. And again.
+                 *
+                 * There is no exit from that loop. The client believes it is online (its
+                 * ticks return 200 and carry other people's peers, which is why tab A could
+                 * see tab B perfectly while being invisible itself), and its own row is a
+                 * gravestone at the last position the filter happened to accept.
+                 *
+                 * So the filter now walks the stored position TOWARD what the client claims,
+                 * by the largest step this endpoint is willing to call legal, instead of
+                 * refusing to move it. Every property the old code was defending is kept:
+                 * a client still cannot exceed WR_MAX_SPEED, and a client that lies still
+                 * only ever gets where it claims to be at that speed — which it could have
+                 * reached by driving anyway. What it can no longer do is get stuck.
+                 *
+                 * The step is the more generous of the two budgets on purpose. $allowed is
+                 * derived from the client's LAST REPORTED velocity, and a car that has just
+                 * been teleported by a rescue is usually stationary, so $allowed collapses
+                 * to WR_JUMP_SLACK (25 m) and a 200 m rescue would take eight ticks — up to
+                 * thirty seconds at the lone-driver tick rate, which is a long time to be
+                 * invisible. The speed budget resolves the same rescue in one or two.
+                 */
+                $step = max($allowed, WR_MAX_SPEED * max($elapsed, 0.25));
+                if ($dist > $step && $dist > 1.0e-6) {
+                    $f = $step / $dist;
+                    $x = (float) $prev['x'] + ($x - (float) $prev['x']) * $f;
+                    $y = (float) $prev['y'] + ($y - (float) $prev['y']) * $f;
+                    $z = (float) $prev['z'] + ($z - (float) $prev['z']) * $f;
+                }
+                // else: the claim is inside the step this tick, so it is simply accepted —
+                // it failed only the velocity-derived test, and one legal step covers it.
             }
         }
     }

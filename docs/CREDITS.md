@@ -32,6 +32,9 @@ node -e "const fs=require('fs');const bad=[];(function w(d){if(!fs.existsSync(d)
 | [Quaternius](https://quaternius.com/packs/cars.html) car models — 7 GLBs in `public/models/cars/` | **CC0 1.0 Universal** (public domain). Attribution not required; given anyway. | Fetched anonymously over plain HTTP from [Poly Pizza](https://poly.pizza). Untextured, so the game re-materials them into its own painted shader. Full text in `public/models/cars/LICENCE.txt`. |
 | The 100 roadside props, the petrol stations, and the floating fuel cans — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | See the note below. The fuel can (added 27 July, alongside a fix to petrol-station findability — docs/BACKLOG.md) is built with the same painted primitives as everything else here, so it needs no separate entry beyond this one. |
 | Boats on large open water — `src/render/ships.js` | **This project's own work.** No third-party asset, model, texture or snippet. | Added 27 July alongside sea sound and calm-water damping (docs/BACKLOG.md). Same reasoning as the row above: a hull is five painted-pipeline faces (`pquad`/`ptri`) plus an optional cabin (`pbox`) and mast (`pcyl`), coloured from `src/core/palette.js`'s existing paint chips — nothing downloaded, nothing to audit. |
+| Litter bins beside the fuel cans, and the cans' glow halo — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | Added 27 July for "fuel cans and trash cans: bigger, and glowing" (docs/BACKLOG.md). The bin is `pcyl`/`pbox` in the same painted pipeline as the other hundred props; the halo is a 64 px radial gradient **drawn at runtime into a `<canvas>`** by `haloTexture()` — generated, not a downloaded sprite sheet, so there is no image file in the repo and nothing to license. |
+| The off-road dust spray — `src/game/spray.js` | **This project's own work.** No third-party asset, model, texture, particle library or snippet. | Added 27 July (docs/BACKLOG.md). One `InstancedMesh` of small solid boxes on a stock three.js `MeshBasicMaterial` — no particle engine was added as a dependency and no shader was written. Colours are blended from `src/core/palette.js`'s own sand/dry-grass/rock chips. |
+| The fuel-can pick-up chime — `EngineAudio.pickup()`, `src/audio/engine.js` | **This project's own work.** No sample, no sound pack, no third-party service. | **Recorded here deliberately.** The operator offered API keys to a sound-effects service, held in his password manager, for this one sound. Those keys were **not requested, not opened and not used**, and no audio file was downloaded. The chime is a three-note major arpeggio synthesised live in the WebAudio graph the same way the engine, the horn, the radio and the ambience already are — so it adds zero bytes to the download and carries no licence. |
 
 ### The 100 points of interest — why nothing was downloaded
 
@@ -66,6 +69,25 @@ The operator's "too cartoony" note about Kenney therefore does not apply to anyt
 the props take their proportions and their colours from this game's own palette. If a future
 prop *is* imported, it goes in the table above with its name, author, source URL and licence,
 and the CC0 / MIT / Apache-2.0 / BSD rule stands unchanged.
+
+<!-- edited by AI from here -->
+
+## Type — nothing downloaded, nothing to license
+
+**There is no font file anywhere in this repository, and no font is fetched at runtime** — no
+`@font-face`, no Google Fonts link, no `.woff`/`.woff2`/`.ttf`/`.otf` in `public/` or `src/`.
+Every typeface the game uses is a **system font stack** in `src/ui/style.css`, so the browser
+draws it with a face the operating system already licensed to the player:
+
+| Where | Stack | Notes |
+|---|---|---|
+| Instruments, garage, body text — `--serif` | `'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif` | Unchanged. Every entry ships with macOS, iOS or Windows. |
+| The **"Cozy Driver"** wordmark — `--cozy` | `Cochin, 'Hoefler Text', 'Book Antiqua', 'Baskerville Old Face', Baskerville, 'Palatino Linotype', Palatino, 'Iowan Old Style', Georgia, serif` | Added with the 27 July rebrand, for the loading card's `<h1>` and the in-game `#gameTitle`. Warmer and rounder than `--serif` so the name reads like a book spine rather than an instrument; falls back through `--serif`'s own faces and finally to the generic `serif` keyword, so it degrades to what the game already looked like rather than to Times. |
+
+Nothing above is distributed by this project, so there is no licence to audit and no GPL/OFL
+question to answer. If a font file is ever bundled, it goes in this table with its name,
+foundry, source URL and licence, and it must be OFL, MIT, Apache-2.0 or CC0 — the same rule
+the rest of this document applies to everything else.
 
 ## Audio
 

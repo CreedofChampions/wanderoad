@@ -126,7 +126,23 @@ console.log('\n── determinism ───────────────�
 
 console.log('\n── rarity, clearance and seating (a 4 x 4 km sweep) ──────────────────────');
 {
-  const N = 8; // 8 x 8 contiguous 512 m tiles
+  /* 10 x 10 contiguous 512 m tiles, up from 8 x 8, and this is a SAMPLE-SIZE change, not a
+   * relaxation. The two density checks below (`props per km of road`, `cans per km of road`)
+   * are the real assertions and both are per-km ratios that this box size cannot move; the
+   * `sample size` checks beside them exist only to stop a vacuous ratio being reported off two
+   * props. What changed underneath them is the WORLD: roads that used to be built straight
+   * across lakes are now routed round them (world/roads.js's water cull), which removes about a
+   * third of the road length in any given fixed box — and these two boxes are fixed, at (0,0),
+   * by design. So the same density now yields fewer absolute finds in the same square: 11
+   * props against a bar of 15, while `props per km of road` sat at a healthy 1.78 in the middle
+   * of its own 0.4–3.6 band, and 16 cans against 20 with 2.59 per km inside 0.9–3.9.
+   *
+   * Restoring the box AREA restores the sample count the guard was written against (11 -> 19,
+   * 16 -> 28 measured) and leaves every threshold in this file exactly where it was. Lowering
+   * the bars instead would have been the wrong move for the same reason it always is: it would
+   * make the guard weaker at catching the thing it is for, rather than giving it back the
+   * evidence it needs to do its job. */
+  const N = 10;
   let props = [];
   let cans = [];
   let roadMetres = 0;

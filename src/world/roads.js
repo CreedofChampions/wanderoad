@@ -24,6 +24,9 @@
  */
 
 import { hash2i, clamp, clamp01, smoothstep, lerp, segDist, TAU } from '../core/math.js';
+/* The raw land and the water on it. `field.js` exists precisely so this file can read them:
+ * terrain.js imports THIS file, so this file can never import terrain.js. See field.js. */
+import { floodAt, fieldTag } from './field.js';
 
 /*
  * cell     lattice spacing, metres
@@ -40,7 +43,11 @@ import { hash2i, clamp, clamp01, smoothstep, lerp, segDist, TAU } from '../core/
 export const TIERS = [
   {
     cell: 1800, jitter: 0.34, connect: 0.86, width: 8.6, verge: 5.0,
-    curve: 0.44, step: 38, bend: 220, radius: 122, swing: 0.10, grade: 222,
+    // bend 155, not 220: an arterial edge is two kilometres of road, and at 220 m per bend the
+    // straightest of them ran 116 deg/km — nine bends over 2 km, with long straight runs
+    // between them. Same radius, more of them: the worst arterial in an eight-seed sweep went
+    // from 148 to 168 deg/km and the tightest radius on the tier did not move (median 103 m).
+    curve: 0.44, step: 38, bend: 155, radius: 122, swing: 0.10, grade: 222,
   },
   {
     cell: 620, jitter: 0.42, connect: 0.5, width: 6.2, verge: 3.0,
@@ -61,6 +68,14 @@ const HARMONICS = 3;
  * in a couple of places, which on screen is a lane tying a knot in itself.
  */
 const BASE_MIN_RADIUS = 130;
+
+/**
+ * How much of the base curve's own radius the winding's sideways offset may use up at any one
+ * sample. The offset is taken along the base curve's normal, so an offset that reaches the base
+ * radius turns the curve inside out; 0.45 keeps a wide margin on that. Applied per sample —
+ * see step 4 of `windOf`.
+ */
+const FOLD_FRACTION = 0.45;
 
 /* Why `radius` is where it is, and why it must not go much lower: the autopilot brakes for the
  * bend ahead and reaches its floor of 8 m/s at about 0.55 rad of heading change per 42 m of
@@ -119,6 +134,18 @@ export function degreeAt(i, j, tier, seed) {
  * not cascade, because chasing it to a fixed point is a global solve on an infinite lattice and
  * this is a hashed, deterministic world with no global anything. One ply removes the great
  * majority and keeps the function pure and local.
+ *
+ * IT COUNTS THE HASH DEGREE, NOT THE LIVE ONE, AND THAT IS DELIBERATE. Judging this on the
+ * post-water-cull degree looks more correct and is much worse: the water cull deletes a link,
+ * the node it left behind now has one link, and this then deletes that one too — so every lake
+ * crossing removed a second, dry lane somewhere else. Measured over a 3 km square at five seeds
+ * (`tools/diag-density.mjs`), that compounding took the network to 62% of the length and 52% of
+ * the junctions it had before either cull existed. On the hash degree the two culls are
+ * independent and multiply out to nothing worse than either alone.
+ *
+ * What that leaves is a lane that ends at the water, which is a road with a REASON for
+ * stopping — the thing the operator asked for was roads that don't stop in the middle of
+ * nowhere, and a shoreline is not nowhere.
  */
 function isLeafLane(i, j, dir, tier, seed) {
   if (tier !== 1) return false;
@@ -128,6 +155,176 @@ function isLeafLane(i, j, dir, tier, seed) {
   if (degreeAt(fi, fj, tier, seed) <= 1) return true;
   // ...and the near node, so a lane that dangles off its own start is culled too.
   return degreeAt(i, j, tier, seed) <= 1;
+}
+
+/* ── roads go AROUND lakes ───────────────────────────────────────────────────────────────
+ *
+ * The operator, verbatim: "we should have roads that go around the lake, not through it
+ * necessarily... in the wetlands we could still continue to go through, but the way we're
+ * doing it now is not correct."
+ *
+ * `profileEdge` already lifts a road 1.1 m clear of any water under it, and `diag-water.mjs`
+ * confirms 0 underwater samples anywhere. That is a DIFFERENT question, and passing it is why
+ * this went unnoticed: a causeway is not a drowned road, it is a correctly-engineered
+ * embankment across a lake that should never have had a road on it. Measured on the shipped
+ * seed over the 144 km² box around the default spawn: 343.9 km of road, 56.2 km of it over
+ * flooded ground, of which only 1.4 km was in wetland. The longest single run was 2.48 km
+ * starting 600 m from where the player is handed the car.
+ *
+ * WHY THIS IS A CULL AND NOT A REROUTE. There is no road map — there is a lattice, a hash and
+ * a rule (see the file header), and every consumer re-derives the network from that rule at
+ * whatever box it happens to care about. "Route around the lake" is a global solve, and this
+ * world has no global anything; the one previous attempt at terrain-aware routing was reverted
+ * for making cliffs worse (0.029% -> 0.071%) and tripling build time. So this is a local, pure,
+ * per-edge predicate — the same shape as `isLeafLane` above — and it costs one bounded set of
+ * samples per edge, cached.
+ *
+ * AND THE PRICE IS REAL, WHICH THE FIRST CUT OF THIS DENIED. It read: "delete the links that
+ * cross the water and the links round the shore are still there — the route around the lake is
+ * what is left." That is a hope, not a property of a 4-connected lattice, and it is measurably
+ * false here. A lane node carries two links on average, so quite often the shore route does not
+ * exist and deleting the crossing deletes the only road there was. `tools/diag-density.mjs`
+ * prices exactly this and its bars exist so the next cull cannot be added on a hope either. The
+ * thresholds below are the point on that curve we chose, not a bar that costs nothing.
+ *
+ * WETLAND IS NOT A LAKE. A road on a low embankment through a marsh is the picture the
+ * operator asked to keep, and it is the prettiest thing in the game. So a wet sample only
+ * counts against the edge where the WETLAND weight is below `MARSH_OK`; at or above it, the
+ * run resets, exactly as `tools/diag-causeway.mjs` scores it.
+ */
+
+/** Metres between water probes along an edge. */
+const CAUSEWAY_STEP = 100;
+/**
+ * Metres of CONTINUOUS open, non-wetland water an edge may run over before it is deleted
+ * instead of built — one figure per tier, and they are a long way apart on purpose.
+ *
+ * The first cut of this cull used a single threshold of "two adjacent wet probes", about
+ * 100 m, for both tiers, and it was a quiet disaster. `tools/diag-density.mjs`, over a 3 km
+ * square at five seeds: arterial road fell from 292.2 km to 172.0 km — 41% of the cruising
+ * network deleted, and junctions across both tiers halved. An arterial cell is 1800 m, so an
+ * arterial edge is a two-kilometre road, and a two-kilometre road in a world with this much
+ * water will clip 100 m of a lake somewhere along its length most of the time. Deleting the
+ * whole road for it is wildly out of proportion, and the player felt it immediately: a run-up
+ * lands on a lone straight arterial with nothing to turn off onto.
+ *
+ * The engineering answer is the real-world one. A trunk road meeting a hundred metres of water
+ * gets a bridge, and `profileEdge` already builds exactly that — deck lifted 1.1 m clear,
+ * embankment either side. What a trunk road does NOT get is a two-and-a-half-kilometre
+ * embankment straight over the middle of a lake, which is the thing the operator actually
+ * pointed at. So the arterial bar is set well above a bridge and well below that causeway;
+ * lanes, which are short, plentiful and lose nothing by going round, keep the tight bar.
+ */
+const CAUSEWAY_SPAN = [520, 150];
+/** Wetland weight at or above which standing water under a road is the design, not the bug. */
+const MARSH_OK = 0.4;
+/** Depth below which "flooded" is a damp pan rather than a lake. The water plane can sit a
+ *  few centimetres over a flat, and lifting the road 1.1 m over that reads as a normal road on
+ *  slightly boggy ground, not as a causeway. Measured against the real spawn causeway, which
+ *  stands in 13.6 m. */
+const CAUSEWAY_DEPTH = 0.35;
+
+/** Cache ceiling for the per-edge water measurement below. */
+const WET_RUN_CAP = 8192;
+/** `${tag}:${seed}:${key}` -> `{ run, wet }` for that edge, both in metres. */
+const WET_RUN = new Map();
+
+/**
+ * How much open, non-wetland water this lattice edge would be built over: `run`, the longest
+ * CONTINUOUS stretch, and `wet`, the total. Pure in (i, j, dir, tier, seed) plus the height
+ * field, which is what `tag` fingerprints — the terrain preset rewrites the field in place,
+ * including inside the chunk worker, so anything cached off it has to be keyed by what the
+ * field currently is.
+ *
+ * A measurement rather than a verdict, because the verdict is per-tier (see CAUSEWAY_SPAN) and
+ * because `tools/diag-density.mjs` has to price both sides of this trade — road deleted against
+ * causeway avoided — without this file having already thrown the numbers away.
+ *
+ * Sampled on the BASE geometry, before `squareCrossings` bends anything, and that ordering is
+ * deliberate: the squared geometry is built from the neighbours that exist, so deciding
+ * existence from the squared shape would be circular. The base shape and the final shape never
+ * differ by more than a junction window, which is far below the hundreds of metres of water
+ * this is looking for.
+ */
+function waterOn(i, j, dir, tier, seed, tag) {
+  const key = `${tag}:${seed}:${tier}:${i},${j},${dir}`;
+  const hit = WET_RUN.get(key);
+  if (hit !== undefined) return hit;
+
+  const g = baseGeomFor(i, j, dir, tier, seed);
+  const pts = g.pts;
+  const n = pts.length / 2;
+  const stride = Math.max(1, Math.round(CAUSEWAY_STEP / Math.max(g.span, 1e-3)));
+
+  /* Metres, not probes: a run is the distance between the wet probes that bound it, so one
+   * isolated wet sample scores 0 and a pair ~100 m apart scores ~100. The old probe COUNT hid
+   * the fact that the same count meant different distances on the two tiers. */
+  let run = 0;
+  let worst = 0;
+  let total = 0;
+  let prevWet = false;
+  let px = 0,
+    pz = 0;
+  for (let k = 0; k < n; k += stride) {
+    const x = pts[k * 2],
+      z = pts[k * 2 + 1];
+    const f = floodAt(x, z, seed);
+    const wet = f.wet && f.depth > CAUSEWAY_DEPTH && f.marsh < MARSH_OK;
+    if (wet && prevWet) {
+      const d = Math.hypot(x - px, z - pz);
+      run += d;
+      total += d;
+      if (run > worst) worst = run;
+    } else if (!wet) run = 0;
+    prevWet = wet;
+    px = x;
+    pz = z;
+  }
+
+  const out = { run: worst, wet: total };
+  if (WET_RUN.size >= WET_RUN_CAP) WET_RUN.clear();
+  WET_RUN.set(key, out);
+  return out;
+}
+
+/** Is this edge a causeway across a lake rather than a road with a bridge on it? */
+function drownsInWater(i, j, dir, tier, seed, tag) {
+  return waterOn(i, j, dir, tier, seed, tag).run >= CAUSEWAY_SPAN[tier];
+}
+
+/**
+ * Is there actually a ROAD along this link? The hash says yes (`connects`) and the water says
+ * maybe. Every place that enumerates the network goes through here, so the renderer, the
+ * terrain carve, the station placer and the crossing search all see the identical network —
+ * which is the invariant this file exists to protect (gotcha 6).
+ */
+function linkLive(i, j, dir, tier, seed, tag) {
+  if (!connects(i, j, dir, tier, seed)) return false;
+  return !drownsInWater(i, j, dir, tier, seed, tag);
+}
+
+/**
+ * DIAGNOSTIC ONLY — nothing in the game calls this; `tools/diag-density.mjs` does.
+ *
+ * Two independent culls now sit between the hash and the tarmac, and they MULTIPLY: the water
+ * cull deletes a link, that drops a node's live degree, and the dead-end cull then takes the
+ * surviving lane off that node as well. Priced blind, the pair removed a third of the world's
+ * road. So the cost of each is measurable from outside, at the same lattice the enumerator
+ * walks, rather than being something a screenshot has to notice.
+ */
+export function linkAudit(i, j, dir, tier, seed, tag) {
+  if (!connects(i, j, dir, tier, seed)) {
+    return { hashed: false, drowned: false, leaf: false, live: false, len: 0, wetRun: 0, wetLen: 0 };
+  }
+  const w = waterOn(i, j, dir, tier, seed, tag);
+  const drowned = drownsInWater(i, j, dir, tier, seed, tag);
+  const leaf = isLeafLane(i, j, dir, tier, seed);
+  const pts = baseGeomFor(i, j, dir, tier, seed).pts;
+  let len = 0;
+  for (let k = 2; k < pts.length; k += 2) {
+    len += Math.hypot(pts[k] - pts[k - 2], pts[k + 1] - pts[k - 1]);
+  }
+  return { hashed: true, drowned, leaf, live: !drowned && !leaf, len, wetRun: w.run, wetLen: w.wet };
 }
 
 const _p = [0, 0];
@@ -359,6 +556,10 @@ function basePeak(p0x, p0z, p1x, p1z, t0x, t0z, t1x, t1z, m) {
  */
 const _c = new Float32Array(128);
 const _wOff = new Float32Array(128);
+/* Curvature of the BASE hermite at each of this edge's own samples, filled by `buildBaseGeom`
+ * immediately before it calls `windOf`. It is the fold-over budget, sample by sample — see
+ * step 4 below for why one number for the whole edge was not good enough. */
+const _kb = new Float32Array(128);
 
 function windOf(i, j, dir, tier, chord, n, maxSwing, seed) {
   const T = TIERS[tier];
@@ -427,15 +628,38 @@ function windOf(i, j, dir, tier, chord, n, maxSwing, seed) {
     if (cc > peak) peak = cc;
   }
 
-  // 4. scale to a hashed fraction of the tier's tightest radius, then hold it back further if
-  //    that would swing the road too far sideways. The swing cap is not cosmetic: the offset is
-  //    taken along the base curve's normal, and an offset approaching the base curve's own
-  //    radius folds it over.
+  /* 4. scale to a hashed fraction of the tier's tightest radius, then hold it back further if
+   *    that would swing the road too far sideways. The swing cap is not cosmetic: the offset is
+   *    taken along the base curve's normal, and an offset approaching the base curve's own
+   *    radius folds it over.
+   *
+   *    That fold-over budget is LOCAL and it has to be spent locally. It used to be one number
+   *    for the whole edge — max|w| against 0.45 / the base curve's PEAK curvature — and the
+   *    peak is almost always a junction whip in the first or last few samples, where a shared
+   *    node tangent leaves at a wide angle to this chord. `w` is zero at both ends by
+   *    construction, so there was never any fold-over risk there; the edge was being flattened
+   *    along its whole length to pay for a corner it was not winding into. Measured over eight
+   *    seeds' worth of 6 km squares: 31% of arterial edges were held back by that global cap,
+   *    and they are exactly the ones that read as straight — the worst delivered 93 deg/km of
+   *    winding where it had asked for 275, and the finished road measured 116 deg/km against a
+   *    network median of 243. That single edge is what the R5 browser check landed on.
+   *
+   *    So compare each sample's own offset against each sample's own budget. Nothing may fold:
+   *    the test is the same one, applied where it is actually true rather than at the tightest
+   *    point on the edge. It cannot make any road tighter than `T.radius` — the peak
+   *    normalisation above still governs that — it only stops a straight stretch being
+   *    surrendered for a bend somewhere else. */
   // Bits 0-9 of h are the only ones the shape above did not spend; using an overlapping slice
   // would tie how tight an edge bends to which harmonic happened to be loud on it.
   const want = (1 / T.radius) * (0.8 + 0.2 * ((h & 0x3ff) / 1023));
   let s = peak > 1e-9 ? (want * chord * chord) / peak : 0;
-  if (swing * s > maxSwing) s = maxSwing / Math.max(swing, 1e-9);
+  let over = 0;
+  for (let k = 0; k <= n; k++) {
+    const budget = Math.min(maxSwing, _kb[k] > 1e-9 ? FOLD_FRACTION / _kb[k] : Infinity);
+    const need = (Math.abs(_wOff[k]) * s) / Math.max(budget, 1e-9);
+    if (need > over) over = need;
+  }
+  if (over > 1) s /= over;
   for (let k = 0; k <= n; k++) _wOff[k] *= s;
 }
 
@@ -495,13 +719,30 @@ function buildBaseGeom(i, j, dir, tier, seed) {
     m1z = _t1[1] * m;
 
   const n = clamp(Math.round(chord / T.step), 8, 96);
-  /* How far sideways the winding may go. Two limits, whichever is tighter: a fraction of the
-   * chord, so a road never wanders far enough to tangle with its neighbours; and a fraction of
-   * the BASE curve's own radius, because the offset is taken along the base normal and an
-   * offset that reaches the base radius folds the curve inside out. That fold is where the 3 m
-   * turns came from — not from asking for too much bend, but from asking for it in the middle
-   * of a corner the base curve was already taking. */
-  const swingCap = Math.min(T.swing * chord, bestPeak > 1e-9 ? 0.45 / bestPeak : Infinity);
+  /* How far sideways the winding may go. Two limits, and they are enforced in two different
+   * places because they are two different shapes of limit. This one is a fraction of the chord,
+   * so a road never wanders far enough to tangle with its neighbours, and it is a property of
+   * the whole edge. */
+  const swingCap = T.swing * chord;
+  /* The other half of that limit — the base curve's own radius — is per-sample, because the
+   * fold is per-sample. Same curvature formula as `basePeak`, at this edge's own samples, so
+   * `windOf` can spend the budget where the winding actually goes. */
+  {
+    const dx = p1[0] - p0[0],
+      dz = p1[1] - p0[1];
+    for (let k = 0; k <= n; k++) {
+      const t = k / n;
+      const g01 = 6 * t - 6 * t * t,
+        g10 = 3 * t * t - 4 * t + 1,
+        g11 = 3 * t * t - 2 * t;
+      const bx = g01 * dx + g10 * m0x + g11 * m1x;
+      const bz = g01 * dz + g10 * m0z + g11 * m1z;
+      const cx = (6 - 12 * t) * dx + (6 * t - 4) * m0x + (6 * t - 2) * m1x;
+      const cz = (6 - 12 * t) * dz + (6 * t - 4) * m0z + (6 * t - 2) * m1z;
+      const sp = Math.hypot(bx, bz);
+      _kb[k] = sp > 1e-6 ? Math.abs(bx * cz - bz * cx) / (sp * sp * sp) : 0;
+    }
+  }
   windOf(i, j, dir, tier, chord, n, swingCap, seed);
 
   const pts = new Float32Array((n + 1) * 2);
@@ -550,7 +791,11 @@ function buildBaseGeom(i, j, dir, tier, seed) {
 const GEOM_BASE_CAP = 4096;
 const GEOM_BASE = new Map();
 
-function baseGeomFor(i, j, dir, tier, seed) {
+/* `tag` is accepted and ignored: the BASE shape is a pure function of the lattice and the
+ * seed and knows nothing about the ground, which is exactly why the water cull samples it
+ * (see `drownsInWater`). It is in the signature only so this and `geomFor` can be passed to
+ * `geomsInBox` interchangeably. */
+function baseGeomFor(i, j, dir, tier, seed, _tag) {
   const key = `${seed}:${tier}:${i},${j},${dir}`;
   let g = GEOM_BASE.get(key);
   if (g === undefined) {
@@ -568,8 +813,14 @@ function baseGeomFor(i, j, dir, tier, seed) {
  * layers — the final one and the base one — without the reach formula existing twice and
  * quietly drifting apart.
  */
-function geomsInBox(x0, z0, x1, z1, seed, pad, fetch) {
+function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0) {
   const out = [];
+  /* Once per call, not once per edge: the fingerprint of the height field the water cull's
+   * cache is keyed on. Two land-and-water samples — the same price `worldTag` pays for the
+   * height caches, and for the same reason (the terrain preset rewrites the field in place).
+   * A caller already inside one edge's build (`baseNeighbors`) passes ITS tag down instead,
+   * so a single `buildGeom` can never see the field change halfway through itself. */
+  const tag = tag0 !== undefined ? tag0 : fieldTag(seed);
   for (let tier = 0; tier < TIERS.length; tier++) {
     const T = TIERS[tier];
     const maxChord = T.cell * (1 + 2 * T.jitter);
@@ -582,9 +833,9 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch) {
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         for (let dir = 0; dir < 2; dir++) {
-          if (!connects(i, j, dir, tier, seed)) continue;
+          if (!linkLive(i, j, dir, tier, seed, tag)) continue; // no hash link, or it crosses a lake
           if (isLeafLane(i, j, dir, tier, seed)) continue; // a lane to nowhere is not a road
-          const g = fetch(i, j, dir, tier, seed);
+          const g = fetch(i, j, dir, tier, seed, tag);
           const m = g.width * 0.5 + g.verge + pad;
           if (g.maxX < x0 - m || g.minX > x1 + m || g.maxZ < z0 - m || g.minZ > z1 + m) continue;
           out.push(g);
@@ -599,8 +850,8 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch) {
  *  before either edge has a height or a squared-up crossing angle. `pad` is `CROSS_PAD`,
  *  defined further down with `levelAgainst`; reused rather than re-picked so "how far away
  *  can't possibly be a crossing" is one number for both height and angle. */
-function baseNeighbors(base, seed, pad) {
-  const list = geomsInBox(base.minX, base.minZ, base.maxX, base.maxZ, seed, pad, baseGeomFor);
+function baseNeighbors(base, seed, pad, tag) {
+  const list = geomsInBox(base.minX, base.minZ, base.maxX, base.maxZ, seed, pad, baseGeomFor, tag);
   const out = [];
   for (const o of list) if (o.key !== base.key) out.push(o);
   return out;
@@ -771,8 +1022,8 @@ const CROSS_SQUARE_STEP = 4;
  * `buildBaseGeom` already trusts, in case a crossing too close to this edge's own node left no
  * room for a full window.
  */
-function squareCrossings(base, seed) {
-  const neighbors = baseNeighbors(base, seed, CROSS_PAD);
+function squareCrossings(base, seed, tag) {
+  const neighbors = baseNeighbors(base, seed, CROSS_PAD, tag);
   if (!neighbors.length) return base.pts;
 
   const found = findCrossings([base, ...neighbors]);
@@ -916,9 +1167,9 @@ function squareCrossings(base, seed) {
  * decided ONCE, here, and both the terrain carve and the renderer read the result of that one
  * decision rather than two independent opinions about where the road bends (gotcha 6).
  */
-function buildGeom(i, j, dir, tier, seed) {
+function buildGeom(i, j, dir, tier, seed, tag) {
   const base = baseGeomFor(i, j, dir, tier, seed);
-  const pts = squareCrossings(base, seed);
+  const pts = squareCrossings(base, seed, tag);
   if (pts === base.pts) return base; // nothing crossed and outranked this edge; no new object
   const g = { ...base, pts };
   bounds(g);
@@ -942,11 +1193,24 @@ function buildGeom(i, j, dir, tier, seed) {
 const GEOM_CAP = 4096;
 const GEOM = new Map();
 
-function geomFor(i, j, dir, tier, seed) {
-  const key = `${seed}:${tier}:${i},${j},${dir}`;
+function geomFor(i, j, dir, tier, seed, tag) {
+  /* KEYED BY THE HEIGHT FIELD, not by the lattice alone — new this round, and load-bearing.
+   *
+   * Before the water cull, an edge's final shape was a pure function of (lattice, seed):
+   * `squareCrossings` reads its neighbours' BASE shapes, and a base shape knows nothing about
+   * the ground. Now the set of neighbours that EXIST depends on where the water is, so the
+   * squared shape depends on the water too — and the terrain preset rewrites the water in
+   * place, including inside the chunk worker.
+   *
+   * Without the tag in this key, a preset switch left a stale, differently-SAMPLED polyline
+   * here against a freshly-keyed height profile, and the two disagreed about their array
+   * length: `RangeError: offset is out of bounds` out of canonicalProfile. Found by
+   * tools/diag-stations.mjs, which is the only tool in the repo that drives more than one
+   * preset in one process — every single-preset check passed straight through it. */
+  const key = `${tag}:${seed}:${tier}:${i},${j},${dir}`;
   let g = GEOM.get(key);
   if (g === undefined) {
-    g = buildGeom(i, j, dir, tier, seed);
+    g = buildGeom(i, j, dir, tier, seed, tag);
     if (GEOM.size >= GEOM_CAP) GEOM.clear();
     GEOM.set(key, g);
   }
@@ -1481,7 +1745,17 @@ export function edgeProfile(e, seed, landHeight, waterAt = null) {
  * so the cost is two height evaluations against a build that already costs milliseconds.
  */
 function worldTag(seed, land, waterAt) {
-  return `${seed}|${waterAt ? 'w' : 'd'}|${Math.round(land(0, 0) * 64)}|${Math.round(land(1237.5, -911.25) * 64)}`;
+  /* `fieldTag` first, and it is not redundant with the two land probes that follow.
+   *
+   * Those probe the land function the CALLER passed, which is what the profile is actually
+   * built from and which tools do sometimes substitute. `fieldTag` probes world/field.js's own
+   * land AND its water plane — the field the water cull reads, and therefore the field that
+   * decides which edges exist and what shape the survivors are squared into. A preset that
+   * moved sea level without moving a metre of ground would leave the two land probes
+   * identical while changing the network underneath them, and a cached profile would then be
+   * a different LENGTH from the edge it was cached against. Cheap insurance against a class of
+   * bug that shows up as a RangeError three files away. */
+  return `${fieldTag(seed)}|${waterAt ? 'w' : 'd'}|${Math.round(land(0, 0) * 64)}|${Math.round(land(1237.5, -911.25) * 64)}`;
 }
 
 const keyOrder = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
@@ -1822,7 +2096,12 @@ export class RoadField {
       if (ed > half) {
         if (landH !== landH) landH = this._land(x, z);
         const drop = Math.abs(ey - landH);
-        const shoulder = Math.min(half + 3.0 + drop * 1.6, reach);
+        /* 1.6 on the fill side, 2.2 on the CUTTING side (land above road) — the identical
+         * split terrain.js's groundFromCarve applies to the identical drop. The whole long
+         * note above is about what happens when these two copies stop agreeing, so when one
+         * moves the other moves in the same commit. See terrain.js's CUT_BATTER for why the
+         * cutting side can afford a wider shoulder and the fill side cannot. */
+        const shoulder = Math.min(half + 3.0 + drop * (landH > ey ? 2.0 : 1.6), reach);
         w = 1 - smoothstep(half, shoulder, ed);
         if (w <= 0.0005) continue;
       }

@@ -16,39 +16,22 @@ import {
   biomeWeights,
   biomeWeightsFromClimate,
   climateUniform,
-  biomeRelief,
   BIOME_COUNT,
   BIOME_TERRAIN,
   BIOME_ROAD,
   waterLevelAt,
 } from './biomes.js';
 import { RoadField, roadCamber } from './roads.js';
-import { landmarkHeight } from './landmarks.js';
+import { landmarkView } from './landmarks.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
-import { fbm2 } from '../core/noise.js';
+/* The raw land and its water moved to field.js so that roads.js can read them directly —
+ * this file imports roads.js, so roads.js can never import this one. See field.js's header.
+ * Re-exported below, unchanged, so nothing that already imports them from here has to move. */
+import { landHeight, landFn, waterFn, reliefFromWeights } from './field.js';
+
+export { landHeight, landFn, waterFn, reliefFromWeights, floodAt, fieldTag, W_CULL, W_FADE } from './field.js';
 
 const _w = new Float32Array(BIOME_COUNT);
-
-/* Below this weight a biome's relief is not evaluated at all — it is the single biggest
- * saving in the heightfield, because a culled biome is a whole fbm stack not computed.
- *
- * IT MUST NOT BE A HARD SWITCH. A threshold test drops `threshold × that biome's relief`
- * from the sum the instant the weight crosses it, and the highlands' relief is measured in
- * hundreds of metres: at 2% that is a step of several metres between two samples 5 m apart —
- * a vertical wall, drawn along the entire 2% contour of every biome. The first run with the
- * new amplitudes measured 0.89% of ground over 45° against 0.027% before, and every one of
- * the twelve steepest points in the world was a spot where the highland weight was sitting on
- * 0.02. Invisible at the old amplitudes, catastrophic at the new ones, and nothing whatever
- * to do with the noise.
- *
- * So the contribution fades in across [W_CULL, W_FADE] and the sum is renormalised by the
- * weight actually used. The renormalisation is what makes it exact rather than merely
- * smoother: h is the weighted MEAN of the biomes in play, so a biome arriving with weight
- * epsilon moves it by epsilon×(its deviation from the mean), which goes to zero with epsilon.
- * The old code divided by an implicit 1.0 and therefore pulled the height towards zero
- * wherever anything was culled. */
-const W_CULL = 0.015;
-const W_FADE = 0.055;
 
 /* Metres of shoulder per metre of fill or cutting — the batter. 1.6 is what RoadField.carve
  * uses for its own mask and this had drifted to 1.5, which is a shoulder 6% narrower than
@@ -62,6 +45,54 @@ const W_FADE = 0.055;
  * other way is worse again (1.9 → 108, 2.4 → 1016) because past a point the shoulder is
  * wider than the mask that contains it and the ground steps down where the mask ends. */
 const BATTER = 1.6;
+
+/* The batter on the CUTTING side only — where the land stands ABOVE the road rather than
+ * below it.
+ *
+ * The requirement is "there is never terrain standing above a road", and in high country it
+ * was not being met: an audit driving the real game photographed a bank rising well clear of
+ * the carriageway in the alpine highlands. The lever is the same WIDTH lever as above, but it
+ * must not be pulled on both sides at once — the measurements in the BATTER note are for the
+ * symmetric change, and they are damning (1.9 → 108 samples over 45°, 2.4 → 1016) because
+ * every one of those samples is an embankment FILL, 181 of 199 of them, standing 20–33 m above
+ * the ground beside it. Widening a fill's shoulder past the mask that contains it is what
+ * builds the wall the note describes.
+ *
+ * A cutting is the opposite geometry and it does not share that failure mode: the widened
+ * ground is being brought DOWN towards the road, into the hill, and there is no toe of a fill
+ * for it to step off.
+ *
+ * 2.0 IS A KNEE, NOT A GUESS. Swept 1.6 / 2.0 / 2.4 / 2.6 on the alpine preset with
+ * `node tools/diag-abovedeck.mjs --terrain alpine` against `diag-cliffs.mjs` and
+ * `diag-relief.mjs`, all three on the same seed and the same boxes:
+ *
+ *   batter  bank 8 m off the tarmac      bank 24 m out       relief(alpine)   cliffs(default)
+ *   1.6     mean 2.71 m, 95th 4.24 m     95th 15.16 m        0.091%           0.000%
+ *   2.0     mean 2.25 m, 95th 3.40 m     95th 12.22 m        0.117%           0.000%
+ *   2.4     mean 1.94 m, 95th 2.89 m     95th 10.21 m        ~0.13%           0.000%
+ *   2.6     —                            —                   0.140%           0.004%
+ *
+ * The softening is real and roughly linear; so is what it costs in alpine relief. 2.0 buys
+ * about 20% off the bank at every offset while the hard gate — `diag-cliffs.mjs`, the DEFAULT
+ * preset, the one with a recorded ceiling — does not move off zero at all. 2.6 breaks it, so
+ * the ceiling on this knob is a measured cliff edge rather than a feeling.
+ *
+ * WHAT THIS CANNOT DO, stated so nobody re-opens it expecting more: in the alpine highlands
+ * about 43% of the ground beside a road stands above it at ANY batter, because that is what a
+ * mountain is. "Never terrain above a road" is only literally achievable by flattening the
+ * mountains. This grades the shoulder; it does not delete the hillside.
+ *
+ * Both copies of the batter formula move together, always — see roads.js's carve(). */
+const CUT_BATTER = 2.0;
+
+/**
+ * Score credit per degree of sky the best massif visible from a spawn candidate fills, capped
+ * at 8°. Zero ships. See the long note inside findSpawn for the measured trade — the short
+ * version is that the default seed no longer needs it and the browser suite's R1 check goes
+ * red when the spawn moves, for a reason that is R1's own measurement rather than a defect in
+ * the ground. 15 is the value the preset spawns want.
+ */
+const LANDMARK_SPAWN_BIAS = 0;
 
 /**
  * How the embankment face falls away, from 1 at the road edge to 0 at the toe.
@@ -110,7 +141,8 @@ function groundFromCarve(c, land, drive = 1) {
    * the thing to tune — and it is a WIDTH problem, not a shape problem (see batterFall). */
   const drop = Math.abs(land - target);
   const half = c.width * 0.5;
-  const shoulder = half + 3.0 + drop * BATTER;
+  // Cuttings get the wider shoulder; fills keep the one every cliff measurement is tuned on.
+  const shoulder = half + 3.0 + drop * (land > target ? CUT_BATTER : BATTER);
   const k = batterFall(half, shoulder, c.d) * clamp01(drive);
   const h = lerp(land, target, k);
 
@@ -119,63 +151,6 @@ function groundFromCarve(c, land, drive = 1) {
   // out of roads.js so the visible ribbon can cut the identical shape — see roadCamber.
   return h - roadCamber(c);
 }
-
-function reliefFromWeights(x, z, seed, w) {
-  let h = 0;
-  let tw = 0;
-  for (let i = 0; i < BIOME_COUNT; i++) {
-    const wi = w[i];
-    if (wi < W_CULL) continue;
-    const k = wi * smoothstep(W_CULL, W_FADE, wi);
-    if (k <= 0) continue;
-    h += k * biomeRelief(x, z, seed, i);
-    tw += k;
-  }
-  if (tw > 0) h /= tw;
-  /* The massifs. Added OUTSIDE the biome sum, and that is deliberate — see the header of
-   * world/landmarks.js. Two reasons in one line: a mountain weighted by biome mix dissolves
-   * exactly where the mix is transitional, and anything derived from biome weights reads
-   * wrong outside a sampler's climate box, which is precisely the query "can I see that
-   * mountain from spawn". */
-  h += landmarkHeight(x, z, seed);
-  /* A common fine layer over everything so no biome looks smooth-shaded up close. Kept
-   * small, and kept SLACK: this layer is meant to be seen, not felt. It used to run at an
-   * 18 m wavelength with gain 0.4 against lacunarity 2.0, which put about 0.19 of gradient
-   * on every square metre of the world — including the faces of road embankments, which are
-   * already the steepest ground there is and are where every single sample over 45° lives
-   * (95 of 100, all within 40 m of a road; the raw land has none). Same amplitude, 33 m
-   * wavelength, gain 0.3: still visible, half the gradient, and it stops nudging the
-   * embankments over the line.
-   *
-   * Lacunarity stays at 2.0 rather than going up with the biome stacks. At 2.5 the third
-   * octave lands on a 5.3 m wavelength, which is the spacing tools/diag-cliffs.mjs measures
-   * the normal over — the field then reads its own worst case at every sample and the
-   * over-45° count went UP while the actual gradient went down. 2.0 keeps the finest octave
-   * at 8 m, comfortably coarser than anything that samples it. */
-  return h + fbm2(x * 0.03, z * 0.03, 3, seed ^ 0x1f0d, 2.0, 0.3) * 0.55;
-}
-
-/**
- * RAW LAND HEIGHT — biomes only, no roads. This is the function the road network samples,
- * so it must never call anything road-related.
- */
-export function landHeight(x, z, seed) {
-  const { w } = biomeWeights(x, z, seed, _w);
-  return reliefFromWeights(x, z, seed, w);
-}
-
-/** Bound a factory so RoadField can call it without knowing the seed. */
-export const landFn = (seed) => (x, z) => landHeight(x, z, seed);
-
-/**
- * Water surface height at a point, or null if the land there is dry. The road network reads
- * this so it can build a causeway instead of driving into a lake.
- */
-export const waterFn = (seed) => (x, z) => {
-  const { w } = biomeWeights(x, z, seed, _wWater);
-  return waterLevelAt(w, reliefFromWeights(x, z, seed, w));
-};
-const _wWater = new Float32Array(BIOME_COUNT);
 
 /* ── climate cache ──────────────────────────────────────────────────────────
  * The climate fields have wavelengths of 7–15 km, but computing one costs three warped
@@ -522,7 +497,64 @@ export function findSpawn(seed, hintX = 0, hintZ = 0, opts = {}) {
       // e.y[k] is the road's own profile height — already computed, so the altitude credit
       // costs nothing on the presets that don't ask for it (highBias 0 multiplies it away).
       const high = highBias * Math.min(Math.max(e.y[k], 0), 400) * 2.0;
-      const score = smoothstep(0.045, 0.13, grade) * 900 + dist * 0.012 - high;
+      /* SOMEWHERE TO HEAD FOR. The operator asked for "a tall distant landmark visible from
+       * spawn"; an audit stood at the old default spawn, photographed all four cardinal
+       * directions, and found flat plains on three of them and a 123 m wooded hill on the
+       * fourth. The massif layer was not the problem — it works, and there was a 283 m peak
+       * within a couple of kilometres of that spawn's own neighbourhood — the problem was that
+       * nothing in this function had ever heard of it.
+       *
+       * `landmarkView` returns the apparent height in DEGREES of the most dominant massif
+       * visible from the candidate, measured above the candidate's own ground (world/
+       * landmarks.js). Degrees, not metres, because that is what "reads as a landmark"
+       * physically is: 283 m at 1.6 km is 10.1° and owns the skyline; 318 m at 6.5 km is 2.8°
+       * and is haze.
+       *
+       * SCALED TO SIT BETWEEN THE TWO TERMS THAT ALREADY EXIST, on purpose:
+       *   - Saturates at 8°, so 320 points is the ceiling. That is comfortably under the
+       *     saturated grade penalty (900), so a candidate under a magnificent mountain still
+       *     loses to a gentler one — grade keeps priority, exactly as `highBias` does.
+       *   - It is far larger than the distance term (≤36 points over the whole box), so this
+       *     REPLACES distance as the tie-break between pleasant candidates rather than
+       *     competing with it. That is the intended change: "nearest passable arterial" was
+       *     never a thing the player wanted, it was just the only thing on offer.
+       *   - The water gate below is untouched and still runs after scoring, so W8 stays fixed.
+       * Every candidate pays 5x5 hashes for it; no heightfield samples, no line of sight.
+       *
+       * ── SHIPPED AT ZERO, DELIBERATELY, AND HERE IS THE WHOLE TRADE ────────────────────────
+       *
+       * On the DEFAULT seed this term is not needed any more, because routing the roads around
+       * the lakes (world/roads.js's water cull) already moved the spawn off the plain it was
+       * stuck on: nearest massif went from 104 m at 1.78 km — the very bottom of the 90-330 m
+       * range, exactly what the audit's photographs showed — to 283 m at 1.59 km, filling 7.0°
+       * of sky. That is the requirement met, on the world the operator actually boots into,
+       * without this term doing anything.
+       *
+       * Turning it up to 15 buys the six PRESETS the same thing, and the numbers are real:
+       * meadow's nearest massif 104 m -> 283 m, marsh 78 m -> 212 m, dunes 164 m -> 226 m, and
+       * every preset lands within 1.3-1.6 km of a 212 m-plus peak.
+       *
+       * WHAT IT COSTS, measured, which is why it is off: it moves the default spawn ~200 m, and
+       * the browser suite's R1 check ("nothing is above the road surface") then reads 1 of 103
+       * points at 1.60 m instead of 0 of 60 at 0.00 m. R1 compares ONE edge's own height
+       * profile against `Terrain.height`, which is RoadField.carve's blend over every nearby
+       * road — near a junction those two legitimately differ, by design (the same gap made an
+       * audit report 13.55 m of "terrain above the road" at a point where the drivable surface
+       * was in fact level). So R1 is a per-box lottery, not a world property: measured across
+       * eight seeds BEFORE any change this round, six of the eight 840 m boxes already had R1
+       * hits, worst 8.44 m, and the default seed's box passing was luck. Diagnosed to the
+       * point: at (-895,1253) two arterials that share node (-1,0) run 1.7 m apart, each graded
+       * to its own ground, and the carve blends both.
+       *
+       * Fixing that properly means levelling near-parallel arterial pairs, and letting
+       * arterials level against each other is recorded in roads.js as already tried and
+       * reverted — it moved every arterial in a 4 km square by up to 36 m. That is a real
+       * piece of work with its own measurement round, not something to slip in beside four
+       * other fixes. So the capability ships wired, documented and proven (see the "W5 again"
+       * section of `node tools/diag-relief.mjs`), the default seed gets the fix for free, and
+       * the presets wait on one number here rather than on a rewrite. */
+      const view = Math.min(landmarkView(x, z, seed, e.y[k]).score, 8) * LANDMARK_SPAWN_BIAS;
+      const score = smoothstep(0.045, 0.13, grade) * 900 + dist * 0.012 - high - view;
       // Cheap reject before the height/water probe below: a candidate that cannot beat the
       // current best on score alone can never win, wet or not, so there is no reason to pay
       // for a Terrain.height() + biome-weights call on it.

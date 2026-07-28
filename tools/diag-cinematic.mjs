@@ -407,24 +407,85 @@ console.log('\n=== AUTO-DRIVE CAMERA ===');
     let rampPeak = 0;
     let last = 0;
     let maxOrbit = 0;
+    /* ── the shot list ────────────────────────────────────────────────────────
+     * Auto-drive now CUTS between framings — that is what makes it cinematic rather than a
+     * camera that merely drifts, and it is the whole of the operator's "the camera goes
+     * cinematic" (see the SHOTS block in src/car/camera.js). A cut is a one-frame
+     * discontinuity BY DESIGN, so the per-frame rate on a cut frame is meaningless: measured
+     * naively it reads about five thousand degrees a second, which is not a whip, it is an
+     * edit. The "never whips" budget below therefore skips the cut frame and measures what it
+     * was always trying to measure — how fast the rig moves while a shot is running. The cuts
+     * themselves get their own checks, because "it cut" and "it did not whip between cuts"
+     * are two different claims and both have to hold. */
+    let cuts = 0;
+    let lastCutAt = 0;
+    /** How long a cut is allowed to be settling before it counts as an ordinary frame. The
+     *  measured settle is four frames; this is a generous fifth of a second. */
+    const SETTLE_S = 0.2;
+    let settlePeak = 0;
+    let settleTravel = 0;
+    let settleAcc = 0;
+    const holds = [];
+    const shotsSeen = new Set();
     for (let i = 0; i < 60 * 180; i++) {
       fake.z += 14 * DT;
+      const before = straight.cuts;
       straight.update(fake, DT, null, { drift: true });
+      const cutThisFrame = straight.cuts > before;
+      if (cutThisFrame) {
+        cuts++;
+        holds.push(i * DT - lastCutAt);
+        lastCutAt = i * DT;
+      }
+      if (straight.shot) shotsSeen.add(straight.shot);
       const a = Math.atan2(-(w2.camera.position.x - fake.x), -(w2.camera.position.z - fake.z)) * (180 / Math.PI);
-      if (i > 0) {
+      /* The discontinuity lands ON the cut frame — `a` is already the new framing while
+       * `last` is still the old one — so that frame is excluded from the "does it whip"
+       * budget, and so are the few frames of spring SETTLE immediately after it. Both
+       * exclusions are measured separately below rather than waved away: the settle is the
+       * only thing a cut can hide, so it gets its own peak, its own duration and its own
+       * total bearing travel, and a cut that turned into a swoop would fail those. */
+      if (i > 0 && !cutThisFrame) {
         const r = Math.abs(a - last) / DT;
-        if (i < 60 * 12) rampPeak = Math.max(rampPeak, r); // the ramp-in
-        else if (r > peak) { peak = r; peakAt = i * DT; }
+        const sinceCut = i * DT - lastCutAt;
+        if (sinceCut < SETTLE_S && cuts > 0) {
+          settlePeak = Math.max(settlePeak, r);
+          settleTravel = Math.max(settleTravel, (settleAcc += Math.abs(a - last)));
+        } else {
+          settleAcc = 0;
+          if (i < 60 * 12) rampPeak = Math.max(rampPeak, r); // the ramp-in
+          else if (r > peak) { peak = r; peakAt = i * DT; }
+        }
       }
       maxOrbit = Math.max(maxOrbit, Math.abs(a));
       last = a;
     }
+    const holdMin = holds.length ? Math.min(...holds.slice(1)) : 0;
+    const holdMax = holds.length ? Math.max(...holds.slice(1)) : 0;
     console.log(
       `  rig alone (car held dead straight, 180 s): orbit reaches ±${f(maxOrbit, 1)}°, ` +
         `steady-state peak ${f(peak, 2)} deg/s at t=${f(peakAt, 0)}s, ramp-in peak ${f(rampPeak, 2)} deg/s`,
     );
-    ok(peak < 10, 'the rig itself never whips', `peak ${f(peak, 2)} deg/s (design budget 5.4 + 3.0)`);
+    console.log(
+      `  shot list over the same 180 s: ${cuts} cuts, ${shotsSeen.size} distinct framings ` +
+        `(${[...shotsSeen].join(', ')}), holds ${f(holdMin, 1)}–${f(holdMax, 1)} s`,
+    );
+    console.log(
+      `  the settle after a cut: peak ${f(settlePeak, 1)} deg/s, and the bearing moves ` +
+        `${f(settleTravel, 2)}° in total before the shot holds`,
+    );
+    ok(peak < 10, 'the rig itself never whips BETWEEN cuts', `peak ${f(peak, 2)} deg/s (design budget 5.4 + 3.0)`);
+    /* A cut is instantaneous, so what is left to check is that it does not turn into a MOVE.
+     * Two numbers say that: the settle never gets fast, and — the one that actually matters —
+     * the total bearing the camera travels while settling is a degree or two, which is not
+     * something an eye can follow. An eased cut would put tens of degrees here. */
+    ok(settlePeak < 25, 'a cut settles without lurching', `peak ${f(settlePeak, 1)} deg/s for at most ${SETTLE_S}s`);
+    ok(settleTravel < 3, '...and the settle is invisible: the bearing barely moves', `${f(settleTravel, 2)}° total`);
     ok(rampPeak < 10, 'and engaging it does not sweep the camera round', `${f(rampPeak, 2)} deg/s`);
+    ok(straight.cinematic === true, 'auto-drive reports itself as cinematic', `chase.cinematic = ${straight.cinematic}`);
+    ok(cuts >= 10, 'and it actually CUTS between framings', `${cuts} cuts in 180 s`);
+    ok(shotsSeen.size >= 5, 'through several genuinely different framings', `${shotsSeen.size} distinct shots`);
+    ok(holdMin >= 9 && holdMax <= 18, 'every hold is long and unhurried', `${f(holdMin, 1)}–${f(holdMax, 1)} s (a TV edit is 2–4 s)`);
   }
 
   /* Take the wheel back. The autopilot drops out on any real input, main.js stops passing

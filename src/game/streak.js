@@ -58,6 +58,9 @@ export class Streak {
     this.multiplier = 1;
     this.onRoad = false;
     this.tier = 0;
+    /** True while auto-drive has the wheel — see update()'s `opts.paused`. Read by the HUD for
+     *  its caption and by tools/diag-auto-gates.mjs, which asserts the freeze in numbers. */
+    this.paused = false;
 
     this._off = 0; // seconds spent off the carriageway
     this._announced = 0; // highest ladder index announced this streak
@@ -104,6 +107,7 @@ export class Streak {
       grace: this._off > 0 && this._off < GRACE,
       graceLeft: Math.max(0, GRACE - this._off),
       tier: this.tier,
+      paused: this.paused,
     };
   }
 
@@ -117,9 +121,26 @@ export class Streak {
    * @param {number} dt seconds
    * @param {object} car    the Vehicle — needs .speed, .onGround, .onRoadMin
    * @param {object} surf   the Terrain surface sample at the car's centre — needs .onRoad
+   * @param {object} [opts]
+   * @param {boolean} [opts.paused] the car is driving ITSELF (auto-drive). Operator, verbatim:
+   *        auto-drive should accrue "no streak". So while it is on the streak is FROZEN —
+   *        nothing accrues, and nothing breaks either.
+   *
+   *        Frozen rather than reset, deliberately, and it is the cozy reading of both halves of
+   *        the rule: a chauffeured kilometre is not a kilometre you drove, so it must not count;
+   *        but taking your hands off the wheel to look out of the window is not a mistake, so it
+   *        must not cost you the eighty kilometres you already earned either. The grace timer is
+   *        held too — an autopilot that clips a verge while you are not driving cannot break a
+   *        streak you are not building.
    */
-  update(dt, car, surf) {
+  update(dt, car, surf, opts = null) {
     const speed = Math.abs(car.speed || 0);
+
+    /* Auto-drive: freeze, and say so on `state` so the HUD can caption it. Placed before every
+     * other test in this method so there is exactly one way in and out of the frozen state and
+     * no half-frozen path where, say, the off-road timer still runs. */
+    this.paused = !!(opts && opts.paused);
+    if (this.paused) return;
     /* surf.onRoad is ONE sample at the car's centre, and a road (6-8.6 m, see TIERS in
      * world/roads.js) is much wider than the car's track (~1.6-1.7 m) — so it stays "on road"
      * long after a wheel has crossed the verge. car.onRoadMin is the worst of the four

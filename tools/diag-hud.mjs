@@ -90,6 +90,9 @@ const { Hud, MILESTONES_KM } = await import('../src/ui/hud.js');
 const { Streak, fmtDistance } = await import('../src/game/streak.js');
 const { FLEET, fmtUnlock } = await import('../src/game/garage.js');
 const { StreakTrail } = await import('../src/render/trail.js');
+/* The real palette, so the rebrand's green can be checked against the colours this game
+ * actually paints the world with rather than against a hex copied into this file. */
+const { P } = await import('../src/core/palette.js');
 
 /* ── 1. the strings ──────────────────────────────────────────────────────── */
 
@@ -312,8 +315,8 @@ probeFleet(100000, [], []);
 
 console.log('\nthe game title:\n');
 check(
-  'a title element exists, reading exactly "Cozy Drive"',
-  !!hud.title && hud.title.textContent === 'Cozy Drive',
+  'a title element exists, reading exactly "Cozy Driver"',
+  !!hud.title && hud.title.textContent === 'Cozy Driver',
   hud.title ? `"${hud.title.textContent}"` : 'missing'
 );
 check('it has a stable id for the stylesheet to find', !!hud.title && hud.title.id === 'gameTitle', hud.title ? hud.title.id : 'missing');
@@ -566,6 +569,285 @@ for (const [vw, vh, label] of [
 }
 check('the title clears the place name at every viewport, with real margin', titleCollisions.length === 0, titleCollisions.join('; ') || '5 viewports, phone to 1080p, positive clearance at each');
 check('the title text stays legible at every viewport', titleOk, 'font-size >= 9px everywhere');
+
+/* ── 4c. the rebrand: "Cozy Driver", cozy font, growing green, start-page theme ──
+ *
+ * The operator's headline ask this round, and the whole of it is CSS and strings — which is
+ * exactly the class of change this project has shipped broken before while every static check
+ * its author ran went green (gotcha 3: a flag being set is not a thing being visible). So none
+ * of the checks below are "the declaration exists". Each one resolves a real value and tests
+ * the property that actually matters:
+ *
+ *   the NAME     — read out of the real Hud, out of index.html's real <title> and loading card,
+ *                  and out of the extension's real manifest/panel/options, then swept for any
+ *                  surviving "Cozy Drive" that is not "Cozy Driver". The things that must NOT
+ *                  be renamed (package name, deploy base) are asserted unchanged in the same
+ *                  breath, because a rebrand that breaks the live URL is not a rebrand.
+ *   the FONT     — the wordmark's stack is resolved, checked to be different from the
+ *                  instruments' stack, checked to end in a generic family, and checked to
+ *                  contain no url()/@font-face — i.e. proved to cost zero downloads.
+ *   the GREEN    — the hex is looked up in src/core/palette.js's real P table. If it is not a
+ *                  colour this game already paints the world with, this fails.
+ *   the GROWING  — the keyframes are parsed: it must animate transform only (never opacity —
+ *                  a screenshot lands on an arbitrary frame), start at a scale that is still a
+ *                  legible box, end at exactly 1, take its time, hold both ends, and its easing
+ *                  curve's control points are read to prove it cannot overshoot. That last one
+ *                  is the difference between "grow and settle" and "pop", measured.
+ *   the THEME    — the start page's colours are resolved and compared against the HUD's: they
+ *                  must actually differ, they must sit on the other side of the green/blue
+ *                  divide, and every text-on-background pair is run through a real WCAG
+ *                  contrast computation that fails under 4.5:1. Plus the standing scar: the
+ *                  recolour must not have put a display/visibility/opacity rule anywhere near
+ *                  #menu, and `#menu[hidden]` must still win.
+ */
+
+console.log('\nthe rebrand — name, face, green, and the start page\'s own theme:\n');
+
+const read = (p) => readFileSync(resolve(ROOT, p), 'utf8');
+const NAME = 'Cozy Driver';
+
+/* the name, everywhere a player can see it */
+{
+  const indexHtml = read('index.html');
+  const manifest = JSON.parse(read('extension/manifest.json'));
+  const panelHtml = read('extension/panel.html');
+  const optionsHtml = read('extension/options.html');
+  const tag = (src, t) => {
+    const m = src.match(new RegExp(`<${t}[^>]*>([^<]*)</${t}>`, 'i'));
+    return m ? m[1].trim() : null;
+  };
+
+  const surfaces = [
+    ['the running game (src/ui/hud.js #gameTitle)', hud.title.textContent],
+    ['the browser tab (index.html <title>)', tag(indexHtml, 'title')],
+    ['the loading card (index.html <h1>)', tag(indexHtml, 'h1')],
+    ['the extension name (manifest.json)', manifest.name],
+    ['the toolbar button (manifest action title)', manifest.action.default_title],
+    ['the Alt+D command (manifest commands)', manifest.commands._execute_action.description],
+    ['the side panel tab (panel.html <title>)', tag(panelHtml, 'title')],
+    ['the options page (options.html <h1>)', tag(optionsHtml, 'h1')],
+  ];
+  for (const [where, text] of surfaces) console.log(`   ${where.padEnd(46)} "${text}"`);
+  check(
+    'every user-visible surface says "Cozy Driver"',
+    surfaces.every(([, t]) => typeof t === 'string' && t.includes(NAME)),
+    surfaces.filter(([, t]) => !(t || '').includes(NAME)).map(([w, t]) => `${w} = "${t}"`).join('; ') || `${surfaces.length} surfaces`
+  );
+
+  /* "Cozy Driver" contains "Cozy Drive", so a substring test would pass on a missed rename.
+   * This looks for the old name NOT followed by the new one's final r. */
+  const stale = [];
+  for (const f of ['index.html', 'src/ui/hud.js', 'src/ui/menu.js', 'src/ui/style.css', 'extension/manifest.json', 'extension/panel.html', 'extension/options.html', 'extension/dock.js', 'extension/panel.js']) {
+    const src = read(f);
+    if (/Cozy Drive(?!r)/.test(src)) stale.push(f);
+  }
+  check('no "Cozy Drive" survives anywhere a player can reach', stale.length === 0, stale.join(', ') || '9 files swept');
+
+  /* The other half of the instruction: the things that must NOT move. Renaming any of these
+   * breaks https://crumbtown.org/wanderoad/ or the build. */
+  const pkg = JSON.parse(read('package.json'));
+  check('the package name is untouched — the build still resolves', pkg.name === 'wanderoad', `"${pkg.name}"`);
+  check(
+    'the deploy path is untouched — the live URL still resolves',
+    /wanderoad/.test(read('deploy/deploy.py')),
+    'deploy/deploy.py still targets wanderoad'
+  );
+}
+
+/* the cozy face */
+const rootRule = all.filter((r) => r.sel.trim() === ':root').pop();
+const titleRule = all.filter((r) => r.sel.trim() === '#gameTitle' && r.at === '').pop();
+{
+  const cozy = decl(rootRule.body, '--cozy');
+  const serif = decl(rootRule.body, '--serif');
+  const fams = (cozy || '').split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, ''));
+  console.log(`\n   --cozy  = ${fams.join(' / ')}`);
+  check('the wordmark has its own font stack', !!cozy && fams.length >= 3, `${fams.length} families`);
+  check('it is genuinely a different face from the instruments\' --serif', !!cozy && cozy.trim() !== (serif || '').trim(), fams[0]);
+  check('it ends in a generic family, so it can never fall through to nothing', /^(serif|sans-serif|monospace|cursive|system-ui)$/.test(fams[fams.length - 1]), fams[fams.length - 1]);
+  check(
+    'it downloads nothing — no @font-face, no url(), no font file in the repo',
+    !/@font-face/i.test(css) && !/url\(/i.test(cozy || '') && !/\.(woff2?|ttf|otf|eot)\b/i.test(css),
+    'system stack only, zero requests, nothing to licence'
+  );
+  check('#gameTitle actually uses it', (decl(titleRule.body, 'font-family') || '').includes('--cozy'), decl(titleRule.body, 'font-family'));
+  check('the loading card\'s wordmark uses it too', (decl((all.filter((r) => r.sel.trim() === '#veil h1').pop() || { body: '' }).body, 'font-family') || '').includes('--cozy'));
+}
+
+/* the green — checked against the palette the world is actually painted from */
+const hex = (s) => {
+  const m = String(s).trim().match(/^#([0-9a-f]{6})$/i);
+  return m ? m[1].toLowerCase() : null;
+};
+const rgbOf = (h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+const lum = (rgb) =>
+  0.2126 * chan(rgb[0]) + 0.7152 * chan(rgb[1]) + 0.0722 * chan(rgb[2]);
+function chan(v) {
+  const s = v / 255;
+  return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+const contrast = (a, b) => {
+  const [x, y] = [lum(rgbOf(a)), lum(rgbOf(b))].sort((p, q) => q - p);
+  return (x + 0.05) / (y + 0.05);
+};
+{
+  const paletteHexes = new Map();
+  for (const k in P) paletteHexes.set(String(P[k]).toLowerCase().replace('#', ''), k);
+  const leaf = hex(decl(rootRule.body, '--leaf'));
+  const leafDeep = hex(decl(rootRule.body, '--leafDeep'));
+  console.log(`\n   --leaf = #${leaf} (${paletteHexes.get(leaf) || 'NOT IN THE PALETTE'})   --leafDeep = #${leafDeep} (${paletteHexes.get(leafDeep) || 'NOT IN THE PALETTE'})`);
+  check('the title green is a colour this game already paints the world with', paletteHexes.has(leaf), `P.${paletteHexes.get(leaf)} = #${leaf}`);
+  check('so is the deep green the loading card uses', paletteHexes.has(leafDeep), `P.${paletteHexes.get(leafDeep)} = #${leafDeep}`);
+  const g = (h) => rgbOf(h)[1];
+  check(
+    'both are actually green — the green channel leads, and it is not a raw #00ff00',
+    g(leaf) > rgbOf(leaf)[2] && g(leafDeep) > rgbOf(leafDeep)[0] && g(leafDeep) > rgbOf(leafDeep)[2] && leaf !== '00ff00',
+    `#${leaf} rgb(${rgbOf(leaf)}), #${leafDeep} rgb(${rgbOf(leafDeep)})`
+  );
+  check('#gameTitle is painted in it', (decl(titleRule.body, 'color') || '').includes('--leaf'), decl(titleRule.body, 'color'));
+  // The loading card is a warm CREAM gradient; the bright grass green would smear on it.
+  const cardRatio = contrast(leafDeep, 'f3dfb4'); // #veil's lightest gradient stop
+  console.log(`   loading-card wordmark contrast: #${leafDeep} on #f3dfb4 = ${cardRatio.toFixed(2)}:1`);
+  check('the loading card\'s green is readable on the loading card', cardRatio >= 4.5, `${cardRatio.toFixed(2)}:1`);
+}
+
+/* the growing — parsed, not assumed */
+{
+  const anim = decl(titleRule.body, 'animation') || '';
+  const stops = all.filter((r) => r.at.includes('@keyframes titleGrow'));
+  const dur = parseFloat((anim.match(/(\d+(?:\.\d+)?)s/) || [0, 0])[1]);
+  const bez = (anim.match(/cubic-bezier\(([^)]+)\)/) || [])[1];
+  const pts = bez ? bez.split(',').map((n) => parseFloat(n)) : [];
+  const scales = stops.flatMap((r) => [...r.body.matchAll(/scale\(([^)]+)\)/g)].map((m) => parseFloat(m[1])));
+  console.log(`\n   animation: ${anim.trim()}`);
+  console.log(`   keyframes: ${stops.length} stops, scale ${scales.join(' → ')}`);
+
+  check('the title has a grow animation, and it is the shared one', /titleGrow/.test(anim) && stops.length >= 2, `${stops.length} stops`);
+  check('it grows: it starts smaller and ends at exactly full size', scales.length >= 2 && scales[0] < 1 && scales[scales.length - 1] === 1, scales.join(' → '));
+  check(
+    'it never starts from nothing — the first frame is already a legible box',
+    scales.every((s) => s >= 0.5),
+    `smallest scale ${Math.min(...scales)}`
+  );
+  check('it never animates opacity — a screenshot on any frame still shows a lit title', stops.every((r) => decl(r.body, 'opacity') === null));
+  check('it never animates display or visibility either', stops.every((r) => decl(r.body, 'display') === null && decl(r.body, 'visibility') === null));
+  check('it is slow and cozy, not a flash', dur >= 1.2 && dur <= 6, `${dur}s`);
+  check('it holds both ends — no unstyled flash before it starts or after it ends', /\b(both|forwards)\b/.test(anim), anim.match(/\b(both|forwards)\b/)?.[0] || 'no fill mode');
+  check(
+    'the easing curve cannot overshoot — this settles, it does not bounce',
+    pts.length === 4 && pts[1] >= 0 && pts[1] <= 1 && pts[3] >= 0 && pts[3] <= 1,
+    `cubic-bezier(${pts.join(', ')}) — control-point y values inside [0,1]`
+  );
+  check(
+    'the title element itself never fades — its opacity is flat and well lit',
+    parseFloat(decl(titleRule.body, 'opacity')) >= 0.5,
+    `opacity ${decl(titleRule.body, 'opacity')}`
+  );
+  const reduced = all.filter((r) => r.at.includes('prefers-reduced-motion') && r.sel.split(',').some((s) => s.trim() === '#gameTitle'));
+  check('asking for less motion stops it', reduced.some((r) => (decl(r.body, 'animation') || '').trim() === 'none'), `${reduced.length} rule(s)`);
+}
+
+/* the start page's own theme */
+{
+  const menuRules = all.filter((r) => r.sel.split(',').some((s) => s.trim() === '#menu' || s.trim().startsWith('#menu ') || s.trim().startsWith('#menu[')));
+  const mVar = (name) => {
+    const hits = all.filter((r) => r.sel.trim() === '#menu' && decl(r.body, name) !== null);
+    return hits.length ? decl(hits[hits.length - 1].body, name).trim() : null;
+  };
+  const rVar = (name) => (decl(rootRule.body, name) || '').trim();
+
+  console.log('\n   token       HUD            start page');
+  const tokens = [];
+  for (const t of ['--ink', '--cream', '--teal']) {
+    const a = rVar(t);
+    const b = mVar(t);
+    tokens.push([t, a, b]);
+    console.log(`   ${t.padEnd(10)}  ${String(a).padEnd(14)} ${b}`);
+  }
+  check(
+    'the start page re-declares the theme tokens, and every one of them actually changes',
+    tokens.every(([, a, b]) => b && hex(b) && hex(a) && hex(a) !== hex(b)),
+    tokens.map(([t, a, b]) => `${t} ${a}→${b}`).join(', ')
+  );
+  // "Different theme colour" measured, not asserted: the HUD's surfaces are warm (red leads),
+  // the start page's are green (green leads). Opposite sides of the wheel, from real channels.
+  const hudPaper = rgbOf(hex(rVar('--cream')));
+  const menuPaper = rgbOf(hex(mVar('--cream')));
+  const hudInk = rgbOf(hex(rVar('--ink')));
+  const menuInk = rgbOf(hex(mVar('--ink')));
+  console.log(`   HUD paper rgb(${hudPaper}) vs start-page paper rgb(${menuPaper})`);
+  check(
+    'the start page sits on the green side of the wheel where the HUD sits on the warm/blue side',
+    hudPaper[0] > hudPaper[1] && menuPaper[1] >= menuPaper[0] && menuPaper[1] > menuPaper[2] && menuInk[1] > menuInk[0] && menuInk[1] > menuInk[2] && hudInk[2] > hudInk[1],
+    `paper: warm cream r>g → sage g>=r, g>b; ink: slate b>g → forest g>r,g>b`
+  );
+  const sheetBg = (decl((all.filter((r) => r.sel.trim() === '#menu .sheet').pop() || { body: '' }).body, 'background') || '').match(/rgba?\(([^)]+)\)/);
+  const sheetRgb = sheetBg ? sheetBg[1].split(',').slice(0, 3).map((n) => parseInt(n, 10)) : null;
+  check(
+    'the sheet is really repainted, not just re-tokenised',
+    !!sheetRgb && sheetRgb.join(',') !== hudPaper.join(','),
+    sheetRgb ? `sheet rgb(${sheetRgb}) vs HUD cream rgb(${hudPaper})` : 'no sheet background'
+  );
+  check(
+    'the scrim behind the sheet is repainted too, and it is a green dusk not a blue one',
+    (() => {
+      const bg = decl(all.filter((r) => r.sel.trim() === '#menu').pop().body, 'background') || '';
+      const stops = [...bg.matchAll(/rgba?\(([^)]+)\)/g)].map((m) => m[1].split(',').slice(0, 3).map((n) => parseInt(n, 10)));
+      return stops.length > 0 && stops.every((s) => s[1] > s[0] && s[1] > s[2]);
+    })(),
+    'every gradient stop has the green channel leading'
+  );
+
+  /* Legibility, computed. Every pair a player actually reads on this page. */
+  const paperHex = sheetRgb.map((n) => n.toString(16).padStart(2, '0')).join('');
+  const pairs = [
+    ['forest ink on the sage sheet', hex(mVar('--ink')), paperHex],
+    ['the green heading on the sage sheet', hex(decl(rootRule.body, '--leafDeep')), paperHex],
+    ['the selected button\'s label on its green', hex(mVar('--cream')), hex(mVar('--teal'))],
+    ['the Drive button\'s label on its ink', hex(mVar('--cream')), hex(mVar('--ink'))],
+  ];
+  console.log('');
+  let legible = true;
+  for (const [what, fg, bg] of pairs) {
+    const r = contrast(fg, bg);
+    if (r < 4.5) legible = false;
+    console.log(`   ${what.padEnd(42)} #${fg} on #${bg} = ${r.toFixed(2)}:1`);
+  }
+  check('every text pair on the start page clears WCAG AA (4.5:1), computed from the real hexes', legible, `${pairs.length} pairs`);
+
+  /* The standing scar, applied to the WHOLE start page rather than only the rules this pass
+   * wrote — held to tools/browser-test.mjs's own VISIBLE standard (display not none,
+   * visibility not hidden, opacity well clear of zero), the same one section 3 applies to the
+   * HUD's claimed elements. `display: grid` / `flex` are layout, not hiding, and are not
+   * flagged; `display: none` is.
+   *
+   * TWO RULES ARE EXEMPT AND BOTH ARE NAMED, so neither can quietly grow into a third:
+   * `#menu[hidden]` is the guard that makes the Drive button work (checked separately, right
+   * below), and `#menu button.locked` is the deliberate greying of a car you have not earned
+   * yet. Everything else on this page must be on screen whenever the page is. */
+  const EXEMPT = ['#menu[hidden]', '#menu button.locked'];
+  const hiders = [];
+  for (const r of menuRules) {
+    const sel = r.sel.trim();
+    if (EXEMPT.includes(sel)) continue;
+    const d = (p) => (decl(r.body, p) || '').trim().toLowerCase();
+    if (d('display') === 'none') hiders.push(`${sel} display:none`);
+    if (d('visibility') === 'hidden') hiders.push(`${sel} visibility:hidden`);
+    const o = decl(r.body, 'opacity');
+    if (o !== null && parseFloat(o) < 0.5) hiders.push(`${sel} opacity:${o}`);
+  }
+  check(
+    'the recolour added no way to hide the start page',
+    hiders.length === 0,
+    hiders.join('; ') || `${menuRules.length} rules on #menu and its children, all visible by the browser suite's own standard`
+  );
+  const guard = all.find((r) => r.sel.trim() === '#menu[hidden]');
+  check(
+    'and #menu[hidden] still wins, so the Drive button still works',
+    !!guard && /display\s*:\s*none\s*!important/.test(guard.body),
+    guard ? guard.body.trim().replace(/\s+/g, ' ') : 'MISSING — this is the bug that shipped the game unplayable'
+  );
+}
 
 /* ── 5. the retired rope trail ───────────────────────────────────────────── */
 

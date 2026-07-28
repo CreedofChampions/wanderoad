@@ -136,6 +136,53 @@ export function gustMultiplier(openness) {
   return 1 - calm * (1 - OPEN_CALM_GUST);
 }
 
+/* ── far-field flattening: the moire fix ──────────────────────────────────────────────────
+ * Playtest report, on the one part of the water that still failed: "coarse diagonal streak
+ * banding across the whole left half of the lake", and at 2.4x zoom "a fine crosshatch
+ * shimmer band forming at mid-to-far distance. In a still it is mild; in motion it will
+ * crawl." Both are the same defect with two faces, and the analysis is worth writing down
+ * because the obvious fix was already in this file and was not enough.
+ *
+ * bandLimit() below fades each ripple band out as its own frequency approaches the pixel
+ * footprint, ANISOTROPICALLY — a deliberately clever thing to do, and correct as far as it
+ * goes (its own comment explains why the isotropic version blurs the whole sheet the moment
+ * the camera drops to eye level, which in a driving game is always). What it cannot do is
+ * make a POINT SAMPLE behave like an anisotropic average. At grazing incidence a pixel is
+ * tens of metres long down the view and less than a metre across it; the cross-axis
+ * frequency is still comfortably resolvable, so the band stays alive, and the surviving
+ * band is then sampled once somewhere inside a fifteen-metre-long footprint. That is
+ * textbook undersampling ALONG the view, and undersampling along the view of a set of bands
+ * that all run down one fixed world axis (RIP_AXIS) is exactly a diagonal streak that
+ * crawls when you move.
+ *
+ * The honest fix for that is more samples, which a full-screen sheet of water cannot afford.
+ * So the surface stops trying: past FAR_FLAT_FULL metres there IS no high-frequency signal
+ * left to alias, because everything that carries one is faded to nothing — the ripple normal
+ * (so the reflection stops churning), the gust field (so the cat's-paw darkening stops
+ * striping), the flow ribbons and the quantised glitter. What remains far out is the depth-
+ * graded body colour, the sky wash and the aerial haze: a plate of luminous blue, which is
+ * exactly what this file's own reflection comment already says it wants distant water to be,
+ * and exactly what the operator asked for ("large bodies of water should be flat").
+ *
+ * The near number is 90 m and not 200: the fade has to be WELL under way by the distance the
+ * report photographed, and 90 m is comfortably past the foreground water a driving camera
+ * sees in detail. Nothing inside 90 m changes at all.
+ */
+/** Metres at which the far-field flattening starts. Below this, nothing changes. */
+export const FAR_FLAT_NEAR = 90;
+/** ...and at which it is complete: no ripple normal, no gust, no ribbons, no glitter. */
+export const FAR_FLAT_FULL = 300;
+/** Pure JS mirror of the shader's `farFlat` term, so tools/diag-water.mjs can print the real
+ *  curve. 0 = untouched foreground water, 1 = a flat plate of colour. */
+export function farFlatten(dist) {
+  const t = Math.max(0, Math.min(1, (dist - FAR_FLAT_NEAR) / (FAR_FLAT_FULL - FAR_FLAT_NEAR)));
+  return t * t * (3 - 2 * t); // smoothstep, the same one the GLSL uses
+}
+/** How tall the ripple normal is allowed to stand at a distance, 1 near and 0 far. */
+export function farAmpMultiplier(dist) {
+  return 1 - farFlatten(dist);
+}
+
 const _openCache = new Map(); // "ci,cj" -> 0..1, world-aligned so neighbours agree exactly
 const OPEN_CACHE_MAX = 20000; // ~a very long session's worth of explored coastline; then reset
 const _wOpen = new Float32Array(BIOME_COUNT);
@@ -233,7 +280,12 @@ float gustAt(vec2 p){
 // either to a single number is the isotropic-mip mistake, and it blurs the whole surface to
 // a flat sheet the moment the camera drops towards eye level — which, in a driving game, is
 // where the camera lives.
-float bandLimit(vec2 fw, vec2 f){ return 1.0 - smoothstep(0.28, 0.72, dot(fw, abs(f))); }
+// 0.20/0.52, tightened from 0.28/0.72. Nyquist is at HALF a cycle per pixel, and the old
+// window did not finish until 0.72 — i.e. a band was still being point-sampled well past the
+// point where it provably carried nothing but aliasing. Every band now goes out by 0.52, and
+// the fade begins comfortably before the limit rather than at it. Foreground water does not
+// change: at short range dot(fw, f) is a small fraction of either threshold.
+float bandLimit(vec2 fw, vec2 f){ return 1.0 - smoothstep(0.20, 0.52, dot(fw, abs(f))); }
 
 // Anisotropic chop: four bands, all far longer down the ripple axis than across it, which is
 // the single thing that makes water look like it is going somewhere. The pen's frequencies
@@ -311,10 +363,24 @@ void main(){
   // the gust field is built changes, only how tall they are allowed to stand on water this open.
   float calm = smoothstep(${OPEN_LO.toFixed(3)}, ${OPEN_HI.toFixed(3)}, vOpen);
 
+  /* Far-field flattening — the moire fix. See FAR_FLAT_NEAR/FAR_FLAT_FULL and the long note
+   * above them in this file for why band limiting alone could not reach this: an anisotropic
+   * gate keeps a band alive whose cross-axis frequency is resolvable, and that band is then
+   * point-sampled once inside a pixel tens of metres long DOWN the view. Everything below
+   * that carries a per-pixel signal is multiplied out by this one term, so past
+   * FAR_FLAT_FULL metres there is nothing left that could alias. The name is farFlat and not
+   * a short generic one on purpose: short generic identifiers in a shader are how this
+   * project once shipped a black screen off a GLSL reserved word, and it is not worth
+   * finding out again. */
+  float farFlat = smoothstep(${FAR_FLAT_NEAR.toFixed(1)}, ${FAR_FLAT_FULL.toFixed(1)}, vDist);
+  float nearW = 1.0 - farFlat;
+
   // Gust cells are ~32 m across at their finest, so they too stop carrying information once
   // the pixel is wider than that — and their surface darkening is the most visible aliasing
-  // of the lot, because it is a contrast term rather than a colour one.
-  float gust = gustAt(P.xz) * bandLimit(fw, vec2(0.031)) * mix(1.0, ${OPEN_CALM_GUST.toFixed(3)}, calm);
+  // of the lot, because it is a contrast term rather than a colour one. The fbm's own
+  // diagonal grain reading as stripes on a distant bay is the "coarse diagonal streak
+  // banding" half of the report, so it takes the far-field term as well as its band gate.
+  float gust = gustAt(P.xz) * bandLimit(fw, vec2(0.031)) * mix(1.0, ${OPEN_CALM_GUST.toFixed(3)}, calm) * nearW;
 
   // The finite differences that build the normal are sampled at the pixel footprint of their
   // OWN axis rather than at the pen's fixed 0.42 m, so each degrades into a box filter of
@@ -336,6 +402,14 @@ void main(){
   // current where its bed actually falls, and shallow water beside a deep lake still shortens
   // its own wave — this only pulls down the ceiling those terms are allowed to reach.
   amp *= mix(1.0, ${OPEN_CALM_AMP.toFixed(3)}, calm);
+  /* ...and flat, full stop, past FAR_FLAT_FULL metres. This is the load-bearing line of the
+   * moire fix: with the amplitude at zero the three finite differences below are equal, dh
+   * is exactly zero, and the normal is exactly up — so there is no high-frequency signal in
+   * the reflection for a fifteen-metre-long pixel to undersample. The distance mix on N a few
+   * lines down is kept as well, because it still shapes the 70-300 m band this does not
+   * finish covering, and belt-and-braces on the one term that produced the reported artefact
+   * is cheap. */
+  amp *= nearW;
   /* Normal scale 8.5, down from 14. The old value was tuned on the pen's narrow river,
    * always seen at a steep angle; on a lake seen at grazing incidence a hard-tilted normal
    * swings the reflected ray across the WHOLE sky dome, and the surface renders as
@@ -359,7 +433,11 @@ void main(){
   // boiling field of highlights. Starts at 70 m and lands at 92% (was 110-560 m, 82%):
   // the marbling described above lived precisely in the 110-560 m window the old ramp
   // left at full strength, and a painting keeps its detailed brushwork for the FOREGROUND.
-  N = normalize(mix(N, vec3(0.0,1.0,0.0), smoothstep(70.0, 430.0, vDist)*0.92));
+  // max(..., farFlat): the old ramp landed at 92% and left 8% of a ripple normal alive at
+  // ANY distance, which on a sheet running to the horizon is 8% of a churn that has nothing
+  // left to be a churn of. Whichever term is stronger at this distance wins, so the 70-430 m
+  // shaping is untouched and the tail now actually reaches flat.
+  N = normalize(mix(N, vec3(0.0,1.0,0.0), max(smoothstep(70.0, 430.0, vDist)*0.92, farFlat)));
 
   float ndl = dot(N, uSunDir);
   float sh = sunShadow(P, ndl) * cloudShadow(P);
@@ -427,8 +505,10 @@ void main(){
     float bright = smoothstep(0.0, 0.5, r1 + r2);
     // 0.10, down from 0.16 — near-white strokes over the pale shallow plate were carrying
     // half the marbled read on shelving shores. The creases still say "downstream".
+    // ...and gone entirely in the far field: a crease is a stroke, and a stroke narrower than
+    // the pixel drawing it is the crosshatch the report photographed at 2.4x zoom.
     col = mix(col, mix(${C.wDeepShade}, ${C.wSpark}, bright),
-              rib*0.10*(0.4 + 0.6*sh)*bandLimit(fw, vec2(0.155, 1.05)));
+              rib*0.10*(0.4 + 0.6*sh)*bandLimit(fw, vec2(0.155, 1.05))*nearW);
   }
 
   // ── quantised sun glitter ──────────────────────────────────────────────────
@@ -441,7 +521,13 @@ void main(){
   float twinkle = step(0.42, glintN) * (0.55 + 0.75*pn2((q - vec2(uTime*0.286))*7.0));
   // A winking glint is a sub-pixel event by construction, so once a pixel is wider than the
   // glint field it hands its energy to the broad lobe rather than strobing.
-  float glint = smoothstep(0.9975, 0.99925, f) * twinkle * bandLimit(fw, vec2(1.9, 3.6));
+  /* nearW as well as the band gate, and this one is not belt-and-braces. Once the normal
+   * above is flat, f is very nearly CONSTANT across a whole distant reach — so a threshold
+   * as tight as 0.9975 stops being a field of winking points and becomes an all-or-nothing
+   * sheet with a hard edge, which is a worse artefact than the one being removed. Far water
+   * keeps the broad lobe below (smooth, and correct on a flat surface) and drops the
+   * quantised glints entirely. */
+  float glint = smoothstep(0.9975, 0.99925, f) * twinkle * bandLimit(fw, vec2(1.9, 3.6)) * nearW;
   float glitterPath = smoothstep(0.55, 1.0, dot(normalize(vec2(V.x,V.z)), -normalize(uSunDir.xz)));
   col += ${C.wSpark} * (glint*2.6 + broad*0.42) * sh * (0.35 + 0.75*glitterPath);
 

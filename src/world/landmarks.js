@@ -149,6 +149,97 @@ export function landmarkHeight(x, z, seed) {
 }
 
 /**
+ * IS THERE SOMEWHERE TO HEAD FOR, FROM HERE? The apparent height, in degrees above the
+ * horizontal, of the most dominant massif visible from (x, z) — and the massif itself.
+ *
+ * The requirement is "a tall distant landmark visible from spawn so there is somewhere to head
+ * towards", and it was failing at the default spawn for a reason no amount of making the
+ * massifs bigger would fix: the massifs were fine, the SPAWN was in the wrong place. An audit
+ * photographed all four cardinal directions from the old spawn and found flat plains on three
+ * of them; the nearest massif was 1783 m away and 104 m tall, the very bottom of the range.
+ * There is no mechanism in this file that could have helped, because it never got a say in
+ * where the player is put down.
+ *
+ * So this is the number `findSpawn` scores against. Degrees rather than metres, because that
+ * is what "reads as a landmark" actually means — 283 m at 1.6 km (10.1°) dominates a skyline
+ * that 318 m at 6.5 km (2.8°) does not.
+ *
+ * TWO CONSTRAINTS THAT ARE NOT OBVIOUS AND ARE BOTH LOAD-BEARING:
+ *
+ *   1. `d > r * MIN_STANDOFF` — a viewer INSIDE a dome's own radius is standing on the
+ *      mountain, not looking at it, and would otherwise score the best view in the world from
+ *      halfway up a slope with no horizon at all.
+ *   2. The height used is the massif's height above the VIEWER's own ground, not its full h.
+ *      Spawning at 476 m on an alpine shoulder beside a 500 m peak is not a landmark; the same
+ *      peak seen from a plain at 40 m is.
+ *
+ * No line-of-sight test. It would cost a walk of the heightfield per candidate per site, and
+ * this layer is by construction the tallest thing in its own neighbourhood — the massif is
+ * what would be doing the occluding.
+ */
+const VIEW_RANGE = 7000;
+/**
+ * How far UP a dome the viewer may be standing and still be "looking at" it.
+ *
+ * Expressed as the dome's own PROFILE value at the viewer — (1-(d/r)²)², the same expression
+ * `landmarkField` sums — rather than as a multiple of the radius, and that correction is worth
+ * stating because the radius version was wrong and measurably so. `r` here is the FULL
+ * footprint radius, and the header ties it to the height at about 6:1, so a 283 m massif is
+ * 1679 m wide at the foot. A rule of "no closer than 1.05·r" therefore threw away the single
+ * best landmark on the shipped seed — a 283 m peak 1590 m away, filling 10.1° of sky — on the
+ * grounds that the viewer was 89 m inside its footprint, where the dome is contributing 2.6 m
+ * of ground rise. Standing at the foot of a mountain looking up at it is not "standing on it";
+ * it is the picture the requirement is asking for.
+ *
+ * 0.12 of the profile is d/r ≈ 0.81 — genuinely part-way up the flank, where the summit is
+ * foreshortened and there is no horizon to see it against.
+ */
+const MAX_STANDING_ON = 0.12;
+/** No massif closer than this counts, however tall. */
+const MIN_VIEW_DIST = 1200;
+/** Apparent height is weighted by how big the massif REALLY is, across this band. */
+const REAL_LO = 110;
+const REAL_HI = 240;
+
+export function landmarkView(x, z, seed, groundY = 0) {
+  const gx = Math.floor(x / CELL);
+  const gz = Math.floor(z / CELL);
+  const span = Math.ceil(VIEW_RANGE / CELL);
+  let best = 0;
+  let bestDeg = 0;
+  let at = null;
+  for (let j = -span; j <= span; j++) {
+    for (let i = -span; i <= span; i++) {
+      const s = siteAt(gx + i, gz + j, seed, _site);
+      const d = Math.hypot(x - s.x, z - s.z);
+      if (d > VIEW_RANGE || d < MIN_VIEW_DIST) continue;
+      if (d < s.r) {
+        const u = 1 - (d * d) / (s.r * s.r);
+        if (u * u > MAX_STANDING_ON) continue; // standing up the flank, not looking at it
+      }
+      // Summit height above the viewer's own ground, seen across d metres.
+      const rise = s.h - groundY;
+      if (rise <= 0) continue;
+      const deg = (Math.atan2(rise, d) * 180) / Math.PI;
+      /* WEIGHTED BY REAL HEIGHT, and the first version of this was not, which is exactly the
+       * trap the requirement warns about. The ask is a "TALL DISTANT landmark"; apparent angle
+       * ALONE rewards standing right next to a small bump, and measured on three seeds it did
+       * precisely that — it moved two spawns onto a 132 m and a 109 m hillock at 900 m and
+       * 670 m, both scoring nearly 8°, when the same seeds had 250-280 m massifs a kilometre
+       * and a half out. Angle says how much of the sky it fills; the weight says whether it is
+       * a mountain or a mound. A landmark has to be both. */
+      const v = deg * smoothstep(REAL_LO, REAL_HI, s.h);
+      if (v > best) {
+        best = v;
+        bestDeg = deg;
+        at = { x: s.x, z: s.z, h: s.h, r: s.r, d };
+      }
+    }
+  }
+  return { score: best, deg: bestDeg, site: at };
+}
+
+/**
  * The nearest massif to a point: where its summit is, how tall, how wide, and therefore the
  * steepest face it can have (1.54·h/r — see the header). tools/diag-relief.mjs reads this to
  * assert that the thing the player is being asked to drive towards is drivable, which is the

@@ -10,6 +10,27 @@
   --teal: #4e7f79;
   --rust: #c8503f;
   --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
+  /* THE COZY FACE — the wordmark's own font, and the only place in the game that differs from
+   * --serif above. Nothing is downloaded: every family named here ships with an OS (Cochin and
+   * Hoefler Text on macOS/iOS, Book Antiqua and Baskerville Old Face on Windows, Palatino
+   * Linotype everywhere else), so this costs zero bytes, zero requests and zero licence
+   * questions — there is no font file in this repo to record in docs/CREDITS.md. It is warmer,
+   * rounder and wider-countered than the --serif stack the instruments use, which is the whole
+   * point: the name should read like a book spine, the numbers like an instrument. --serif is
+   * kept as the last-resort tail so a machine with none of these still lands on the game's
+   * existing face rather than on Times. */
+  --cozy: Cochin, 'Hoefler Text', 'Book Antiqua', 'Baskerville Old Face', Baskerville, 'Palatino Linotype', Palatino,
+    'Iowan Old Style', Georgia, serif;
+  /* THE GROWING GREEN. Both straight out of src/core/palette.js so the wordmark is painted in
+   * the same pigments as the world behind it: --leaf is P.gTip (#c6d46b), the sunlit tip of
+   * every blade of grass in the game, bright enough to read over dark road; --leafDeep is
+   * P.cShade (#2f5546), the shadow side of the game's own pine canopy, dark enough to read
+   * over the loading card's warm cream. One green, two ends of the same ramp — no raw #00ff00
+   * anywhere. The deep one was MEASURED into place rather than chosen by eye: P.gLow, the
+   * first pick, computes to 4.47:1 against the loading card's lightest stop — under AA, and
+   * tools/diag-hud.mjs failed it. This one is 6.39:1. */
+  --leaf: #c6d46b;
+  --leafDeep: #2f5546;
 }
 
 * {
@@ -63,11 +84,20 @@ canvas {
   padding: 2rem 2.6rem;
   max-width: 30rem;
 }
+/* The loading card's wordmark — the first time the name is ever on screen, so it is the same
+ * name, the same face and the same slow grow as the in-game one below (#gameTitle). The GREEN
+ * is the deep end of the ramp here, not the bright one: this card sits on a warm cream sky
+ * gradient, and #c6d46b on #f3dfb4 is a smear. #2f5546 on it measures 6.39:1 — computed from
+ * the two hexes in tools/diag-hud.mjs, which fails under 4.5, not eyeballed. */
 #veil h1 {
+  font-family: var(--cozy);
+  color: var(--leafDeep);
   font-size: clamp(2.6rem, 8vw, 4.4rem);
   font-weight: 400;
   letter-spacing: 0.06em;
   line-height: 1;
+  transform-origin: center bottom;
+  animation: titleGrow 2.4s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 #veil .tag {
   margin-top: 0.5rem;
@@ -733,15 +763,59 @@ canvas {
  * already gets, at the cost of zero new transition/animation rules. The bottom clamp's minimum
  * (6rem) alone clears #place's tallest measured extent (4.86rem, at 1400/1024/1920-wide
  * viewports, biome font and offset both pinned to their own max clamp) with margin at every
- * viewport tools/diag-hud.mjs resolves geometry at, mobile included. */
+ * viewport tools/diag-hud.mjs resolves geometry at, mobile included.
+ *
+ * THE REBRAND LIVES HERE. "Cozy Driver", in the cozy face (--cozy), in the game's own grass
+ * green (--leaf = P.gTip), growing gently into place. Three deliberate refusals in that:
+ *
+ *   NO NEW OPACITY IN THE ANIMATION. `titleGrow` below animates transform and nothing else, and
+ *   this rule's own opacity is a flat 0.85 that never moves. A screenshot landing on an
+ *   arbitrary frame of a growing title must still show a lit, readable title — the same rule
+ *   `@keyframes streakBreathe` already follows, for the same reason (this game shipped
+ *   unplayable once because something on screen was "set" but not visible).
+ *
+ *   NO BOUNCE, NO POP. cubic-bezier(0.22, 1, 0.36, 1) is a pure ease-out: it decelerates into
+ *   1.0 and never passes it, so the wordmark grows and settles rather than springing. 2.4 s is
+ *   slow on purpose — it is still arriving while the player is still finding the throttle.
+ *
+ *   IT SCALES FROM 0.84, NOT FROM 0. A zero-scale box is a zero-size box, which is invisible by
+ *   every measure that matters; the first frame of this animation is already 84 % of a legible
+ *   wordmark. `both` holds that first frame before the animation starts and the last one after
+ *   it ends, so there is no unstyled flash at either edge.
+ *
+ * transform-origin is `left bottom` — the two edges it is anchored to — so growing moves it
+ * away from the screen corner and never back towards #place underneath it. */
 #gameTitle {
   position: absolute;
   left: clamp(1rem, 4vw, 3rem);
   bottom: clamp(6rem, 11vh, 7rem);
-  font-size: clamp(0.78rem, 1.8vw, 1rem);
+  font-family: var(--cozy);
+  color: var(--leaf);
+  font-size: clamp(0.95rem, 2.1vw, 1.3rem);
   letter-spacing: 0.14em;
-  opacity: 0.6;
+  opacity: 0.85;
   white-space: nowrap;
+  text-shadow: 0 1px 8px rgba(20, 34, 22, 0.6);
+  transform-origin: left bottom;
+  animation: titleGrow 2.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* One keyframe, shared with the loading card's own wordmark (#veil h1). Transform only —
+ * never opacity, never display, never a zero scale. */
+@keyframes titleGrow {
+  from {
+    transform: scale(0.84);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+/* Asked for stillness, given stillness: the name simply is where it belongs, at full size. */
+@media (prefers-reduced-motion: reduce) {
+  #gameTitle,
+  #veil h1 {
+    animation: none;
+    transform: none;
+  }
 }
 
 /* ── fleet unlock icons ──────────────────────────────────────────────────
@@ -840,4 +914,72 @@ canvas {
   border-radius: 6px;
   padding: 0.08rem 0.4rem;
   white-space: nowrap;
+}
+
+/* ── the start page: its own colour ───────────────────────────────────────
+ * "the start page needs a different theme color" — the operator. The Garage is the one surface
+ * in this game you look AT rather than glance at, and until now it was painted out of exactly
+ * the same three pots as the HUD you glance at: the same cream sheet, the same blue-grey ink,
+ * the same teal accent, over the same blue-grey scrim. It read as more HUD.
+ *
+ * So it gets its own pots. A GREEN-SIDE theme against the HUD's BLUE-SIDE one, drawn from the
+ * same src/core/palette.js the world is painted from, so the start page is unmistakably a
+ * different room without being a different game: the scrim goes deep woodland instead of
+ * blue-grey dusk, the sheet goes pale sage paper instead of cream, the ink goes forest instead
+ * of slate, and the accent goes grass green (--leafDeep = P.gLow) instead of teal — tying the
+ * page to the new wordmark growing green over the road behind it.
+ *
+ * HOW, AND WHY IT IS SHORT: the three custom properties are simply re-declared ON #menu. They
+ * cascade to every descendant, so every `var(--ink)` / `var(--cream)` / `var(--teal)` already
+ * written in the garage block hundreds of lines above picks up the new theme with no rule
+ * rewritten and no markup touched — a recolour, not a restructure, exactly as asked. Only the
+ * declarations that hardcoded a literal (the blue-grey rgba washes, the two #f6ecd8 texts,
+ * the scrim) are restated below, because a literal cannot inherit.
+ *
+ * LEGIBILITY IS MEASURED, NOT ASSUMED. Every text/background pair introduced here is fed
+ * through a real WCAG contrast computation in tools/diag-hud.mjs, which fails under 4.5:1:
+ * forest ink on sage paper 9.9:1, the green accent's cream label 5.0:1, the Drive button 9.9:1.
+ *
+ * NOTHING HERE HIDES ANYTHING — no display, no visibility, no opacity, no zero size, and in
+ * particular #menu's own `display` is not restated, so the `#menu[hidden] { display: none
+ * !important }` scar at the top of the garage block keeps winning and the Drive button keeps
+ * working. This block is colour and nothing else. */
+#menu {
+  --ink: #2c3d31;
+  --cream: #edf0dd;
+  --teal: #436e4f;
+  background: radial-gradient(135% 105% at 50% 4%, rgba(72, 104, 76, 0.5) 0%, rgba(34, 54, 42, 0.66) 55%, rgba(18, 30, 23, 0.78) 100%);
+}
+#menu .sheet {
+  background: rgba(237, 240, 221, 0.975);
+  box-shadow: 0 24px 70px rgba(12, 22, 16, 0.5), 0 0 0 1px rgba(108, 154, 71, 0.3);
+}
+/* The heading wears the wordmark's face and the wordmark's green — the one place the start
+ * page says out loud which game it belongs to. */
+#menu h2 {
+  font-family: var(--cozy);
+  color: var(--leafDeep);
+}
+#menu button,
+#menu .btn {
+  background: rgba(44, 61, 49, 0.08);
+  border: 1px solid rgba(44, 61, 49, 0.18);
+}
+#menu button:hover,
+#menu .btn:hover {
+  background: rgba(44, 61, 49, 0.16);
+}
+#menu button.on {
+  color: var(--cream);
+}
+#menu .foot {
+  border-top: 1px solid rgba(44, 61, 49, 0.16);
+}
+#menu .foot [data-act='close'] {
+  color: var(--cream);
+}
+#menu .keys kbd {
+  background: rgba(44, 61, 49, 0.09);
+  border: 1px solid rgba(44, 61, 49, 0.22);
+  border-bottom-width: 2px;
 }

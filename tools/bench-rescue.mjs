@@ -31,8 +31,54 @@ const DT = 1 / 60;
 
 /* A lake beside a road on the shipped seed. tools/diag-water.mjs proves no road is ever
  * underwater, so a lakeshore this close to tarmac is the exact place the rescue has to be
- * both present and invisible. */
-const LAKE = { x: 968, z: -160 };
+ * both present and invisible.
+ *
+ * FOUND BY SEARCH, not written down, and that change is the point rather than tidiness. This
+ * was the hard-coded pair (968, -160) — a real lakeside road on the shipped seed when it was
+ * written, and no longer a road at all: it was one of the causeways, and roads no longer run
+ * across open water (see world/roads.js's water cull, and tools/diag-causeway.mjs). The whole
+ * rig then quietly degenerated, because `T.roads.query` returns d = Infinity with qx/qz at
+ * their (0, 0) defaults when nothing is in range — so the car was placed at the origin,
+ * pointed at nothing, never got wet, and FOUR checks failed reporting "0.00 s" as though the
+ * rescue had stopped working. It had not; the fixture had.
+ *
+ * The rest of this file already searches for its own shelf point rather than naming one ("the
+ * only honest version of 'deliberately near a shoreline'"). Same discipline here: scan
+ * outward from the old point for a place that genuinely IS what the test needs — deep water
+ * with a road on the bank — so a future world change moves the fixture instead of silently
+ * hollowing it out. Deterministic: fixed scan order, first hit wins. */
+function findLakesideRoad() {
+  const scan = new Terrain(SEED, -3000, -3000, 3000, 3000, 240);
+  const w = new Float32Array(BIOME_COUNT);
+  const depth = (x, z) => {
+    const y = scan.height(x, z);
+    scan.weights(x, z, w);
+    const wy = waterLevelAt(w, y);
+    return wy === null ? 0 : wy - y;
+  };
+  /* A plain grid, then the qualifying point nearest the historical fixture. A radial sweep was
+   * tried first and is a bad shape for this: its angular spacing is metres at small radius and
+   * a hundred metres at large, so it walks straight past a shoreline that a uniform grid finds
+   * immediately. Nearest-to-(968,-160) rather than first-hit so the fixture stays as close to
+   * the site this file's recorded numbers were measured at as the world still allows. */
+  let best = null;
+  for (let z = -3500; z <= 3500; z += 25) {
+    for (let x = -3500; x <= 3500; x += 25) {
+      // Deep enough that driving in is unambiguous, with tarmac close enough to walk back to.
+      if (depth(x, z) < 1.5) continue;
+      const q = scan.roads.query(x, z);
+      if (!isFinite(q.d) || q.d > 45 || q.d < 12) continue;
+      // ...and the road itself must be dry, or this is a ford, not a bank.
+      if (depth(q.qx, q.qz) > 0) continue;
+      const dd = Math.hypot(x - 968, z + 160);
+      if (!best || dd < best.dd) best = { x, z, dd };
+    }
+  }
+  if (!best) throw new Error('bench-rescue: no lakeside road found in a 7 km square about the origin');
+  return { x: best.x, z: best.z };
+}
+const LAKE = findLakesideRoad();
+console.log(`lakeside road fixture: (${LAKE.x}, ${LAKE.z})`);
 const T = new Terrain(SEED, LAKE.x - 320, LAKE.z - 320, LAKE.x + 320, LAKE.z + 320, 240);
 const W = new Float32Array(BIOME_COUNT);
 const depthAt = (x, z) => {
