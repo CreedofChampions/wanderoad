@@ -633,7 +633,13 @@ export class Vehicle {
      * band the spring law already does the right thing: extension is negative compression and
      * pulls the body toward the road. A real jump clears 0.22 m almost immediately and still
      * flies. */
-    const airborne = gap > SUSPENSION.travel;
+    /* Over water the "ground" under the probe is the LAKE BED, and a wide grounded band lets
+     * the spring chase it downward — bench-boat's barrier let the car reach 1.13 m deep against
+     * its 1.0 m bar. The droop band is a hill-following fix; keep the old tight threshold
+     * wherever the surface is wet. `wetHere` is reused by the suction below. */
+    const _wy = surf && surf.w ? waterLevelAt(surf.w, surf.y) : null;
+    const wetHere = _wy !== null && _wy > surf.y;
+    const airborne = gap > (wetHere ? 0.06 : SUSPENSION.travel);
     this.onGround = !airborne;
 
     // Vertical: a spring to the ride height plus gravity, with the suspension travel
@@ -661,9 +667,7 @@ export class Vehicle {
        * the car down toward it — bench-boat measured the barrier letting the car reach 1.13 m
        * deep against its 1.0 m bar, where it was 0.97 m before. Suction exists to keep wheels
        * on a receding HILL, and a lake bed is not a hill. */
-      const wy = surf && surf.w ? waterLevelAt(surf.w, surf.y) : null;
-      const overWater = wy !== null && wy > surf.y;
-      if (gap < 1.2 && !overWater) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
+      if (gap < 1.2 && !wetHere) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
       this.vy -= g * dt;
     } else {
       this._airTime = 0;
