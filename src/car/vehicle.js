@@ -29,7 +29,7 @@ import {
   REVERSE,
 } from './tuning.js';
 import { clamp, clamp01, lerp, angleDelta, damp, hash2i } from '../core/math.js';
-import { BIOME } from '../world/biomes.js';
+import { BIOME, waterLevelAt } from '../world/biomes.js';
 
 /** Deterministic [-1,1] from a position — the bump field for loose surfaces. */
 const noiseAt = (x, z) => (hash2i(Math.round(x), Math.round(z), 0x5eed) / 4294967296) * 2 - 1;
@@ -657,7 +657,13 @@ export class Vehicle {
        * bounce cycles in 25 s). When the ground is CLOSE — a hop, not a launch — pull down
        * hard and immediately, fading to nothing by 1.2 m so a genuine crest jump still flies.
        * Cozy: downhill at speed should feel glued, not like a skipping stone. */
-      if (gap < 1.2) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
+      /* DRY GROUND ONLY. Over water the "ground" is the lake bed, and suction happily drags
+       * the car down toward it — bench-boat measured the barrier letting the car reach 1.13 m
+       * deep against its 1.0 m bar, where it was 0.97 m before. Suction exists to keep wheels
+       * on a receding HILL, and a lake bed is not a hill. */
+      const wy = surf && surf.w ? waterLevelAt(surf.w, surf.y) : null;
+      const overWater = wy !== null && wy > surf.y;
+      if (gap < 1.2 && !overWater) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
       this.vy -= g * dt;
     } else {
       this._airTime = 0;
