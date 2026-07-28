@@ -355,7 +355,13 @@ export const BIOME_SCATTER = [
   { trees: 26, rocks: 5, bushes: 16, reeds: 0, posts: 0.6, grass: 1.0, kinds: ['broadleaf', 'broadleaf', 'poplar'] }, // MEADOW
   { trees: 4.0, rocks: 8, bushes: 9, reeds: 0, posts: 0.9, grass: 0.72, kinds: ['acacia', 'scrub'] }, // STEPPE
   { trees: 18, rocks: 26, bushes: 6, reeds: 0, posts: 0.4, grass: 0.34, kinds: ['pine', 'pine', 'deadpine'] }, // HIGHLAND
-  { trees: 0.5, rocks: 10, bushes: 2, reeds: 0, posts: 0.25, grass: 0.06, kinds: ['palm', 'scrub'] }, // DUNES
+  /* DUNES grass is 0, not a token 6%. The blades are tinted from the STEPPE foliage colour
+   * (see GRASS_TINTS in render/grass.js — the instance carries three axes, not five weights,
+   * and dunes rides the dry axis alongside steppe), so a "barely any" 6% still read as green
+   * stubble poking out of the sand: "the dunes have grass growing out of them, which is really
+   * weird looking... green sticking through the bottom". A sand sea has no lawn. It keeps its
+   * scrub, palms, rocks and bushes, so the ground is still not bare. */
+  { trees: 0.5, rocks: 10, bushes: 2, reeds: 0, posts: 0.25, grass: 0.0, kinds: ['palm', 'scrub'] }, // DUNES
   { trees: 11, rocks: 2, bushes: 12, reeds: 34, posts: 1.2, grass: 0.8, kinds: ['willow', 'willow', 'broadleaf'] }, // WETLAND
 ];
 

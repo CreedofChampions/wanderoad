@@ -395,8 +395,42 @@ export class Cinematic {
       cam.updateProjectionMatrix();
     }
 
-    if (this.t >= this.duration) this._end();
+    /* The programme LOOPS rather than ending. The operator's ask is that the cinematic is what
+     * the game does when nobody is playing — so running out of shots is not a reason to hand a
+     * parked car back to the chase camera and sit there. It starts again instead, and the only
+     * thing that ever ends it is the player (skip(), from any key, button, tap or stick).
+     * `_loop()` restarts the programme in place rather than calling begin(), because begin()
+     * re-attaches the overlay and re-arms the watchdog that would then fire mid-loop. */
+    /* A SKIP MUST STILL END IT. skip() replaces the programme with a single ease-out shot and
+     * then relies on this very branch to finish; if the skipped case looped too, the ease would
+     * restart for ever and the cinematic could never be dismissed — an unskippable intro, which
+     * is the game being unplayable. Caught by testing skip at five different moments rather
+     * than by reading the diff. */
+    if (this.t >= this.duration) {
+      if (this.skipped) this._end();
+      else this._loop();
+    }
     return this._running;
+  }
+
+  /** Start the programme over, keeping the overlay and the skip hint exactly as they are. */
+  _loop() {
+    /* A degenerate programme (no terrain to scout, so every shot collapsed) would otherwise
+     * re-loop every single frame for ever. End instead — there is nothing to show. */
+    if (!(this.duration > 1)) {
+      this._end();
+      return;
+    }
+    this.t = 0;
+    this.shotIndex = -1;
+    this.loops = (this.loops || 0) + 1;
+    /* Re-arm the backstop for the new pass. Without this the watchdog set in begin() fires one
+     * programme-length after the FIRST pass and tears the cinematic down mid-loop — the exact
+     * "something outlives the loop that drives it" failure begin()'s own comment warns about. */
+    if (typeof setTimeout === 'function') {
+      if (this._watchdog) clearTimeout(this._watchdog);
+      this._watchdog = setTimeout(() => this._end(), (this.duration + 12) * 1000);
+    }
   }
 
   /**
@@ -1010,11 +1044,15 @@ function pickMode() {
     /* no location — a node harness */
   }
   if (forced === 'full' || forced === 'short' || forced === 'off') return forced;
-  try {
-    return localStorage.getItem(SEEN_KEY) ? 'short' : 'full';
-  } catch {
-    return 'full';
-  }
+  /* Always the full programme, every visit. It used to be full-on-first-visit and the closing
+   * shot thereafter, on the reasoning that nobody wants to sit through an intro twice — but the
+   * operator asked for the opposite and the opposite is right for this game: "it should
+   * actually be in cinematic mode whenever you're not playing... it should start in cinematic
+   * mode and remain there until you move a key or do anything." The cinematic is the game's
+   * idle state, not its title card. It costs the player nothing, because ANY input ends it
+   * instantly and the frame loop was never blocked by it in the first place.
+   * `?intro=short` and `?intro=off` still override, which is how you skip it permanently. */
+  return 'full';
 }
 
 function rememberSeen() {
