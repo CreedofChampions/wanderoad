@@ -57,6 +57,8 @@ const LOAD = (1 - IDLE - DRAG) / CRUISE_THROTTLE;
 const REFILL_SECONDS = 5.0;
 /** You are refuelling if you are this slow, this close to the pumps. */
 const REFUEL_SPEED = 1.6;
+/** How near a pump counts as 'at the pump' — generous on purpose, see its use below. */
+export const REFUEL_RADIUS = 26;
 /** How long the engine takes to die once the tank is empty. Coughing, not a switch. */
 const DRY_FADE = 6.0;
 /** Once you have actually stopped, how long before someone comes past. */
@@ -474,7 +476,10 @@ export class Fuel {
      * also what makes the state stable — an earlier version let the idle burn nibble the
      * tank the instant it hit full, which put it back below the "needs filling" line on the
      * very next frame and counted 104 separate visits to one petrol station. */
-    const atPump = !!this.nearest && this.nearest.dist <= STATION_RADIUS && speed <= REFUEL_SPEED;
+    /* Operator: "Large range for gas station so you can be NEAR to fill". STATION_RADIUS (11 m)
+     * is the APRON, so you had to stop almost on the pump island. 26 m lets you pull up
+     * anywhere on the forecourt, or on the verge beside it, and still fill. */
+    const atPump = !!this.nearest && this.nearest.dist <= REFUEL_RADIUS && speed <= REFUEL_SPEED;
     if (atPump) {
       // Full is relative to the tank's OWN current capacity, same reasoning as the can top-up
       // above: an upgraded tank fills all the way to its own, bigger, maximum.

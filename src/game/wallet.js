@@ -18,7 +18,9 @@
 import { cheatOn } from './garage.js';
 
 /** Coins needed to earn the boat outright. */
-export const BOAT_UNLOCK_COINS = 500;
+/* 50, not 500. Coins are now ~1 per kilometre (see world/loot.js), so 500 was a 500 km
+ * errand — the operator's own number for the boat is 50. */
+export const BOAT_UNLOCK_COINS = 50;
 
 /** How rarely a dirty wallet is actually written to localStorage, seconds — see update(). */
 const SAVE_INTERVAL = 2;

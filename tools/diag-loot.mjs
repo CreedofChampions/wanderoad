@@ -107,7 +107,7 @@ for (const pick of route) {
 const coinsPerKm = routeM > 0 ? coinCount / (routeM / 1000) : 0;
 console.log(`  ${(routeM / 1000).toFixed(1)} km of real connected arterial (${HOPS} hops)`);
 console.log(`  ${coinCount} coins in ${clusterSet.size} clusters — ${coinsPerKm.toFixed(1)} coins/km`);
-console.log(`${check(coinsPerKm >= 15 && coinsPerKm <= 45, `coins/km ${coinsPerKm.toFixed(1)} outside [15, 45]`)}  coins/km within [15, 45]\n`);
+console.log(`${check(coinsPerKm >= 0.5 && coinsPerKm <= 2.5, `coins/km ${coinsPerKm.toFixed(1)} outside [0.5, 2.5]`)}  coins/km within [0.5, 2.5]\n`);
 
 /* ── 2. gems over a real 6 km square ────────────────────────────────────────── */
 console.log('--- 2. gems over a 6 km square ---');

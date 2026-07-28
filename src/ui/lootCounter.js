@@ -24,6 +24,12 @@ const CSS = `
   color:#F6ECD8; text-shadow:0 1px 3px rgba(28,34,48,.55);
 }
 #lootCounter .row{ display:flex; justify-content:flex-end; gap:.7em; letter-spacing:.02em; font-variant-numeric:tabular-nums; }
+/* The 🪙 glyph renders as tofu on Windows (playtest report) — a small painted disc in CSS
+ * reads the same everywhere. NO EMOJI: the operator's Windows 10 renders none of these
+ * glyphs in this font stack, so they showed as nothing at all. Plain words instead;
+ * they were reported rendering fine. */
+#lootCounter .coinIcon{ display:inline-block; width:.9em; height:.9em; border-radius:50%;
+  background:radial-gradient(circle at 34% 30%, #E0B14E, #8A6B2A); vertical-align:middle; }
 #lootCounter .track{ margin-top:.35em; height:4px; border-radius:2px; background:rgba(246,236,216,.22); overflow:hidden; }
 #lootCounter .fill{ height:100%; min-width:3px; width:0%; background:#93B84E; border-radius:2px; transition:width .4s ease; }
 #lootCounter.unlocked .fill{ background:#E0B14E; }
@@ -48,9 +54,11 @@ export class LootCounter {
     const row = document.createElement('div');
     row.className = 'row';
     this.coinEl = document.createElement('span');
-    this.coinEl.textContent = '🪙 0'; // resting value — never blank, see hud.js's own note
+    // The coin glyph is a CSS disc, not text — see the .coinIcon rule above — so this is
+    // innerHTML, not textContent; resting value 0, never blank, see hud.js's own note.
+    this.coinEl.innerHTML = '<span class="coinIcon"></span> 0';
     this.gemEl = document.createElement('span');
-    this.gemEl.textContent = '💎 0';
+    this.gemEl.textContent = 'gems 0';
     row.appendChild(this.coinEl);
     row.appendChild(this.gemEl);
     this.root.appendChild(row);
@@ -82,11 +90,11 @@ export class LootCounter {
   update(dt, wallet) {
     if (wallet.coins !== this._coins) {
       this._coins = wallet.coins;
-      this.coinEl.textContent = `🪙 ${wallet.coins}`;
+      this.coinEl.innerHTML = `<span class="coinIcon"></span> ${wallet.coins}`;
     }
     if (wallet.gems !== this._gems) {
       this._gems = wallet.gems;
-      this.gemEl.textContent = `💎 ${wallet.gems}`;
+      this.gemEl.textContent = `gems ${wallet.gems}`;
     }
     const unlocked = wallet.boatUnlocked;
     const pct = unlocked ? 100 : Math.min(100, (wallet.coins / BOAT_UNLOCK_COINS) * 100);
@@ -94,7 +102,7 @@ export class LootCounter {
     if (unlocked !== this._unlocked) {
       this._unlocked = unlocked;
       this.root.classList.toggle('unlocked', unlocked);
-      this.cap.textContent = unlocked ? '⛵ boat unlocked' : `boat at ${BOAT_UNLOCK_COINS}`;
+      this.cap.textContent = unlocked ? 'boat unlocked' : `boat at ${BOAT_UNLOCK_COINS}`;
     }
   }
 

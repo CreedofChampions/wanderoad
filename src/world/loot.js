@@ -97,17 +97,20 @@ function atArc(e, cum, s, out) {
 const SALT_COIN = 0x434f4931; // 'COI1'
 
 /** Candidate slot every this many metres of road arc. */
-export const COIN_SLOT = 64;
+/* One coin per kilometre of road, not twenty-six. Operator: "Coins -- 1 per km max".
+ * Expected coins per metre = (P / SLOT) * mean(cluster). At 64 m / 0.42 / 3-5 that was
+ * 0.026/m = 26 per km. At 620 m / 0.62 / 1 it is 0.0010/m = ~1.0 per km. */
+export const COIN_SLOT = 620;
 /** Accept probability per slot — a single scalar, not tiered like the props/cans arrays,
  *  because coins are meant to be everyday and equally likely on a lane or an arterial. */
-export const COIN_SLOT_P = 0.42;
+export const COIN_SLOT_P = 0.62;
 /** Metres above the road surface a coin's origin sits at — render/loot.js blits the geometry
  *  at this height above the ground-contact point, the same "hover is a fixed constant, not
  *  part of placement" rule world/props.js's floating can uses. */
 export const COIN_HOVER = 0.6;
 /** A cluster is this many coins, inclusive. */
-export const COIN_CLUSTER_MIN = 3;
-export const COIN_CLUSTER_MAX = 5;
+export const COIN_CLUSTER_MIN = 1;
+export const COIN_CLUSTER_MAX = 1;
 /** Metres between coins in a cluster, measured along the road's own tangent. */
 export const COIN_SPACING = 7;
 /** How far a coin may wander off the centreline, as a fraction of the carriageway's own half

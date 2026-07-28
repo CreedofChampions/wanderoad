@@ -612,7 +612,15 @@ export function buildJunction(c, seed) {
   const reach = halfAlongMajor + halfAlongMinor + GIVE_WAY_GAP + GIVE_WAY_THICK + major.width + 4;
 
   const terr = new Terrain(s, c.x - reach, c.z - reach, c.x + reach, c.z + reach, 48);
-  const h = (x, z) => terr.height(x, z) + JUNCTION_LIFT;
+  /* PER-JUNCTION LIFT, so two patches that overlap cannot z-fight. Operator: "junction CANNOT
+   * have 2 groups of overlapping stripes at same lvel flashing back between each other" — that
+   * flashing is two junction overlays occupying the SAME plane, which happens wherever two
+   * crossings fall close enough for their (now angle-stretched) footprints to overlap. A
+   * deterministic sub-millimetre stagger keyed off the junction's own position breaks the tie
+   * without moving the surface anywhere the car or the eye can tell: 8 steps of 0.4 mm, always
+   * the same value for the same junction, so it is stable frame to frame and across clients. */
+  const tie = ((Math.abs(Math.round(c.x) * 73856093 ^ Math.round(c.z) * 19349663) >>> 0) % 8) * 0.0004;
+  const h = (x, z) => terr.height(x, z) + JUNCTION_LIFT + tie;
 
   const position = [];
   const normal = [];

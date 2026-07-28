@@ -133,7 +133,12 @@ export const TERRAINS = {
      * opens on high ground with the massifs around you instead of on the flattest valley
      * pocket. Water-safety and the grade gate are unchanged — see the findSpawn header.
      * Only this preset sets it; the other five spawn exactly as before. */
-    spawnHigh: 1,
+    /* Operator: "start people in snow". The terrain shader's snow line ramps in over
+     * 120-240 m of altitude (render/terrainMaterial.js), so a spawn has to clear ~240 m to
+     * open ON snow rather than merely near it. 1 was already "prefer high ground"; 2.4 makes
+     * altitude dominate the spawn score outright, which on alpine's 1.7x peaks lands the car
+     * up in the white. */
+    spawnHigh: 2.4,
   },
   plains: {
     label: 'Plains',
