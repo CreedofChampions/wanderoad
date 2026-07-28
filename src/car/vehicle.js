@@ -29,7 +29,7 @@ import {
   REVERSE,
 } from './tuning.js';
 import { clamp, clamp01, lerp, angleDelta, damp, hash2i } from '../core/math.js';
-import { BIOME, waterLevelAt } from '../world/biomes.js';
+import { BIOME } from '../world/biomes.js';
 
 /** Deterministic [-1,1] from a position — the bump field for loose surfaces. */
 const noiseAt = (x, z) => (hash2i(Math.round(x), Math.round(z), 0x5eed) / 4294967296) * 2 - 1;
@@ -637,8 +637,6 @@ export class Vehicle {
      * the spring chase it downward — bench-boat's barrier let the car reach 1.13 m deep against
      * its 1.0 m bar. The droop band is a hill-following fix; keep the old tight threshold
      * wherever the surface is wet. `wetHere` is reused by the suction below. */
-    const _wy = surf && surf.w ? waterLevelAt(surf.w, surf.y) : null;
-    const wetHere = _wy !== null && _wy > surf.y;
     /* REVERTED to the original tight threshold. Widening it to the full droop band fixed the
      * bounce but let the spring chase the LAKE BED wherever the water test could not see the
      * water — bench-boat's fixture surface has no biome-weight array, so the dry/wet gate
@@ -673,7 +671,12 @@ export class Vehicle {
        * the car down toward it — bench-boat measured the barrier letting the car reach 1.13 m
        * deep against its 1.0 m bar, where it was 0.97 m before. Suction exists to keep wheels
        * on a receding HILL, and a lake bed is not a hill. */
-      if (gap < 1.2 && !wetHere) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
+      /* Only a brief HOP, never a sustained fall — and gated on AIRTIME, not on a surface
+       * field. Descent pogo is a rapid series of sub-third-of-a-second hops; sinking into
+       * water is one long descent. An earlier version gated this on a dry/wet test read from
+       * the surface's biome weights, which the boat fixture does not supply, so it silently
+       * read "dry" and drove the car to the lake bed. Airtime is always available. */
+      if (gap < 1.2 && this._airTime < 0.35) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
       this.vy -= g * dt;
     } else {
       this._airTime = 0;
