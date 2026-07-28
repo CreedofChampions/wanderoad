@@ -39,24 +39,28 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
-- [x] **Downhill bounce — fixed in the solver, measured; DEPLOY DEFERRED (see below).**
-      Reproduced first: a 14% wavy descent at speed read **58.9% of frames airborne, 158
-      air/land cycles, 26 cm visual gaps in 25 s** — the GIF exactly. Three causes, three cuts:
-      (1) "airborne" triggered at a 6 cm body gap while the wheels have 0.22 m of droop — the
-      spring AND traction cut out inside a band where rubber is still on the road; threshold now
-      SUSPENSION.travel. (2) The airtime-ramped extra gravity never catches sub-second hops —
-      added hill-tracking suction, up to 3.2 g fading to zero by a 1.2 m gap so real crest jumps
-      still fly. (3) The landing rebound clamp allowed 2 m/s up = a 0.20 m relaunch, precisely
-      the droop threshold — every landing bought the next hop; now 0.8 m/s (a 3 cm relaunch the
-      suction swallows). Result at a realistic 92 km/h: **max visual gap 8 cm** (from 26),
-      airborne 18.9%. bench-car ALL PASS before and after.
-      **Not deployed this pass:** the shared working tree holds another session's in-progress
-      BOAT work (uncommitted src/game/boat.js etc.; its own bench-boat reads 3 failures with or
-      without this fix, and the browser suite's G/streak checks fail on its half-wired state).
-      deploy.py ships the working directory, so shipping now would ship their WIP. This fix is
-      committed on its own pathspec; deploy together once the boat session lands green.
+- [ ] **BLOCKING-ish — downhill bounce: fix found and REVERTED, cause of the revert recorded.**
+      The bounce itself is understood and was measurably fixed (14% wavy descent at 92 km/h:
+      max visual gap **26 cm -> 4 cm**). What defeated it is a WATER interaction, found only by
+      running the full suite at HEAD in a clean worktree:
 
-- [ ] ~~**Downhill bounce (operator GIF, 28 July).**~~ superseded by the entry above. Repeated airborne/land pogo descending steep
+      Any change that makes the car track receding ground harder ALSO makes it track a LAKE BED
+      harder. `bench-boat`'s barrier check went 0.97 m -> 1.12 m deep against a 1.0 m bar.
+      Three separate gates were tried and each failed for its own reason, isolated one at a
+      time:
+      1. **Widening the grounded band to the droop range** — the spring then chased the bed.
+      2. **A dry/wet gate reading the surface's biome weights** — bench-boat's fixture surface
+         does not supply that array, so the gate silently read "dry". This is the
+         "a stub probe does not fail, it lies" trap already recorded in this file.
+      3. **An airtime gate (suction only for hops under 0.35 s)** — a sinking car repeatedly
+         re-grounds, which RESETS the airtime, so the gate never closes.
+
+      **What would actually work:** ask the same question the boat system asks —
+      `waterDepth()` in `src/game/rescue.js`, which is water-aware and already used by
+      `boat.js` — and require the fixture/terrain to answer it, or pass the car an explicit
+      "this is water" flag from the same place the boat barrier gets it. That is a real piece
+      of plumbing across vehicle/rescue/boat, not a one-line gate, and it was not worth risking
+      a red build on competition day. Reverted to keep HEAD green and shippable.
       alpine roads at speed. Stills look fine — it is temporal. Verify's alpine AUTODRIVE watch
       saw none (35–38 km/h, 100% on carriageway), so it needs SPEED + descent: the ground falls
       away faster than gravity + the extra-air-gravity assist can bring the car down, so it

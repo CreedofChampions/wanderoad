@@ -623,26 +623,6 @@ export class Vehicle {
     const bodyLow = -halfTOut * sinTip - roofOut * Math.max(0, -cosTip); // <= 0, 0 when tip=0
     const rideYTip = rideY - bodyLow; // rises as the body rotates away from flat
     const gap = this.y - rideYTip;
-    /* Airborne means BEYOND WHEEL DROOP, not a 6 cm body gap. The suspension has 0.22 m of
-     * travel, so with the body up to `travel` above ride height the wheels are still on the
-     * road — extended, pulling the body down, gripping. The old 0.06 threshold cut the spring
-     * AND traction inside that band, and on a fast descent the ground recedes through exactly
-     * that range, so the car cycled airborne/landed for over half of every second — measured
-     * 58.9% of frames airborne, 158 bounce cycles and 26 cm of visual gap in a 25 s alpine
-     * descent at 137 km/h, which is the operator's "bouncing down hill" GIF. Inside the droop
-     * band the spring law already does the right thing: extension is negative compression and
-     * pulls the body toward the road. A real jump clears 0.22 m almost immediately and still
-     * flies. */
-    /* Over water the "ground" under the probe is the LAKE BED, and a wide grounded band lets
-     * the spring chase it downward — bench-boat's barrier let the car reach 1.13 m deep against
-     * its 1.0 m bar. The droop band is a hill-following fix; keep the old tight threshold
-     * wherever the surface is wet. `wetHere` is reused by the suction below. */
-    /* REVERTED to the original tight threshold. Widening it to the full droop band fixed the
-     * bounce but let the spring chase the LAKE BED wherever the water test could not see the
-     * water — bench-boat's fixture surface has no biome-weight array, so the dry/wet gate
-     * silently read "dry" and the car sank to 1.13 m against a 1.0 m bar. A gate that depends
-     * on a field a caller may not supply is the "stub probe lies" trap this repo has paid for
-     * before. The suction and rebound-clamp below carry the bounce fix on their own. */
     const airborne = gap > 0.06;
     this.onGround = !airborne;
 
@@ -660,23 +640,6 @@ export class Vehicle {
         const k = clamp01((this._airTime - AIR.extraDelay) / AIR.extraRamp);
         g += AIR.gravity * lerp(AIR.extraMin, AIR.extraMax, k) * A.airborne;
       }
-      /* Hill-tracking suction. The extra gravity above ramps in over airtime, which is right
-       * for a real jump and useless against descent pogo: on a fast downhill the ground
-       * recedes faster than even doubled gravity, so the car hops for ever in sub-second
-       * cycles the ramp never catches (measured: widening the droop band alone still left 66
-       * bounce cycles in 25 s). When the ground is CLOSE — a hop, not a launch — pull down
-       * hard and immediately, fading to nothing by 1.2 m so a genuine crest jump still flies.
-       * Cozy: downhill at speed should feel glued, not like a skipping stone. */
-      /* DRY GROUND ONLY. Over water the "ground" is the lake bed, and suction happily drags
-       * the car down toward it — bench-boat measured the barrier letting the car reach 1.13 m
-       * deep against its 1.0 m bar, where it was 0.97 m before. Suction exists to keep wheels
-       * on a receding HILL, and a lake bed is not a hill. */
-      /* Only a brief HOP, never a sustained fall — and gated on AIRTIME, not on a surface
-       * field. Descent pogo is a rapid series of sub-third-of-a-second hops; sinking into
-       * water is one long descent. An earlier version gated this on a dry/wet test read from
-       * the surface's biome weights, which the boat fixture does not supply, so it silently
-       * read "dry" and drove the car to the lake bed. Airtime is always available. */
-      if (gap < 1.2 && this._airTime < 0.35) g += AIR.gravity * 3.2 * (1 - gap / 1.2);
       this.vy -= g * dt;
     } else {
       this._airTime = 0;
@@ -691,15 +654,7 @@ export class Vehicle {
       const springA = (SUSPENSION.stiffness * 4 * compression) / this.mass;
       const dampA = (SUSPENSION.damping * 4 * -this.vy) / this.mass;
       this.vy += (springA + dampA - g) * dt;
-      /* A landing must not launch the car back up. 2 m/s of allowed rebound re-launches to
-       * v^2/2g = 0.20 m — precisely the droop threshold — so descent hops were self-sustaining:
-       * every landing bought the next take-off. 0.8 m/s re-launches 3 cm, which the suction
-       * band swallows. Crest LAUNCHES are unaffected: they carry ground-shape velocity upward
-       * before contact ends, not spring rebound after it resumes. */
-      /* 2 m/s, restored. Cutting this to 0.8 helped the descent pogo but also stopped the car
-       * rebounding out of WATER, so the boat barrier let it reach 1.12 m deep against a 1.0 m
-       * bar. The airtime-gated suction above fixes the bounce without touching the rebound a
-       * landing (or a splash) is allowed. */
+      // A landing must not launch the car back up: kill upward rebound above 2 m/s.
       if (this.vy > 2) this.vy = 2;
     }
     this.y += this.vy * dt;
