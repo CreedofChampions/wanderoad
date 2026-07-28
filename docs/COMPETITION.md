@@ -17,7 +17,22 @@ written to spec and has never been deployed. `docs/BACKEND.md` has said so since
 > **written to spec, never deployed** — `base44 login` is a device-code flow that has not been
 > completed on this machine
 
-`npx base44 whoami` hangs with no output, which is that same unfinished login.
+Confirmed by running it. `npx base44 whoami` prints:
+
+```
+You need to login first to continue.
+Generating device code...
+Verification code: VLVL-VNGN
+Please confirm this code at: https://app.base44.com/login/device
+Waiting for authentication...
+Error: Authentication failed
+Error: Authentication timed out. Please try again.
+```
+
+So the CLI is working correctly and is simply unauthenticated — it issues a device code, waits
+for a human to approve it in a browser, and times out when nobody does. (That particular code has
+since expired; `login` will issue a fresh one.) Note it exits with status **0** even on the
+timeout, so a script cannot infer success from the exit code here — read the output.
 
 The game currently runs live on the PHP mirror at `https://crumbtown.org/wanderoad/`. That is a
 complete, working backend implementing the identical `/drive` contract — but it is **not Base44**,
@@ -29,9 +44,10 @@ and "runs on a Base44 backend" is the one hard entry requirement.
 npx base44 login
 ```
 
-That opens a device-code flow — a code to approve in a browser, signed in as whichever account
-should own the entry. I will not do this: it is an authentication step, and entering credentials
-or approving an account grant on someone's behalf is a line I don't cross even when asked.
+It prints a verification code and a URL (`https://app.base44.com/login/device`). Open the URL,
+signed in as whichever account should own the entry, and approve the code — it expires quickly,
+so do the two steps back to back. I will not do this: it is an authentication step, and approving
+an account grant on someone's behalf is a line I don't cross even when asked.
 
 Then:
 
