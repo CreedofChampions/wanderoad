@@ -39,6 +39,69 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
+### Playtest round 3 — from the operator's own screenshots, 27 July
+
+Everything here was READ OFF REAL SCREENSHOTS he sent, not inferred. Each is its own
+checkpoint and ships on its own.
+
+- [ ] **BLOCKING-ish — roads end in the middle of nowhere.** Reported twice now, and a
+      screenshot pins it: a paved spur with a proper painted give-way bar simply STOPS in open
+      grass, going nowhere. The likeliest source given what landed recently is the station
+      ACCESS SPUR — a spur whose station failed its placement tests (grade, water, freeboard)
+      would leave the spur behind with nothing on the end of it. Check that the spur is only
+      ever built when its station is, and that lattice leaf-node dead ends (which are legitimate
+      by construction — a hashed lattice always has some) are visually terminated rather than
+      just stopping mid-carriageway. Autopilot already refuses to drive off a road end; this is
+      the WORLDGEN half of the same complaint.
+
+- [ ] **A station "town" with no road to it.** Screenshot: pumps, canopy, buildings, poles and a
+      parked truck sitting in open grassland, with the nearest road far off to one side and no
+      connection at all. So the access-spur work does not cover every station. Same root area as
+      the item above and probably the same fix — but confirm, do not assume.
+
+- [ ] **Roads run straight through open water as causeways.** Screenshot: a two-lane road
+      crossing a large lake with water on both horizons. `diag-water.mjs` reports 0 underwater
+      road samples and is RIGHT — the road is correctly lifted clear — but "not underwater" is
+      not the same as "sensible". The operator: *"we should have roads that go around the lake,
+      not through it necessarily... in the wetlands we could still continue to go through, but
+      the way we're doing it now is not correct."*
+      So: route arterials AROUND large water bodies, keep causeways for the wetland biome where
+      they read as correct. Note the recorded history before attempting it — terrain-aware
+      routing was tried once and reverted for making cliffs worse (0.029% to 0.071%) and tripling
+      build time. Routing around water is a different objective from routing around slope, but
+      the cost model is the same and the same trap is available.
+
+- [ ] **A station forecourt built at the very edge of the water,** with the apron running right
+      down into a lake. Station placement checks grade, water and freeboard at the forecourt
+      centre; it evidently does not check the whole apron footprint.
+
+- [ ] **Objects fall from the sky as they spawn.** Operator, verbatim: *"I see objects spawning
+      by falling from the sky!"* Props/scatter are presumably being instanced at a height and
+      then settling, or being placed before their ground height is known. Placement is supposed
+      to be deterministic and grounded (the props work measured "0.000 m of float"), so either
+      that guarantee does not hold for every kind, or something is animating them in. Find which.
+
+- [ ] **Grass grows through the station forecourt and the tarmac apron.** Visible in two
+      separate shots. The grass system knows about roads (`W2` asserts 118/118 centreline samples
+      report on-road) but evidently not about station aprons or prop footprints.
+
+### Playtest round 3 — new features asked for
+
+- [ ] **Sand particle spray when you go off-road**, to make it obvious you should not be there.
+- [ ] **Birds — seagulls — around the map**, especially near water.
+- [ ] **Fuel cans and trash cans: bigger, and glowing,** so they are not missed.
+- [ ] **A positive pick-up sound when you collect a fuel can**, crystal clear.
+      **CREDENTIALS NOTE:** the operator offered API keys for a sound-effects service, stored in
+      his password manager. I will not open the password manager or handle those keys — that is
+      a hard line regardless of who offers, and it is not needed here: this project already
+      synthesises all of its audio in the WebAudio graph (the radio and engine are both
+      generative and unlicensed), so a pick-up chime should be synthesised the same way. Zero
+      licence exposure, zero credentials, and it matches the existing sound design.
+
+- [ ] **Day/night cycle.** Operator asked for this to be PLANNED with Fable and IMPLEMENTED with
+      Sonnet 5. Not started — it is queued behind the bugs above deliberately, since a lighting
+      change touches every shader in the game and the current build is green.
+
 - [x] **CP1 — dunes now actually look like a desert.** The operator asked for "a new desert
       theme"; the terrain SHAPE and the off-road sand physics shipped, but the COLOUR never did.
       Measured on screen at 89% dunes weight, beside the car: **(139,138,93)** — olive dry grass.
