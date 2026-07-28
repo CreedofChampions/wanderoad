@@ -39,7 +39,24 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
-- [ ] **Downhill bounce (operator GIF, 28 July).** Repeated airborne/land pogo descending steep
+- [x] **Downhill bounce — fixed in the solver, measured; DEPLOY DEFERRED (see below).**
+      Reproduced first: a 14% wavy descent at speed read **58.9% of frames airborne, 158
+      air/land cycles, 26 cm visual gaps in 25 s** — the GIF exactly. Three causes, three cuts:
+      (1) "airborne" triggered at a 6 cm body gap while the wheels have 0.22 m of droop — the
+      spring AND traction cut out inside a band where rubber is still on the road; threshold now
+      SUSPENSION.travel. (2) The airtime-ramped extra gravity never catches sub-second hops —
+      added hill-tracking suction, up to 3.2 g fading to zero by a 1.2 m gap so real crest jumps
+      still fly. (3) The landing rebound clamp allowed 2 m/s up = a 0.20 m relaunch, precisely
+      the droop threshold — every landing bought the next hop; now 0.8 m/s (a 3 cm relaunch the
+      suction swallows). Result at a realistic 92 km/h: **max visual gap 8 cm** (from 26),
+      airborne 18.9%. bench-car ALL PASS before and after.
+      **Not deployed this pass:** the shared working tree holds another session's in-progress
+      BOAT work (uncommitted src/game/boat.js etc.; its own bench-boat reads 3 failures with or
+      without this fix, and the browser suite's G/streak checks fail on its half-wired state).
+      deploy.py ships the working directory, so shipping now would ship their WIP. This fix is
+      committed on its own pathspec; deploy together once the boat session lands green.
+
+- [ ] ~~**Downhill bounce (operator GIF, 28 July).**~~ superseded by the entry above. Repeated airborne/land pogo descending steep
       alpine roads at speed. Stills look fine — it is temporal. Verify's alpine AUTODRIVE watch
       saw none (35–38 km/h, 100% on carriageway), so it needs SPEED + descent: the ground falls
       away faster than gravity + the extra-air-gravity assist can bring the car down, so it
