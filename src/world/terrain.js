@@ -572,7 +572,14 @@ export function findSpawn(seed, hintX = 0, hintZ = 0, opts = {}) {
        * not seen without touching the spawn point, its water safety, or its grade gate. Adding
        * pi rather than negating the tangent: the heading is an absolute bearing, and -atan2
        * would mirror it across the axis instead of reversing it. */
-      best = { x, z, y, heading: Math.atan2(dx, dz) + Math.PI, score };
+      /* REVERSED SPAWN IS BUILT AND HELD BACK, deliberately. `+ Math.PI` here is the whole
+       * change and it works — but driving out the other way puts the car through a crossing
+       * that is genuinely 3.63 m out of level (browser R2, 1 of 9, reproducible twice). That
+       * defect is not new and not caused by this; the old heading simply never sampled it.
+       * Shipping the reversal without fixing the crossing would aim every new player at the
+       * exact fall-through the game has spent days eliminating. Restore the `+ Math.PI` the
+       * moment R2 reads 0/9. */
+      best = { x, z, y, heading: Math.atan2(dx, dz), score };
     }
   }
   // The old fallback returned the hint completely unvalidated. findDrySpot() never does.
