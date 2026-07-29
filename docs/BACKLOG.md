@@ -39,6 +39,59 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
+### Two roads leave the same node in the same direction (the braided-carriageway look)
+
+The operator's screenshot `i.imgur.com/oU5myVN.png` — three carriageways running side by side
+with their centre lines crossing each other. MEASURED over a 12 km box on three seeds
+(a throwaway script under D:/OpenClaw/tmp did it; fold it into a real diag when
+this is picked up):
+
+    seed 20260726: 371 nodes, 555 approach pairs, 189 leave within 26 deg of each other (34.1%), worst 180.0
+    seed 7:        444 nodes, 747 pairs,          242 (32.4%), worst 180.0
+    seed 424242:   354 nodes, 502 pairs,          169 (33.7%), worst 179.9
+
+The lattice is innocent: the straight lines between node centres are well spread. It is the
+curvature (`swing`/`curve`) whipping a tangent round near the node that lands two edges on top
+of each other.
+
+CULLING IS NOT THE FIX, and this was measured rather than assumed. A rule that deletes the
+junior of any pair leaving within N degrees:
+
+    N = 6 deg  -> 45 arterials (from 74), 258 km (from 428)
+    N = 10     -> 41, 248 km
+    N = 18     -> 39, 239 km
+    N = 26     -> 39, 235 km   (crossings 175 -> 18, mean 3.89 deg, worst 13.5)
+
+i.e. it fixes the angles perfectly and costs 45% of the network's length. An empty world is a
+worse game than a badly-shaped junction.
+
+The fix is to SPREAD THE DEPARTURE TANGENTS at the node — the same machinery `squareCrossings`
+uses mid-span, applied at the endpoint — which is also literally what the operator asked for:
+"when they get near each other they turn into each other and then a template for a road
+junction is used to connect them". Untried.
+
+### Severity-first window allocation in squareCrossings — TRIED, REVERTED, with numbers
+
+The surviving hypothesis from the earlier five was that `if (kc <= cursor) continue` skips a
+crossing outright when a milder neighbour has already eaten the room. It does. Allocating the
+window worst-first and applying left-to-right afterwards was built and measured:
+
+    4 km box:  16 crossings mean 14.68 worst 45.2  ->  22 crossings mean 11.02 worst 45.2
+    12 km box: 175 / 16.48 / 82.55                 -> 225 / 17.18 / 83.94
+
+The 4 km mean improves a lot; the 12 km box gets WORSE because bending harder creates new
+crossings (175 -> 225). Net negative on the headline numbers, so it is not kept. If the
+departure-spread work above lands first, this is worth re-measuring on top of it.
+
+### Coincident lattice nodes (lane cell 600, every 3rd lane node = the arterial node) — TRIED, REVERTED
+
+    12 km box: 498 crossings, mean 37.88 deg, worst 89.3
+
+Far worse, and instructively so: coincident nodes make lane edges run ON TOP of arterial edges,
+which produces near-parallel "crossings" everywhere. This is the same defect as the departure
+spread above, arrived at from the other direction.
+
+
 - [ ] **90-degree junctions: FIVE hypotheses falsified with numbers. Read this before trying a
       sixth.** The operator: "When 2 roads get close they need to start to connect via a 90
       degree junction not like part into each other -- that way its 1 template that just works
