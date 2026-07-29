@@ -1263,24 +1263,60 @@ async function main() {
       await reset();
       onRoadTop = await roadRunUp(8000);
     }
+    /* Getting genuinely off-road, and PROVING the leg stayed off-road.
+     *
+     * The old version walked 20 m at a time along the car's heading until the road query said
+     * "more than 60 m away", placed the car there and drove for eight seconds — then sampled
+     * onRoad ONCE, at the end. Two ways that lies, and both were observed: the walk aims along
+     * the car's own heading, which after a road run-up points down the road, so it can step
+     * along a curve and land near the next road over; and eight seconds of full throttle from
+     * a point 60 m out can drive straight back onto tarmac. Both end with the "off-road"
+     * sample reporting onRoad 1, i.e. an on-road speed compared against an on-road baseline.
+     *
+     * So: pick the heading that maximises distance from any road rather than reusing the car's,
+     * and sample the WHOLE leg, taking the fastest moment at which the car was actually off the
+     * carriageway. If no such moment exists the check fails on its own precondition, loudly,
+     * instead of quietly measuring the wrong thing. This is how tools/diag-o2.mjs already does
+     * it — that harness reports "peak onRoad DURING the leg" for exactly this reason. */
     await evalJs(`(() => { const W = window.WANDEROAD; const c = W.car;
-      // Move well clear of any road, keep the heading, and start from rest.
-      const t = c.terrain; let x = c.x, z = c.z;
-      for (let i = 0; i < 60; i++) { x += Math.cos(c.yaw)*20; z -= Math.sin(c.yaw)*20;
-        if (!isFinite(t.roads.query(x,z).d) || t.roads.query(x,z).d > 60) break; }
-      c.placeAt(x, z, c.yaw); })()`);
+      const t = c.terrain;
+      let best = null;
+      for (let a = 0; a < 16; a++) {
+        const yaw = (a / 16) * Math.PI * 2;
+        let x = c.x, z = c.z, d = 0;
+        for (let i = 0; i < 60; i++) {
+          x += Math.cos(yaw)*20; z -= Math.sin(yaw)*20;
+          const q = t.roads.query(x, z);
+          d = isFinite(q.d) ? q.d : 1e6;
+          if (d > 90) break;
+        }
+        if (!best || d > best.d) best = { x, z, yaw, d };
+      }
+      c.placeAt(best.x, best.z, best.yaw);
+      c.vx = c.vy = c.vz = 0; c.yawRate = 0; c.gear = 1; })()`);
     await sleep(600);
+    await evalJs(`(() => { const W = window.WANDEROAD; const c = W.car;
+      W.__o2 = { best: 0, samples: 0, off: 0 };
+      W.__o2.timer = setInterval(() => {
+        const s = c.terrain.surface(c.x, c.z);
+        W.__o2.samples++;
+        if (s.onRoad < 0.5) { W.__o2.off++; if (c.kph > W.__o2.best) W.__o2.best = c.kph; }
+      }, 100); })()`);
     await hold(evalJs, 'KeyW', 8000);
-    const offRoadTop = await evalJs(`(() => { const c = window.WANDEROAD.car;
+    const offRoadTop = await evalJs(`(() => { const W = window.WANDEROAD; const c = W.car;
+      clearInterval(W.__o2.timer);
       const s = c.terrain.surface(c.x, c.z);
-      return { kph: +c.kph.toFixed(1), onRoad: +s.onRoad.toFixed(2), rough: +(c.rough||0).toFixed(2) }; })()`);
+      return { kph: +W.__o2.best.toFixed(1), endKph: +c.kph.toFixed(1),
+               onRoad: W.__o2.off > 0 ? 0 : +s.onRoad.toFixed(2),
+               offSamples: W.__o2.off, samples: W.__o2.samples,
+               rough: +(c.rough||0).toFixed(2) }; })()`);
     const baseline = onRoadTop && typeof onRoadTop.kph === 'number'
       ? `${onRoadTop.kph} km/h on road (onRoad ${onRoadTop.onRoad}, ${onRoadTop.d} m off the centreline)`
       : `the on-road run-up returned ${onRoadTop && onRoadTop.__error ? onRoadTop.__error : String(onRoadTop)}`;
     check('O2 off-road is meaningfully slower than tarmac',
       !!onRoadTop && onRoadTop.onRoad > 0.5 &&
-        offRoadTop.onRoad < 0.5 && offRoadTop.kph < onRoadTop.kph * 0.55,
-      `${baseline} vs ${offRoadTop.kph} off (onRoad ${offRoadTop.onRoad})`);
+        offRoadTop.offSamples > 10 && offRoadTop.kph < onRoadTop.kph * 0.55,
+      `${baseline} vs ${offRoadTop.kph} off (fastest of ${offRoadTop.offSamples}/${offRoadTop.samples} genuinely off-road samples)`);
 
     /* ── O5: no phantom impacts off-road ────────────────────────────────── */
     const impacts = await evalJs(`(async () => { const W = window.WANDEROAD;

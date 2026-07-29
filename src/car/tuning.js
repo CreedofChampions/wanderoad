@@ -59,7 +59,17 @@ export const TIERS = {
     cgHeight: 0.45,
     weightRear: 0.5,
     power: 165, // hp, for the HUD only — torque curve below is the truth
-    peakTorque: 235, // N·m at the crank
+    /* Torque cut with the top speed, not just the ceiling. The operator: "the acceleration
+     * should have been slowed down with top speed". Halving topSpeed alone left a car that
+     * leapt to its new, lower limit and then sat against it, which reads as MORE frantic, not
+     * less -- the pace of a cozy game is in how urgently it gathers speed, not only in the
+     * number it stops at. The hyper keeps its torque along with its speed. */
+    /* Trimmed AGAIN after the final drive was shortened (see finalDrive below). Shorter gearing
+     * multiplies torque at the wheel, so fixing the stuck-in-first bug handed the acceleration
+     * back — 0-60 went 6.82 s -> 5.13 s without anyone asking for it. The operator asked for the
+     * acceleration to come down WITH the top speed, so the torque comes down to match: 6.17 s
+     * measured, against 3.78 s before any of this. */
+    peakTorque: 108, // N.m at the crank (gt; was 235 originally, 130 before the gearing change) // N·m at the crank
     redline: 6800,
     cdA: 1.9,
     rollPerG: 3.4,
@@ -68,9 +78,15 @@ export const TIERS = {
      * change; the hyper keeps its speed because the same message says "Keep high-tier cars
      * fast", and a fleet where the top car is not noticeably quicker has no ladder left. */
     topSpeed: 70, // km/h, the acceptance target
-    zeroTo60: 3.8, // 0-60, not 0-100: the touring car's top speed is 70 km/h
+    zeroTo60: 6.8, // 0-60, not 0-100: the touring car's top speed is 70 km/h
     ratios: [4.1, 2.62, 1.9, 1.47, 1.15, 0.98],
-    finalDrive: 4.1,
+    /* SHORTENED WITH THE TOP SPEED. Halving topSpeed without touching the gearing left the
+     * car's whole usable range inside FIRST GEAR — the browser suite caught it: "the gearbox
+     * shifts up: gear 1" after four seconds of full throttle. Six gears that never engage is
+     * not a gearbox, and an engine stuck at part-rpm sounds wrong the entire drive.
+     * Scaled by the speed cut itself (135/70 = 1.93), so the gears fall in the same places
+     * relative to the car's own top speed as they did before. */
+    finalDrive: 7.9, // was 4.1, when this car did 135 km/h
     wheelRadius: 0.34,
     drive: 'rwd',
   },
@@ -83,14 +99,14 @@ export const TIERS = {
     cgHeight: 0.42,
     weightRear: 0.53,
     power: 300,
-    peakTorque: 370,
+    peakTorque: 172, // sports; was 370 originally, 205 before the gearing change
     redline: 7200,
     cdA: 1.62,
     rollPerG: 2.5,
     topSpeed: 90,
-    zeroTo60: 2.5,
+    zeroTo60: 4.2,
     ratios: [3.9, 2.5, 1.81, 1.4, 1.1, 0.93],
-    finalDrive: 3.95,
+    finalDrive: 7.25, // was 3.95, when this car did 165 km/h — see the GT's note above
     wheelRadius: 0.34,
     drive: 'rwd',
   },

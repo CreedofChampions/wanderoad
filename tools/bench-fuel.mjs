@@ -19,8 +19,27 @@
 
 import { Vehicle } from '../src/car/vehicle.js';
 import { PHYSICS_DT } from '../src/car/tuning.js';
-import { Fuel, TANK_SECONDS, CRUISE_V, CRUISE_THROTTLE } from '../src/game/fuel.js';
+import { Fuel, TANK_SECONDS, START_CAPACITY_MUL, REFILL_SECONDS, CRUISE_V, CRUISE_THROTTLE } from '../src/game/fuel.js';
+
+/* The BASE tank a car with no capacity upgrades actually has, in seconds. Every expectation
+ * below is written against this rather than against TANK_SECONDS, because the operator's
+ * "200% more total fuel to start" multiplies the tank (START_CAPACITY_MUL) and a bench that
+ * hard-codes the old number fails the very change it is meant to be measuring. */
+const BASE_TANK = TANK_SECONDS * START_CAPACITY_MUL;
 import { STATION_RADIUS, nearestStation, CAN_FRACTION, canSpacing } from '../src/world/props.js';
+
+/* node has no localStorage, and game/fuel.js persists each car's own can count through it
+ * (see Fuel._capKey). A tiny in-memory one makes the per-car capacity checks below assert the
+ * real SAVE/LOAD round trip rather than only the in-memory getter. */
+if (!globalThis.localStorage) {
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, String(v)),
+    removeItem: (k) => mem.delete(k),
+  };
+}
+
 
 const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 
@@ -104,10 +123,20 @@ for (const [label, kph] of [['dawdling  35 km/h', 35], ['cruising  55 km/h', 55]
 }
 {
   const m = results['cruising  55 km/h'].mins;
-  check(m > 5.4 && m < 6.6, 'MINUTES OF CRUISING PER TANK', m.toFixed(2), '6.0 +- 0.6 (the brief: "roughly six")');
-  check(results['dawdling  60 km/h'].mins > m, 'a gentle drive goes further in time', results['dawdling  60 km/h'].mins.toFixed(2), `> ${m.toFixed(2)}`);
+  /* Derived from the constants, not hard-coded, because that is exactly how this check went
+   * stale: the brief's "roughly six" minutes was six minutes of a 360 s tank, and the operator
+   * then asked for "200% more total fuel to start" (START_CAPACITY_MUL). A literal 6.0 here
+   * would have failed the change it was supposed to be measuring. */
+  const want = BASE_TANK / 60;
+  check(m > want * 0.9 && m < want * 1.1, 'MINUTES OF CRUISING PER TANK', m.toFixed(2), `${want.toFixed(1)} +- 10% (the brief's "roughly six" x START_CAPACITY_MUL)`);
+  check(results['dawdling  35 km/h'].mins > m, 'a gentle drive goes further in time', results['dawdling  35 km/h'].mins.toFixed(2), `> ${m.toFixed(2)}`);
   check(results['flat out (throttle pinned)'].mins < m, 'hurrying costs more', results['flat out (throttle pinned)'].mins.toFixed(2), `< ${m.toFixed(2)}`);
-  check(results['cruising  55 km/h'].km > 7 && results['cruising  55 km/h'].km < 11, 'kilometres per tank at cruise', results['cruising  55 km/h'].km.toFixed(1), '7 .. 11 (stations are ~2.9 km apart)');
+  /* Expressed in STATIONS, not kilometres, which is the unit the number actually means: a tank
+   * has to comfortably outrange the gap between pumps (~2.9 km) or the fuel system is a
+   * stopwatch, and it must not outrange it so far that fuel stops being a consideration. */
+  const STATION_KM = 2.9;
+  const stations = results['cruising  55 km/h'].km / STATION_KM;
+  check(stations > 3 && stations < 8, 'stations reachable on one tank at cruise', stations.toFixed(1), `3 .. 8 (${results['cruising  55 km/h'].km.toFixed(1)} km / ${STATION_KM} km apart)`);
 }
 
 console.log('\n── the limit actually reaches the solver ─────────────────────────────────');
@@ -183,8 +212,14 @@ console.log('\n── refuelling at a real station ─────────�
   }
   console.log(`       parked ${Math.hypot(3, 2).toFixed(1)} m from the pumps (radius ${STATION_RADIUS} m): ${trace.join(' ')}`);
   check(fuel.seconds > before, 'the tank rose while parked at the pumps', `${before.toFixed(0)} -> ${fuel.seconds.toFixed(0)} s`, 'higher');
-  check(Math.abs(fuel.seconds - TANK_SECONDS) < 0.5, 'and reached a full tank', fuel.seconds.toFixed(1), `${TANK_SECONDS}`);
-  check(refuelSecs > 1 && refuelSecs < 8, 'seconds spent filling', refuelSecs.toFixed(1), '1 .. 8');
+  check(Math.abs(fuel.seconds - BASE_TANK) < 0.5, 'and reached a full tank', fuel.seconds.toFixed(1), `${BASE_TANK.toFixed(1)}`);
+  /* The RATE, not a raw stopwatch reading. A fixed "1..8 s" window silently assumed how far
+   * down the tank was after two minutes of part throttle, and that assumption broke the moment
+   * the tank grew (START_CAPACITY_MUL): the same two minutes now leaves it far fuller, so the
+   * top-up is legitimately short. What actually matters is that a pump fills a WHOLE tank in
+   * REFILL_SECONDS whatever the tank's size. */
+  const wantSecs = (1 - low) * REFILL_SECONDS;
+  check(Math.abs(refuelSecs - wantSecs) < 0.7, 'time to fill matches REFILL_SECONDS pro rata', refuelSecs.toFixed(1), `~${wantSecs.toFixed(1)} s ((1-${low.toFixed(2)}) x ${REFILL_SECONDS})`);
   check(fuel.stats.refuels === 1, 'counted as one visit', fuel.stats.refuels, '1');
 
   // 3. driving past at speed must NOT refuel — a pump is a place you stop at
@@ -205,9 +240,9 @@ console.log('\n── half as many cans, and still more than a tank needs ──
    * between them. So it is asked in this file's own unit — seconds of cruise — rather than as
    * a density number the props harness already checks.
    *
-   * A tank is TANK_SECONDS at CRUISE_V, and canSpacing() reports metres of road per can over a
+   * A tank is BASE_TANK at CRUISE_V, and canSpacing() reports metres of road per can over a
    * real 18 km-square of the real network. Both are measured, neither is asserted. */
-  const tankKm = (TANK_SECONDS * CRUISE_V) / 1000;
+  const tankKm = (BASE_TANK * CRUISE_V) / 1000;
   for (const seed of [20260726, 7, 424242]) {
     const cs = canSpacing(seed, 9000);
     const perTank = (tankKm * 1000) / cs.metresPerCan;
@@ -251,17 +286,17 @@ console.log('\n── a floating can, collected ──────────�
   // Within 0.01 s rather than exact: the top-up and that same frame's own idle burn both
   // happen inside this one update() call, in that order, so the net gain is CAN_FRACTION of
   // a tank minus a fraction of a frame's idle burn, not CAN_FRACTION to the last digit.
-  check(Math.abs(fuel.seconds - (before + TANK_SECONDS * CAN_FRACTION)) < 0.01,
-    'a collected can adds CAN_FRACTION of a tank', fuel.seconds.toFixed(2), `~${(before + TANK_SECONDS * CAN_FRACTION).toFixed(2)}`);
+  check(Math.abs(fuel.seconds - (before + BASE_TANK * CAN_FRACTION)) < 0.01,
+    'a collected can adds CAN_FRACTION of a tank', fuel.seconds.toFixed(2), `~${(before + BASE_TANK * CAN_FRACTION).toFixed(2)}`);
   check(fuel.stats.cansCollected === 1, 'counted as one can', fuel.stats.cansCollected, '1');
   check(said.some((s) => /can/i.test(s)), 'said something about it', said.join(' | '), 'mentions "can"');
 
-  // A can found on a near-full tank must cap at TANK_SECONDS, exactly like a pump would.
+  // A can found on a near-full tank must cap at BASE_TANK, exactly like a pump would.
   const car2 = fresh();
   const fuel2 = new Fuel({ start: 0.95, collectCans: () => 0.5 });
   fuel2.update(DT, car2);
-  check(fuel2.seconds <= TANK_SECONDS + 1e-6, 'a can cannot overfill the tank', fuel2.seconds.toFixed(2), `<= ${TANK_SECONDS}`);
-  check(Math.abs(fuel2.seconds - TANK_SECONDS) < 0.01, 'and tops out at a full tank', fuel2.seconds.toFixed(2), `~${TANK_SECONDS}`);
+  check(fuel2.seconds <= BASE_TANK + 1e-6, 'a can cannot overfill the tank', fuel2.seconds.toFixed(2), `<= ${BASE_TANK.toFixed(1)}`);
+  check(Math.abs(fuel2.seconds - BASE_TANK) < 0.01, 'and tops out at a full tank', fuel2.seconds.toFixed(2), `~${BASE_TANK.toFixed(1)}`);
 
   // Running dry, then a can arrives: power must recover immediately, the same as a pump does.
   const car3 = fresh();
@@ -434,7 +469,10 @@ console.log('\n── capacity upgrades: every 5th can raises the tank, capped a
    * shape render/props.js's real drainCollectedFuel() delivers a can in — so N update() calls
    * collect exactly N cans, one at a time. */
   const car = fresh();
-  const fuel = new Fuel({ start: 1, collectCans: () => 0.01 });
+  /* Its own carId. Capacity is now per CAR and persisted (operator: "capacity does not
+   * transfer from car to car"), so a shared default id would let cans collected by an earlier
+   * section in this same process leak in and shift the whole ladder by one. */
+  const fuel = new Fuel({ start: 1, collectCans: () => 0.01, carId: 'bench-ladder' });
   const capAt = [];
   for (let n = 1; n <= 30; n++) {
     fuel.update(1 / 60, car);
@@ -444,30 +482,30 @@ console.log('\n── capacity upgrades: every 5th can raises the tank, capped a
     `       capacity after can # : 1=${capAt[0].toFixed(0)}  4=${capAt[3].toFixed(0)}  5=${capAt[4].toFixed(0)}  ` +
       `9=${capAt[8].toFixed(0)}  10=${capAt[9].toFixed(0)}  25=${capAt[24].toFixed(0)}  26=${capAt[25].toFixed(0)}  30=${capAt[29].toFixed(0)}`
   );
-  check(Math.abs(capAt[3] - TANK_SECONDS) < 0.5, 'still the base tank after 4 cans', capAt[3].toFixed(1), `~${TANK_SECONDS}`);
-  check(Math.abs(capAt[4] - TANK_SECONDS * 1.1) < 0.5, 'first upgrade fires exactly on the 5th can (+10%)', capAt[4].toFixed(1), `~${(TANK_SECONDS * 1.1).toFixed(1)}`);
-  check(Math.abs(capAt[8] - TANK_SECONDS * 1.1) < 0.5, 'still one upgrade at 9 cans', capAt[8].toFixed(1), `~${(TANK_SECONDS * 1.1).toFixed(1)}`);
-  check(Math.abs(capAt[9] - TANK_SECONDS * 1.2) < 0.5, 'second upgrade on the 10th can (+20% total)', capAt[9].toFixed(1), `~${(TANK_SECONDS * 1.2).toFixed(1)}`);
-  check(Math.abs(capAt[24] - TANK_SECONDS * 1.5) < 0.5, 'fifth upgrade (25th can) reaches the +50% ceiling', capAt[24].toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
-  check(Math.abs(capAt[25] - TANK_SECONDS * 1.5) < 0.5, 'a 26th can refuels but the tank stops growing — the cap holds', capAt[25].toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
-  check(Math.abs(capAt[29] - TANK_SECONDS * 1.5) < 0.5, 'and neither does a 30th — not an unbounded grind', capAt[29].toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
+  check(Math.abs(capAt[3] - BASE_TANK) < 0.5, 'still the base tank after 4 cans', capAt[3].toFixed(1), `~${BASE_TANK.toFixed(1)}`);
+  check(Math.abs(capAt[4] - BASE_TANK * 1.1) < 0.5, 'first upgrade fires exactly on the 5th can (+10%)', capAt[4].toFixed(1), `~${(BASE_TANK * 1.1).toFixed(1)}`);
+  check(Math.abs(capAt[8] - BASE_TANK * 1.1) < 0.5, 'still one upgrade at 9 cans', capAt[8].toFixed(1), `~${(BASE_TANK * 1.1).toFixed(1)}`);
+  check(Math.abs(capAt[9] - BASE_TANK * 1.2) < 0.5, 'second upgrade on the 10th can (+20% total)', capAt[9].toFixed(1), `~${(BASE_TANK * 1.2).toFixed(1)}`);
+  check(Math.abs(capAt[24] - BASE_TANK * 1.5) < 0.5, 'fifth upgrade (25th can) reaches the +50% ceiling', capAt[24].toFixed(1), `~${(BASE_TANK * 1.5).toFixed(1)}`);
+  check(Math.abs(capAt[25] - BASE_TANK * 1.5) < 0.5, 'a 26th can refuels but the tank stops growing — the cap holds', capAt[25].toFixed(1), `~${(BASE_TANK * 1.5).toFixed(1)}`);
+  check(Math.abs(capAt[29] - BASE_TANK * 1.5) < 0.5, 'and neither does a 30th — not an unbounded grind', capAt[29].toFixed(1), `~${(BASE_TANK * 1.5).toFixed(1)}`);
 
   // The upgrade message fires on the milestone can specifically, not on an ordinary one.
   const said = [];
   const car2 = fresh();
-  const fuel2 = new Fuel({ start: 1, say: (t) => said.push(t), collectCans: () => 0.01 });
+  const fuel2 = new Fuel({ start: 1, say: (t) => said.push(t), collectCans: () => 0.01, carId: 'bench-say5' });
   for (let k = 0; k < 5; k++) fuel2.update(1 / 60, car2);
-  check(said.some((s) => /capacity|bigger tank/i.test(s)), 'the 5th can announces the upgrade', said.join(' | '), 'mentions capacity/bigger tank');
+  check(said.some((s) => /tank is now|capacity|bigger tank/i.test(s)), 'the 5th can announces the upgrade', said.join(' | '), 'mentions capacity/bigger tank');
   const said2 = [];
   const car3 = fresh();
-  const fuel3 = new Fuel({ start: 1, say: (t) => said2.push(t), collectCans: () => 0.01 });
+  const fuel3 = new Fuel({ start: 1, say: (t) => said2.push(t), collectCans: () => 0.01, carId: 'bench-say4' });
   for (let k = 0; k < 4; k++) fuel3.update(1 / 60, car3);
-  check(!said2.some((s) => /capacity|bigger tank/i.test(s)), 'an ordinary can (1st-4th) does not', said2.join(' | ') || '(nothing capacity-related)', 'no capacity mention');
+  check(!said2.some((s) => /tank is now|capacity|bigger tank/i.test(s)), 'an ordinary can (1st-4th) does not', said2.join(' | ') || '(nothing capacity-related)', 'no capacity mention');
 
   // fill(1) on an upgraded tank fills PAST the original 360 — capacity generalises everywhere
   // "a full tank" is used, not just the top-up path.
   fuel.fill(1);
-  check(Math.abs(fuel.seconds - TANK_SECONDS * 1.5) < 0.5, 'fill(1) on a maxed-out tank fills past the original 360', fuel.seconds.toFixed(1), `~${(TANK_SECONDS * 1.5).toFixed(1)}`);
+  check(Math.abs(fuel.seconds - BASE_TANK * 1.5) < 0.5, 'fill(1) on a maxed-out tank fills past the base tank', fuel.seconds.toFixed(1), `~${(BASE_TANK * 1.5).toFixed(1)}`);
 }
 
 console.log('\n── downhill coasting costs almost nothing ──────────────────────────────────');
@@ -605,6 +643,77 @@ console.log('\n── off-road driving costs double ─────────�
   check(driveRatio > 1.8, 'and the real, driven ratio is at least the double this file promises (often more, from rolling resistance)', driveRatio.toFixed(2), '> 1.8');
 }
 
+
+/* ── station forgiveness, per-car capacity, and the tow-home reset ───────────
+ * All three are operator instructions from the same message, and all three are the kind of
+ * change that is easy to CLAIM and easy to get wrong, so each is asserted against the number
+ * that actually drives the behaviour rather than against a flag being set. */
+console.log('\n── the forecourt does not cost you the streak ─────────────────────────────');
+{
+  const { Streak, STATION_FORGIVE_R } = await import('../src/game/streak.js');
+  const DT = 1 / 60;
+  const onRoadCar = { speed: 30, onGround: true, onRoadMin: 1 };
+  const offRoadCar = { speed: 30, onGround: true, onRoadMin: 0 };
+
+  // bank a real streak, then leave the road for three seconds — far longer than the 0.55 s grace
+  const bank = (st) => {
+    for (let i = 0; i < 10 / DT; i++) st.update(DT, onRoadCar, { onRoad: 1 });
+  };
+
+  const away = new Streak({ storageKey: 'bench.forgive.away' });
+  bank(away);
+  const awayBefore = away.distance;
+  for (let i = 0; i < 3 / DT; i++) away.update(DT, offRoadCar, { onRoad: 0 }, { forgive: false });
+
+  const at = new Streak({ storageKey: 'bench.forgive.at' });
+  bank(at);
+  const atBefore = at.distance;
+  for (let i = 0; i < 3 / DT; i++) at.update(DT, offRoadCar, { onRoad: 0 }, { forgive: true });
+
+  console.log(
+    `       three seconds off the tarmac: away from a pump ${awayBefore.toFixed(0)} m -> ${away.distance.toFixed(0)} m; on a forecourt ${atBefore.toFixed(0)} m -> ${at.distance.toFixed(0)} m`
+  );
+  check(away.distance === 0, 'off-road away from a station still breaks the streak (the rule is intact)', `${away.distance.toFixed(0)} m`, '0 m');
+  check(at.distance === atBefore, 'off-road INSIDE the forgiveness radius keeps every metre', `${at.distance.toFixed(0)} m`, `${atBefore.toFixed(0)} m`);
+  check(at.state.nearStation === true, 'and the HUD can see that forgiveness is active', at.state.nearStation, 'true');
+  check(STATION_FORGIVE_R >= 100, 'the radius is "massive" as asked, not a token 20 m', `${STATION_FORGIVE_R} m`, '>= 100 m');
+  // and it must not become a scoring exploit: no distance is EARNED off-road on a forecourt
+  check(at.distance <= atBefore + 0.001, 'forgiveness never accrues score off-road', at.distance.toFixed(2), `<= ${atBefore.toFixed(2)}`);
+}
+
+console.log('\n── capacity belongs to the car, not to the player ────────────────────────');
+{
+  const a = new Fuel({ carId: 'bench-a' });
+  const baseCap = a.capacity;
+  for (let i = 0; i < 10; i++) a._carCans++;
+  const grown = a.capacity;
+  console.log(`       car A after 10 cans: ${(baseCap / 60).toFixed(1)} min -> ${(grown / 60).toFixed(1)} min (level ${a.capacityLevel})`);
+  check(grown > baseCap, "collecting cans grows THIS car's tank", `${(grown / 60).toFixed(1)} min`, `> ${(baseCap / 60).toFixed(1)} min`);
+  a.setCar('bench-b');
+  console.log(`       after swapping to car B: ${(a.capacity / 60).toFixed(1)} min (level ${a.capacityLevel})`);
+  check(Math.abs(a.capacity - baseCap) < 0.5, 'a different car starts its capacity again — nothing transfers', `${(a.capacity / 60).toFixed(1)} min`, `${(baseCap / 60).toFixed(1)} min`);
+  check(a.seconds <= a.capacity + 1e-6, 'and the tank is clamped to the new, smaller capacity', a.seconds.toFixed(1), `<= ${a.capacity.toFixed(1)}`);
+  a.setCar('bench-a');
+  check(Math.abs(a.capacity - grown) < 0.5, "swapping BACK finds car A's upgrades where it left them", `${(a.capacity / 60).toFixed(1)} min`, `${(grown / 60).toFixed(1)} min`);
+}
+
+console.log('\n── the three cans come back when you are towed home ──────────────────────');
+{
+  const f = new Fuel({ carId: 'bench-mercy', resetToSpawn: () => {} });
+  f.mercyUsed = 3;
+  const car = { x: 0, z: 0, speed: 0, onGround: true, throttle: 0 };
+  // force the tow: dry, stopped, past the rescue wait
+  f.seconds = 0;
+  f.dry = true;
+  f._dryFor = 99;
+  f._stoppedFor = 99;
+  f.update(1 / 60, car);
+  console.log(`       after the tow: mercyUsed ${f.mercyUsed}, tank ${(f.seconds / 60).toFixed(1)} min of ${(f.capacity / 60).toFixed(1)} min`);
+  check(f.mercyUsed === 0, 'the 3 gas cans are restored on respawn, not left spent', f.mercyUsed, '0');
+  check(Math.abs(f.seconds - f.capacity) < 0.5, 'and you wake up with a FULL tank, not half', `${(f.seconds / 60).toFixed(1)} min`, `${(f.capacity / 60).toFixed(1)} min`);
+  check(f.stats.resets === 1, 'counted as one tow', f.stats.resets, '1');
+}
+
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all fuel checks passed'}\n`);
 process.exit(failures ? 1 : 0);
 
@@ -617,7 +726,17 @@ function installDomStub() {
       this.tag = tag;
       this.attrs = {};
       this.children = [];
-      this.style = {};
+      /* A CSS custom property is set through setProperty(), not by assignment, so the stub
+       * needs the method as well as the bag — the capacity meter's part-filled segment writes
+       * `--p` that way. Recorded into the same object so a test can still read it back. */
+      this.style = {
+        setProperty: (k, v) => {
+          this.style[k] = v;
+        },
+        removeProperty: (k) => {
+          delete this.style[k];
+        },
+      };
       this.textContent = '';
       this._classes = new Set();
       this.classList = {
@@ -632,6 +751,10 @@ function installDomStub() {
     }
     getAttribute(k) {
       return this.attrs[k];
+    }
+    /** The gauge reflows before restarting the amber meter-point flash; give it a number. */
+    getBoundingClientRect() {
+      return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
     }
     appendChild(c) {
       this.children.push(c);

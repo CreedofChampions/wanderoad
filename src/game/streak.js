@@ -21,6 +21,22 @@ import { clamp, clamp01, lerp } from '../core/math.js';
 const ON_ROAD = 0.45;
 /** How long you may be off the carriageway before the streak breaks, in seconds. */
 const GRACE = 0.55;
+/* THE FORECOURT IS FORGIVEN. Operator, twice: "turning into gas station still kills streak!!
+ * -- massive forgiveness area around gas station please".
+ *
+ * Refuelling is not a mistake, it is the thing the fuel system exists to make you do — so
+ * punishing it with the ONLY loss in the game was the game arguing with itself. Inside this
+ * radius of a pump the off-road timer is held: you can leave the tarmac, cross the forecourt,
+ * clip a kerb, stop dead at the pump and set off again with the streak untouched.
+ *
+ * 140 m is deliberately far past the forecourt itself (REFUEL_RADIUS is 26 m). "Massive" was
+ * the word, and the failure it fixes is the APPROACH — braking hard off the carriageway from
+ * 40 m out is what was actually killing streaks, not the pump.
+ *
+ * Nothing ACCRUES off-road here either. Forgiveness is not a scoring exploit: you keep what
+ * you had, you do not farm points by circling a station in the grass. */
+export const STATION_FORGIVE_R = 140;
+
 /** Below this speed nothing accrues — parking on a road is not a streak. */
 const MIN_SPEED = 8; // m/s, ~29 km/h
 
@@ -61,6 +77,9 @@ export class Streak {
     /** True while auto-drive has the wheel — see update()'s `opts.paused`. Read by the HUD for
      *  its caption and by tools/diag-auto-gates.mjs, which asserts the freeze in numbers. */
     this.paused = false;
+    /** True while inside STATION_FORGIVE_R of a pump — the HUD captions it so the forgiveness
+     *  is visible rather than merely true. */
+    this.nearStation = false;
 
     this._off = 0; // seconds spent off the carriageway
     this._announced = 0; // highest ladder index announced this streak
@@ -108,6 +127,7 @@ export class Streak {
       graceLeft: Math.max(0, GRACE - this._off),
       tier: this.tier,
       paused: this.paused,
+      nearStation: !!this.nearStation,
     };
   }
 
@@ -141,6 +161,13 @@ export class Streak {
      * no half-frozen path where, say, the off-road timer still runs. */
     this.paused = !!(opts && opts.paused);
     if (this.paused) return;
+
+    /* Station forgiveness — see STATION_FORGIVE_R. Placed with `paused`, before every other
+     * test, for the same reason: one way in, one way out, no half-forgiven path. The timer is
+     * held at zero rather than merely not advancing, so a car that wandered off 0.4 s before
+     * reaching the forecourt arrives with its full grace intact. */
+    this.nearStation = !!(opts && opts.forgive);
+    if (this.nearStation) this._off = 0;
     /* surf.onRoad is ONE sample at the car's centre, and a road (6-8.6 m, see TIERS in
      * world/roads.js) is much wider than the car's track (~1.6-1.7 m) — so it stays "on road"
      * long after a wheel has crossed the verge. car.onRoadMin is the worst of the four
@@ -154,6 +181,7 @@ export class Streak {
     this.onRoad = on;
 
     if (!on) {
+      if (this.nearStation) return; // forecourt: no accrual, no break, no timer
       this._off += dt;
       // Airborne over a crest is not "off road" — you left the road upward, which is fine,
       // and punishing it would make every jump a reason not to jump.

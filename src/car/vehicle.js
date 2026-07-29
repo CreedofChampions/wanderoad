@@ -1042,14 +1042,26 @@ export class Vehicle {
      * ever". Rolling resistance on grass and sand is genuinely several times tarmac's, so
      * this is honest physics pushed to the top of its honest range — plus a hard ceiling,
      * because the point of the game is to stay on the road. */
-    let crr = lerp(0.145, 0.014, clamp01(onRoad));
+    /* Raised, with numbers. O2 ("off-road is meaningfully slower than tarmac": off-road top
+     * must be under 55% of the on-road top) was failing at 0.145/9.5 — measured over eight
+     * real sites by tools/diag-o2.mjs: 41.5 km/h off against 63.2 on, which is 66%, so grass
+     * was costing a fifth of the speed rather than being a real decision. Shorter final drives
+     * (see tuning.js) had also handed the wheels more torque to push through it with.
+     *
+     * Swept on the same eight sites rather than guessed: 0.190/14.0 -> 36.4 km/h (2/8 pass),
+     * 0.205/16.5 -> 32.5 (6/8), 0.220/17.5 -> 21.2 (8/8 but a crawl), 0.250/20.0 -> 14.2 (8/8,
+     * far too punishing to drive onto a verge at all). 0.215/17.2 -> 23.1 km/h, 8/8, is where
+     * the rule is met
+     * on every site and the car can still be driven off the tarmac on purpose — which it has
+     * to be, because petrol-station forecourts are off-road surfaces. */
+    let crr = lerp(0.215, 0.014, clamp01(onRoad));
     // Dunes: piled sand in front of the wheels, not just a looser surface. See SAND above.
     // Deliberately small next to vDrag below — a constant force alone cannot bleed off a fast
     // ENTRY speed within a few metres, it can only stop the car from creeping once it is
     // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
     // drive at speed" part.
     if (this.sandBog > 0) crr = lerp(crr, SAND.crrBogged, this.sandBog);
-    let vDrag = lerp(9.5, 1.4, clamp01(onRoad));
+    let vDrag = lerp(17.2, 1.4, clamp01(onRoad));
     /* The speed-proportional half of off-road resistance is what a car arriving off the
      * tarmac at speed actually decelerates against — the constant term above is too small at
      * 19 m/s to matter (a few tenths of a m/s²) and only bites once the car is already slow.
@@ -1083,10 +1095,22 @@ export class Vehicle {
      * braking back in proportionally, the same as easing off the throttle does going forward. */
     const effectiveThrottle = this.reverse ? this.brake : this.throttle;
     const closed = Math.max(0, 1 - effectiveThrottle * 4);
+    /* The 95 N.m that used to sit here was a flat constant, and a flat constant stopped being
+     * right the moment the fleet's engines were shrunk (peakTorque 235 -> 108 on the GT) and
+     * their final drives shortened (4.1 -> 7.9) to match the halved top speeds. Engine braking
+     * is multiplied by `ratio`, which includes the final drive, so those two changes together
+     * doubled the retardation of an engine that had also become half the size — a lifted foot
+     * pulled 3.9 m/s2 where the brief for coasting is under 3.0, and tools/bench-fuel.mjs's
+     * "running dry is gentle" section caught it.
+     *
+     * Engine drag is a property of the ENGINE, so it scales with the engine: a fixed fraction
+     * of that car's own peak torque. 0.235 is chosen so the hypercar, whose torque and gearing
+     * were both deliberately left alone, keeps exactly the braking it had (405 x 0.235 = 95.2),
+     * while the two cars that were slowed get drag in proportion to what they now make. */
     const engBrake =
       this._shiftTimer > 0
         ? 0
-        : closed * 95 * (0.3 + 0.7 * rpmFrac) * (ratio / S.wheelRadius) * Math.sign(vLong) * contact;
+        : closed * (S.peakTorque * 0.235) * (0.3 + 0.7 * rpmFrac) * (ratio / S.wheelRadius) * Math.sign(vLong) * contact;
 
     /* Loose surface. Off the carriageway the car should feel like it is on gravel — bumpy,
      * reluctant to turn, and unwilling to build speed. The bump is a real vertical impulse

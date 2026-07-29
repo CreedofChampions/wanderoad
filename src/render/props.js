@@ -1148,6 +1148,31 @@ export function buildStation(M, r, skirt) {
   }
   pbox(M, 0, CH + 0.22, 1.0, CW + 0.9, 0.22, CD + 0.9, 0, CREAM, MAT.MATTE);
   pbox(M, 0, CH + 0.5, 1.0, CW + 0.95, 0.14, CD + 0.95, 0, VERMILION, MAT.MATTE);
+  /* THE BEACON. The operator asked for "a minecraft becon style light people can drive to,
+   * seen from distance above gas station" -- a station you can only find by driving past it is
+   * not findable, and the fuel gauge's arrow tells you the direction but not that you have
+   * ARRIVED.
+   *
+   * A tapering EMIT column, widest at the canopy and narrowest at the top, 60 m tall. EMIT is
+   * unlit by the sun, so it holds its colour against a bright sky as well as at dusk, and the
+   * taper keeps the silhouette light rather than a solid slab. No new material, no sprite, no
+   * second draw call -- it is part of the same painted mesh as the station itself, so it costs
+   * one prop and disappears with the tile like everything else.
+   *
+   * Deliberately narrow: 0.55 m at the base. Wide enough to read across a valley, thin enough
+   * that parking under it does not fill the screen. */
+  {
+    const BEACON_H = 60;
+    const SEGS = 2; // two tapered sections read the same at distance and cost a third
+    for (let i = 0; i < SEGS; i++) {
+      const y0 = CH + 0.6 + (BEACON_H * i) / SEGS;
+      const y1 = CH + 0.6 + (BEACON_H * (i + 1)) / SEGS;
+      const r0 = 0.55 * (1 - i / SEGS) + 0.08;
+      const r1 = 0.55 * (1 - (i + 1) / SEGS) + 0.08;
+      pcyl(M, [0, y0, 1.0], [0, y1, 1.0], r0, r1, 4, GLOW, MAT.EMIT, false, false);
+    }
+  }
+
   // Under-canopy light. EMIT, because a forecourt at dusk is the whole mood of the thing.
   pbox(M, 0, CH - 0.02, 1.0, CW * 0.72, 0.03, CD * 0.5, 0, GLOW, MAT.EMIT);
 

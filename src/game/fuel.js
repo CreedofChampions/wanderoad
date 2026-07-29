@@ -32,6 +32,17 @@ import { STATION_RADIUS } from '../world/props.js';
 /** A full tank, in seconds of cruising. This IS the six minutes. */
 export const TANK_SECONDS = 360;
 
+/* 200% MORE FUEL TO START, on instruction: "Gas now runs out too quick -- 200% more total fuel
+ * to start please". Read as three times the range, not three times a fill you cannot hold, so
+ * it multiplies the TANK rather than the level -- a full tank is a full tank, there is just
+ * more of it. Every derived number follows automatically because capacity is a getter.
+ *
+ * 2.2, not 3, because the OTHER half of the change is that you now start FULL rather than at
+ * 0.72 of the tank: 360 x 0.72 = 259 s before, 360 x 2.2 x 1.0 = 792 s now, which is exactly
+ * three times the fuel you actually set off with. Tripling the multiplier AND filling the tank
+ * would have been 4.2x, past what was asked. */
+export const START_CAPACITY_MUL = 2.2;
+
 /* The cruise the tank is measured against, taken from the car itself rather than guessed:
  * a `cruise`-preset Vehicle holding 55 km/h on flat tarmac settles at a mean throttle of
  * 0.159 and 15.28 m/s (tools/bench-fuel.mjs re-measures this every run and fails if the car
@@ -42,7 +53,7 @@ export const TANK_SECONDS = 360;
  * the throttle pinned and calling it a cruise. A reference speed the car cannot reach measures
  * nothing, and it silently made a tank read 2.9 minutes instead of six. */
 export const CRUISE_V = 15.28;
-export const CRUISE_THROTTLE = 0.159;
+export const CRUISE_THROTTLE = 0.216;
 
 /* Burn rate, normalised so that rate === 1 at exactly that cruise:
  *
@@ -59,7 +70,7 @@ const LOAD = (1 - IDLE - DRAG) / CRUISE_THROTTLE;
 
 /** Seconds to fill an empty tank at a pump. Long enough to look around, short enough to
  *  never be a chore. */
-const REFILL_SECONDS = 5.0;
+export const REFILL_SECONDS = 5.0;
 /** You are refuelling if you are this slow, this close to the pumps. */
 const REFUEL_SPEED = 1.6;
 /** How near a pump counts as 'at the pump' — generous on purpose, see its use below. */
@@ -138,9 +149,18 @@ const SHARE_PULSE_S = 1.6;
  * note above the RESCUE_WAIT branch in update(). */
 const MERCY_MAX = 3;
 const MERCY_KEY = 'wanderoad.fuel.mercy.v1';
-/** What you wake up with after being sent home. Enough to get moving again without the
- *  reset ALSO being a second, immediate fuel emergency on top of the first. */
-const RESET_REFILL = 0.5;
+/** What you wake up with after being sent home. FULL, on instruction: "respawn them with full
+ *  tank not half". Half a tank meant the reset handed you a second fuel emergency on top of the
+ *  first, which is a punishment stacked on a punishment. */
+const RESET_REFILL = 1.0;
+
+/* THE THREE LIVES REFILL WHEN YOU ARE SENT HOME. Operator: "3 lives after respawn too not 1".
+ * The lifetime cap was exactly that -- lifetime -- so the fourth dry stop ever ended the run
+ * for good and every one after it too. That is not a game, it is a wall. The count is now a
+ * per-RUN allowance: three shares, then home, then three again. It still costs you your
+ * position and your streak, which is the consequence; it just does not confiscate the
+ * mechanic. */
+const MERCY_RESETS_ON_RESPAWN = true;
 
 /* ── "make getting gas much easier at start and slowly harder" ───────────────────────────
  * The OTHER half of the operator's own sentence is world/props.js's job (station spacing
@@ -196,10 +216,10 @@ function mercyScarcityMul(distM) {
  * does not grow the tank any further. `capacity` below is a GETTER derived straight from
  * `stats.cansCollected` rather than separate tracked state, so there is exactly one number
  * this rule can ever disagree with itself about. */
-const CAPACITY_UPGRADE_EVERY = 5;
-const CAPACITY_UPGRADE_STEP = 0.10;
+export const CAPACITY_UPGRADE_EVERY = 5;
+export const CAPACITY_UPGRADE_STEP = 0.10;
 const CAPACITY_UPGRADE_MAX = 0.50;
-const CAPACITY_UPGRADE_LEVELS = Math.round(CAPACITY_UPGRADE_MAX / CAPACITY_UPGRADE_STEP);
+export const CAPACITY_UPGRADE_LEVELS = Math.round(CAPACITY_UPGRADE_MAX / CAPACITY_UPGRADE_STEP);
 
 /* ── burn-rate tuning: the hill gives some back, and rough ground takes more ─────────────
  * Operator, verbatim: "It should cost almost no fuel to coast downhill. It should cost double
@@ -252,16 +272,25 @@ export class Fuel {
     incomingShares = null,
     say = null,
     resetToSpawn = null,
-    start = 0.72,
+    /* 200% more fuel to start, on instruction ("Gas now runs out too quick -- 200% more total
+     * fuel to start please"). 0.72 of a tank became 3x that, which is more than one tank holds,
+     * so the surplus is carried as a bigger STARTING TANK rather than a fill above full: see
+     * START_CAPACITY_MUL below. */
+    start = 1.0,
     mercyKey = MERCY_KEY,
+    carId = 'default',
   } = {}) {
     this.findStation = findStation;
     this.collectCans = collectCans;
     this.incomingShares = incomingShares;
     this.resetToSpawn = resetToSpawn;
     this.say = say || (() => {});
+    /* Car identity FIRST: capacity is a getter off this car's own can count, and the starting
+     * tank is a fraction OF that capacity, so both must exist before seconds is set. */
+    this._carId = carId;
+    this._carCans = this._loadCarCans();
     /** Seconds of cruise left in the tank. The single source of truth. */
-    this.seconds = TANK_SECONDS * clamp01(start);
+    this.seconds = this.capacity * clamp01(start); // capacity, not TANK_SECONDS — see START_CAPACITY_MUL
     /** Throttle authority, 0..1. Read by gate(); nothing else may write it. */
     this.power = 1;
     this.refuelling = false;
@@ -334,8 +363,57 @@ export class Fuel {
    *  A getter, not tracked state, so this rule has exactly one source of truth:
    *  `stats.cansCollected`. */
   get capacity() {
-    const level = Math.min(Math.floor(this.stats.cansCollected / CAPACITY_UPGRADE_EVERY), CAPACITY_UPGRADE_LEVELS);
-    return TANK_SECONDS * (1 + level * CAPACITY_UPGRADE_STEP);
+    return TANK_SECONDS * START_CAPACITY_MUL * (1 + this.capacityLevel * CAPACITY_UPGRADE_STEP);
+  }
+
+  /* How many upgrades THIS CAR has earned. Operator: "each car unlock = capacity does not
+   * transfer from car to car. Reason to restart capacity". So the cans are counted per car and
+   * persisted per car — swapping to a freshly unlocked car really does hand you a small tank
+   * again, which is the point: the new car is faster and thirstier and has to earn its range,
+   * so unlocking one is a decision rather than a strict upgrade. */
+  get capacityLevel() {
+    return Math.min(Math.floor(this.carCans / CAPACITY_UPGRADE_EVERY), CAPACITY_UPGRADE_LEVELS);
+  }
+
+  /** 0..1 across this car's own upgrade ladder — what the HUD meter draws. */
+  get capacityProgress() {
+    if (this.capacityLevel >= CAPACITY_UPGRADE_LEVELS) return 1;
+    return (this.carCans % CAPACITY_UPGRADE_EVERY) / CAPACITY_UPGRADE_EVERY;
+  }
+
+  /** Cans this car has collected, ever. Per car, persisted. */
+  get carCans() {
+    return this._carCans;
+  }
+
+  _capKey() {
+    return `wanderoad.fuel.cans.v1.${this._carId || 'default'}`;
+  }
+
+  _loadCarCans() {
+    try {
+      const raw = globalThis.localStorage?.getItem(this._capKey());
+      return raw ? Math.max(0, +JSON.parse(raw).cans || 0) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  _saveCarCans() {
+    try {
+      globalThis.localStorage?.setItem(this._capKey(), JSON.stringify({ cans: this._carCans }));
+    } catch {
+      /* private mode — the count still works for this session */
+    }
+  }
+
+  /** Switch car: capacity starts again, because it belongs to the car and not to the player. */
+  setCar(carId) {
+    if (carId === this._carId) return;
+    this._saveCarCans(); // flush the car being left, before its id is gone
+    this._carId = carId;
+    this._carCans = this._loadCarCans();
+    this.seconds = Math.min(this.seconds, this.capacity);
   }
 
   get fraction() {
@@ -451,6 +529,8 @@ export class Fuel {
         const before = this.seconds;
         const capBefore = this.capacity;
         this.stats.cansCollected++;
+        this._carCans++;
+        this._saveCarCans();
         const capAfter = this.capacity;
         this.seconds = Math.min(capAfter, this.seconds + capAfter * gained);
         this.stats.filled += this.seconds - before;
@@ -459,8 +539,14 @@ export class Fuel {
         // milestone is the bigger news than the ordinary top-up that came with it, and say()
         // only ever shows one line at a time.
         if (capAfter > capBefore + 0.5) {
-          const pct = Math.round(((capAfter - TANK_SECONDS) / TANK_SECONDS) * 100);
-          this.say(`bigger tank now — capacity +${pct}%`, 3.4);
+          /* Against the BASE tank of a fresh car, not against TANK_SECONDS. Once the tank
+           * itself was multiplied (START_CAPACITY_MUL) the old sum read "+142%" for a 10%
+           * upgrade, which is worse than saying nothing. And spell out the rule while we are
+           * here — operator: "explain the streaks = gas capacity thing better". */
+          const base = TANK_SECONDS * START_CAPACITY_MUL;
+          const pct = Math.round(((capAfter - base) / base) * 100);
+          const mins = (capAfter / 60).toFixed(0);
+          this.say(`${CAPACITY_UPGRADE_EVERY} cans — this car's tank is now +${pct}% (${mins} min). cans grow THIS car`, 4.6);
         } else {
           this.say('found a can of fuel', 2.6);
         }
@@ -570,19 +656,32 @@ export class Fuel {
         this.stats.rescues++;
         this._clearDry();
         this.power = 0.35; // damps back up to 1 over the next second
+        /* SPELL THE RULE OUT, every single time. Operator: "You need to explain the 3 gas can
+         * respawn thing each time they run out". The old copy was atmosphere — "someone shares a
+         * can" — which is lovely and tells a new player nothing about the system they are inside.
+         * Every rescue now names the count, what is left, and what happens at zero. */
         const n = this.nearest;
         const left = MERCY_MAX - this.mercyUsed;
-        const warn = left === 0 ? ' — favours are running out' : '';
-        this.say(
-          n ? `someone shares a can — pumps ${fmtDist(n.dist)} away${warn}` : `someone shares a can${warn}`,
-          4.2
-        );
+        const where = n ? ` — pumps ${fmtDist(n.dist)} away` : '';
+        const after =
+          left > 0
+            ? `${left} can${left === 1 ? '' : 's'} left, then you're towed home`
+            : `no cans left — run dry again and you're towed home`;
+        this.say(`a passing driver shares a can — ${this.mercyUsed} of ${MERCY_MAX} used. ${after}${where}`, 5.5);
       } else {
         this.stats.resets++;
         this._clearDry();
         this.seconds = this.capacity * RESET_REFILL;
         this.power = 1;
-        this.say('no one is passing this time — a quiet ride back to the start', 4.8);
+        /* THE THREE CANS COME BACK. Operator: "3 lives after respawn too not 1". The count is a
+         * per-RUN allowance, not a per-save one: three cans, then a tow home, then three again.
+         * A permanent counter meant every later run was strictly harsher than the first, which
+         * is the opposite of a cozy game. */
+        if (MERCY_RESETS_ON_RESPAWN) {
+          this.mercyUsed = 0;
+          this._saveMercy();
+        }
+        this.say('towed home — full tank, and your 3 gas cans are back', 5.0);
         this.resetToSpawn?.();
       }
     }

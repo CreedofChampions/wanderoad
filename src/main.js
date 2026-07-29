@@ -37,7 +37,7 @@ import { ChaseCamera } from './car/camera.js';
 import { Autopilot } from './car/autopilot.js';
 import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
-import { Streak } from './game/streak.js';
+import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet } from './game/wallet.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
@@ -366,7 +366,16 @@ async function boot() {
     incomingShares: () => remotes.drainIncomingShares(),
     say: (t, s) => hud.say(t, s),
     resetToSpawn,
+    /* Capacity belongs to the CAR, not to the player. Operator: "each car unlock = capacity
+     * does not transfer from car to car. Reason to restart capacity". CAR.id is the fleet id
+     * chosen in the garage, so swapping cars really does hand you a small tank again. */
+    carId: CAR.id,
   });
+  /* "Am I on a forecourt?" — the one question streak.js asks about petrol stations, answered
+   * from the scan the fuel system already runs (see Fuel's `nearest`) rather than by probing
+   * the world a second time every frame. Operator: "massive forgiveness area around gas
+   * station". See STATION_FORGIVE_R in game/streak.js for the radius and the reasoning. */
+  const nearPump = () => !!fuel.nearest && fuel.nearest.dist <= STATION_FORGIVE_R;
   const fuelGauge = new FuelGauge(hud.root);
 
   /* Coins along the road, gems on open water — src/render/loot.js. `wallet`
@@ -413,6 +422,9 @@ async function boot() {
         const f = applyCarFeel(spec);
         car.setTier(spec.tier);
         car.setPreset(f.assist);
+        /* Capacity is per car and does NOT transfer — swapping in the garage loads this car's
+         * own can count and its own tank. See Fuel.setCar / START_CAPACITY_MUL. */
+        fuel.setCar(spec.id);
       }
       trail.reset(car);
       hud.say(`${CARS[key].label} — ${spec ? spec.blurb : ''}`, 3.2);
@@ -784,7 +796,7 @@ async function boot() {
       // A real impact ends the streak immediately — unless the car is driving itself, in which
       // case the streak is frozen and there is nothing to end. Same flag, same reasoning as the
       // scoring call below; passing it here too is what stops the two disagreeing.
-      streak.update(2, car, { onRoad: 0 }, { paused: auto.on });
+      streak.update(2, car, { onRoad: 0 }, { paused: auto.on, forgive: nearPump() });
       hud.say('ouch', 1.4);
     }
 
@@ -797,7 +809,7 @@ async function boot() {
     /* `paused: auto.on` — operator: auto-drive accrues "no streak". Frozen, not reset: see
      * game/streak.js's update() for why a chauffeured kilometre must not count AND must not
      * cost you the eighty you already have. */
-    streak.update(dt, car, surf, { paused: auto.on });
+    streak.update(dt, car, surf, { paused: auto.on, forgive: nearPump() });
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
      * this frame's real speed and slip, and after the collision resolve so a car that has just
