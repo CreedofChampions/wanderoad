@@ -983,6 +983,10 @@ async function boot() {
     auto,
     trail,
     fleet: FLEET,
+    /* The audio graph, for the same reason `flora` and `props` are here: "is the music
+     * playing, and how loud" can only be answered honestly by reading the gain node that is
+     * actually in the graph, not by trusting a flag. See tools/diag-radio.mjs. */
+    audio,
     solids,
     // `flora` is here so a test can reconcile the colliders against the trees the renderer
     // ACTUALLY DREW rather than against a second opinion about what should be there.

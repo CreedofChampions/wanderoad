@@ -38,13 +38,33 @@ export const STATIONS = [
   { id: 'longway', label: 'The Long Way', scale: 'still', root: 51.9, chordSecs: 26, bellRate: 0.1, drone: 0.7 },
 ];
 
+/* THE STATION THE RADIO WAKES UP ON. Operator: "Music should be autoplay at 30%". Index into
+ * STATIONS above, so 1 is Valley — the warm major one, the right first impression for a cozy
+ * game. Pressing the radio key still cycles from here, and 'off' is still one press away.
+ *
+ * "Autoplay" is honest here rather than aspirational: no browser will start audio before the
+ * visitor has touched the page, so audio/engine.js arms its whole graph on the first
+ * pointerdown/keydown/touchstart (see its constructor). The music therefore starts by itself
+ * the moment the player does anything at all — including the first press of W — with nothing
+ * to click and no station to choose. */
+const AUTOPLAY_STATION = 1;
+
+/** Default radio level, 0..1. The operator's 30%. Multiplied by RADIO_GAIN below, so this is
+ *  a fraction of the radio's own ceiling rather than a fraction of the master bus. */
+const DEFAULT_VOLUME = 0.3;
+
+/** The radio's ceiling against everything else on the bus — the "twelve decibels under the
+ *  wind" in this file's header, expressed once so `next()` and `setVolume()` cannot disagree
+ *  about it (they each used to carry their own copy of 0.16). */
+const RADIO_GAIN = 0.16;
+
 const semi = (hz, n) => hz * Math.pow(2, n / 12);
 
 export class Radio {
   /** @param {AudioContext} ctx @param {GainNode} destination */
-  constructor(ctx, destination, { volume = 0.5 } = {}) {
+  constructor(ctx, destination, { volume = DEFAULT_VOLUME, station = AUTOPLAY_STATION } = {}) {
     this.ctx = ctx;
-    this.station = 0;
+    this.station = station;
     this._t = 0;
     this._chordT = 1e9;
     this._bellT = 0;
@@ -77,6 +97,11 @@ export class Radio {
     this.verb.connect(this.verbGain).connect(this.tone);
 
     this.volume = volume;
+    /* Open the fader for whatever station we woke up on. The graph is built inside the first
+     * user gesture (see AUTOPLAY_STATION), so this runs with the context already running and
+     * the very first update() tick puts a chord out. Ramped rather than set, so the music
+     * fades up over a second instead of arriving as a step. */
+    if (this.on) this.out.gain.setTargetAtTime(this.volume * RADIO_GAIN, ctx.currentTime, 0.4);
   }
 
   get label() {
@@ -92,7 +117,7 @@ export class Radio {
   next() {
     this.station = (this.station + 1) % STATIONS.length;
     const on = STATIONS[this.station].scale !== null;
-    this.out.gain.setTargetAtTime(on ? this.volume * 0.16 : 0, this.ctx.currentTime, 0.5);
+    this.out.gain.setTargetAtTime(on ? this.volume * RADIO_GAIN : 0, this.ctx.currentTime, 0.5);
     this._chordT = 1e9; // change chord immediately so the new station announces itself
     return this.label;
   }
@@ -100,7 +125,7 @@ export class Radio {
   setVolume(v) {
     this.volume = clamp01(v);
     if (STATIONS[this.station].scale) {
-      this.out.gain.setTargetAtTime(this.volume * 0.16, this.ctx.currentTime, 0.3);
+      this.out.gain.setTargetAtTime(this.volume * RADIO_GAIN, this.ctx.currentTime, 0.3);
     }
   }
 
