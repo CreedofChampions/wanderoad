@@ -39,36 +39,53 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
-### Two roads leave the same node in the same direction (the braided-carriageway look)
+### Junction shape — still wrong, and here is what has been tried
 
-The operator's screenshot `i.imgur.com/oU5myVN.png` — three carriageways running side by side
-with their centre lines crossing each other. MEASURED over a 12 km box on three seeds
-(a throwaway script under D:/OpenClaw/tmp did it; fold it into a real diag when
-this is picked up):
+The operator's screenshot `i.imgur.com/oU5myVN.png`: carriageways running side by side with
+their centre lines crossing. Also, on 29 July: "terrain deformation issues around junctions:
+alpine seed 4189486".
 
-    seed 20260726: 371 nodes, 555 approach pairs, 189 leave within 26 deg of each other (34.1%), worst 180.0
-    seed 7:        444 nodes, 747 pairs,          242 (32.4%), worst 180.0
-    seed 424242:   354 nodes, 502 pairs,          169 (33.7%), worst 179.9
+FIRST, A CORRECTION. An earlier version of this section claimed "a third of all node departures
+leave within 26 degrees of each other, worst 180.0" over three seeds. THAT NUMBER WAS WRONG.
+The script behind it compared the two tangents at a shared node and called them a hairpin when
+they pointed the same way — but for a road passing straight THROUGH a node, that is exactly
+what they do, so every straight road in the world was being counted as a 180-degree hairpin.
+Do not act on that number. `tools/diag-roadmap.mjs` was written because of it: it draws the
+network as an SVG, and a picture cannot be wrong in that particular way.
 
-The lattice is innocent: the straight lines between node centres are well spread. It is the
-curvature (`swing`/`curve`) whipping a tangent round near the node that lands two edges on top
-of each other.
+WHAT WAS TRIED AND REVERTED — fanning the departures at a node.
 
-CULLING IS NOT THE FIX, and this was measured rather than assumed. A rule that deletes the
-junior of any pair leaving within N degrees:
+`nodeDir()` gives a node ONE shared tangent and every edge leaves along it. That is exactly
+right for a degree-2 node (it is what makes a road pass through a junction as one continuous
+curve) and it is the obvious suspect for a real junction. So: at a node of degree 3+, rotate
+each edge's departure from the shared tangent towards its own chord (FAN_MIX), plus a
+repulsion pass that pushes any two departures closer than 40 degrees apart.
 
-    N = 6 deg  -> 45 arterials (from 74), 258 km (from 428)
-    N = 10     -> 41, 248 km
-    N = 18     -> 39, 239 km
-    N = 26     -> 39, 235 km   (crossings 175 -> 18, mean 3.89 deg, worst 13.5)
+It does not work, and the failure is visible rather than statistical:
 
-i.e. it fixes the angles perfectly and costs 45% of the network's length. An empty world is a
-worse game than a badly-shaped junction.
+  - FAN_MIX 0.8 straightens the whole network. The roads become near-straight lines between
+    nodes and the game loses the sweeping curves it is built out of. (before.png/after.png,
+    rendered with diag-roadmap at 5 km across, seed 20260726.)
+  - FAN_MIX 0.3 keeps the curves but puts LOOPS and hooks at several junctions — the hermite
+    swings when its end tangent is rotated away from the chord, and TANGENT_BACKOFF cannot
+    rescue it because that only shortens a tangent, it never re-aims one.
+  - The loops come from the blend, not from the repulsion: setting FAN_MIN_SPREAD to 0 leaves
+    them exactly where they were.
 
-The fix is to SPREAD THE DEPARTURE TANGENTS at the node — the same machinery `squareCrossings`
-uses mid-span, applied at the endpoint — which is also literally what the operator asked for:
-"when they get near each other they turn into each other and then a template for a road
-junction is used to connect them". Untried.
+So any future attempt has to re-run the curvature backoff AFTER rotating a tangent, or rotate
+the tangent and move the control point together. Verify with diag-roadmap, not with an angle
+histogram.
+
+WHAT DID WORK, and is shipped: culling lanes that cross an arterial more than 32 degrees from
+square (see the commit "Junctions: a lane that would cross an arterial badly is not built at
+all"). 12 km box, seed 20260726: 175 crossings -> 86, mean 16.48 -> 6.57 degrees, worst
+82.55 -> 24.13, at a cost of 12% of lane length with arterials untouched.
+
+STILL OPEN: the terrain around junctions. `tools/diag-crosslevel.mjs` has two failures that
+predate all of this work and are the likeliest cause of what the operator is seeing —
+55 of 266 car-sized boxes near spawn contain a crossing whose two roads disagree about the
+ground height, worst 12.91 m at (1448,-1952). Alpine seed 4189486 is the operator's own
+repro. (The cull improved this from 80/316 but did not fix it.)
 
 ### Severity-first window allocation in squareCrossings — TRIED, REVERTED, with numbers
 
