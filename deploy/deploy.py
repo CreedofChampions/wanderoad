@@ -37,6 +37,9 @@ DIST = os.path.join(ROOT, "dist")
 SERVER = os.path.join(ROOT, "server")
 REMOTE_BASE = "/home/admin/domains/crumbtown.org/public_html/wanderoad"
 REMOTE_DATA = "/home/admin/domains/crumbtown.org/wanderoad_data"
+# cozydriver.com's own docroot — the apex the competition entry points at. See the rsync in
+# deploy() for why it is a copy and not a symlink.
+REMOTE_APEX = "/home/admin/domains/cozydriver.com/public_html"
 PUBLIC_URL = "https://crumbtown.org/wanderoad/"
 
 TEXT_EXT = {".html", ".js", ".css", ".json", ".svg", ".php", ".txt", ".htaccess", ".map"}
@@ -114,6 +117,35 @@ def main():
     # every link shared so far).
     run(ssh, f"ln -sfn {REMOTE_BASE} {posixpath.dirname(REMOTE_BASE)}/cozydriver")
 
+    # THE APEX DOMAIN, cozydriver.com, gets the same build in the same breath.
+    #
+    # It has its own docroot (a domain root cannot be a symlink into another domain's
+    # public_html without DirectAdmin fighting it back), so this is a copy — but a copy made
+    # BY THE DEPLOY, every time, rather than by hand afterwards. It had drifted a full day
+    # behind: the apex was serving index-DpIYURtD.js while /cozydriver served the current
+    # build, which is exactly the "one source of truth" failure this project keeps paying for.
+    # The build is `base: './'` (vite.config.js), so the same files work at either root.
+    # cp -a, not rsync: rsync is NOT installed on this box, and the first version of this
+    # used it and failed SILENTLY — the smoke test still returned 200 because the apex was
+    # serving yesterday's build perfectly well. Hence the exit-code check below.
+    run(ssh, f"mkdir -p {REMOTE_APEX}")
+    code, out, err = run(
+        ssh,
+        f"cd {REMOTE_BASE} && for p in *; do "
+        f"[ \"$p\" = api ] && continue; [ \"$p\" = cgi-bin ] && continue; "
+        f"rm -rf {REMOTE_APEX}/$p && cp -a \"$p\" {REMOTE_APEX}/; done && "
+        f"cp -a .htaccess {REMOTE_APEX}/ 2>/dev/null; true",
+    )
+    run(ssh, f"chown -R admin:admin {REMOTE_APEX}; chmod -R 755 {REMOTE_APEX}")
+    # and PROVE it took, rather than trusting a 200 from a page that might be yesterday's
+    code, out, err = run(ssh, f"grep -o 'assets/index-[A-Za-z0-9_-]*[.]js' {REMOTE_APEX}/index.html | head -1")
+    apex_bundle = out.strip()
+    code, out, err = run(ssh, f"grep -o 'assets/index-[A-Za-z0-9_-]*[.]js' {REMOTE_BASE}/index.html | head -1")
+    base_bundle = out.strip()
+    print(f"  apex bundle {apex_bundle or '(none)'} vs deployed {base_bundle or '(none)'}")
+    if not apex_bundle or apex_bundle != base_bundle:
+        sys.exit(f"cozydriver.com was NOT updated: it serves {apex_bundle!r}, the deploy is {base_bundle!r}")
+
     run(ssh, f"chown -R admin:admin {REMOTE_BASE} {REMOTE_DATA}")
     run(ssh, f"chmod -R 755 {REMOTE_BASE}; chmod 775 {REMOTE_DATA}")
 
@@ -130,7 +162,8 @@ def main():
 
     print("smoke test…")
     time.sleep(1)
-    for url in [PUBLIC_URL, PUBLIC_URL + "api/state.php?since=0", "https://crumbtown.org/cozydriver/", "https://crumbtown.org/cozydriver/social.jpg"]:
+    for url in [PUBLIC_URL, PUBLIC_URL + "api/state.php?since=0", "https://crumbtown.org/cozydriver/", "https://crumbtown.org/cozydriver/social.jpg",
+                "https://cozydriver.com/", "https://www.cozydriver.com/"]:
         r = subprocess.run(
             ["curl", "-s", "-o", os.devnull, "-w", "%{http_code}", f"{url}{'&' if '?' in url else '?'}cb={int(time.time())}"],
             capture_output=True,
