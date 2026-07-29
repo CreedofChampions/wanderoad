@@ -92,7 +92,42 @@ const ON_ROAD = 0.45;
  *  safely disagree: below this, `wallet.boatUnlocked && inDeepWater` is already true and
  *  rescue.js is already skipping itself, so there is no gap for the old teleport to reappear
  *  in. */
-const ENTER_DEPTH = 0.6;
+/* 0.28, not 0.6. Operator: "u need to be stopped when hitting water and switched to boat --
+ * right now i can cover half my car in water before that". They are describing this number
+ * exactly: with the boat unlocked there is no barrier, so the car drives on until the water
+ * at its own position is 0.6 m deep — a wheel is 0.34 m in radius and the sills sit around
+ * 0.5 m, so 0.6 m IS half the car, and the switch happened after the swim rather than at the
+ * waterline. 0.28 m is just over wheel-hub deep: the moment the wheels are properly wet.
+ *
+ * 0.34 m is exactly a wheel radius: the switch happens when the wheels are under, not when the
+ * doors are. It is not pushed lower than that because EXIT_DEPTH is 0.2 m and the two need real
+ * hysteresis between them or a boat sitting at the waterline flickers between car and boat.
+ *
+ * The other half of the complaint — "u need to be STOPPED when hitting water" — is ENTER_AHEAD
+ * below: the same look-ahead cushion the locked barrier uses now also runs while the boat is
+ * UNLOCKED, so the water brings the car to a halt at the shore and the handover happens there,
+ * instead of the car carrying 60 km/h into a lake and only then becoming a boat. */
+const ENTER_DEPTH = 0.34;
+/** Metres ahead, along the car's own travel, that the UNLOCKED cushion probes — the same
+ *  look-ahead shape (and distance) the locked barrier uses, for the same reason: a car at
+ *  40 km/h covers 11 m a second, so anything that only reads where the car already IS fires
+ *  late. This does not ENTER the boat — it slows the car so that entry happens at the
+ *  waterline with the car nearly stopped. */
+const ENTER_AHEAD = 2.5;
+/** Fraction of the car's forward speed that survives meeting the water. Small on purpose: see
+ *  _enter. Not zero, because a boat that is dead in the water the instant it floats cannot be
+ *  steered clear of the bank it just came off. */
+const ENTER_SPEED_KEPT = 0.18;
+/** m/s the car may still be doing over the last couple of metres before the water. About
+ *  11 km/h — a crawl, so the handover reads as arriving at the shore rather than launching off
+ *  it, which is what the operator asked for. An unlocked driver is meant to REACH the water,
+ *  so this caps the approach rather than refusing it. */
+const ENTER_APPROACH = 3.0;
+/** Depth the ahead-probe must show for entry. Shallower than ENTER_DEPTH on purpose: it is a
+ *  forecast, not a measurement, and a shoreline shelves, so 0.18 m two metres ahead means real
+ *  water by the time the nose is there. Same number as BARRIER_CLAMP_DEPTH and rescue.js's own
+ *  CONTACT — "your wheels are in the water" is one line in this project, not three. */
+const ENTER_AHEAD_DEPTH = 0.18;
 /** Depth at the boat's own position below which it has grounded and hands back to the car.
  *  Exported alongside EXIT_PROBE_DIST/EXIT_STEEP_SLOPE below for the same reason — a fixture
  *  search that wants "a shore this class can actually exit onto" needs all three. */
@@ -238,9 +273,17 @@ export class BoatMode {
     // first, whether this is the moment to ENTER, and only if not, whether the LOCKED BARRIER
     // needs to bite.
     if (this.wallet.boatUnlocked) {
-      const depthHere = waterDepth(surf);
-      if (depthHere > ENTER_DEPTH && (surf ? surf.onRoad : 0) < ON_ROAD) this._enter(car);
-      return; // unlocked and not deep enough yet — nothing else to do
+      const offRoad = (surf ? surf.onRoad : 0) < ON_ROAD;
+      if (offRoad && waterDepth(surf) > ENTER_DEPTH) {
+        this._enter(car);
+        return;
+      }
+      /* Not deep enough yet — but if there is water a couple of metres ahead, the water is
+       * what stops the car. Velocity only: the locked barrier's positional walk-back is
+       * deliberately NOT run here, because an unlocked driver is allowed to end up in the
+       * lake; they just are not allowed to arrive there at speed. */
+      if (this._waterAhead(car)) this._cushion(dt, car);
+      return;
     }
 
     this._stepBarrier(dt, car);
@@ -315,12 +358,60 @@ export class BoatMode {
   }
 
   /** Unlocked, deep enough, off-road: hand the wheel to the boat. */
+  /** Is there real water within ENTER_AHEAD metres along the way this car is actually going?
+   *  Same probe the locked barrier uses (see _stepBarrier), including the heading fallback for
+   *  a car that is stopped and pointed at the lake. */
+  _waterAhead(car) {
+    if (!this.terrain) return false;
+    const t = this.terrain();
+    if (!t) return false;
+    const vMag = Math.hypot(car.vx, car.vz);
+    const hx = vMag > 0.3 ? car.vx / vMag : Math.sin(car.yaw);
+    const hz = vMag > 0.3 ? car.vz / vMag : Math.cos(car.yaw);
+    const probe = t.surface(car.x + hx * ENTER_AHEAD, car.z + hz * ENTER_AHEAD);
+    if ((probe ? probe.onRoad : 0) >= ON_ROAD) return false; // a causeway is not a lake
+    return waterDepth(probe) > ENTER_AHEAD_DEPTH;
+  }
+
+  /** The velocity half of the barrier, reused: project out whatever part of the car's motion
+   *  points at the water and damp the rest. Shared shape with _stepBarrier's (a) — see its
+   *  comment for why projecting beats decaying (lateral movement and backing away are left
+   *  completely alone). */
+  _cushion(dt, car) {
+    const vMag = Math.hypot(car.vx, car.vz);
+    if (vMag < 1e-4) return;
+    const hx = car.vx / vMag;
+    const hz = car.vz / vMag;
+    const toward = car.vx * hx + car.vz * hz;
+    if (toward <= ENTER_APPROACH) return; // already crawling — let them in
+    /* A CAP, not a damp. The locked barrier damps towards zero because a locked driver must
+     * not reach the water at all; an unlocked one must, so this only ever removes the excess
+     * above a walking-pace approach. Damping here instead was measured and is a trap: the
+     * exponential never quite reaches the waterline, so the boat could not be entered at all
+     * and tools/bench-boat.mjs went from "afloat in 2.2 s" to never afloat. */
+    const scale = ENTER_APPROACH / toward;
+    car.vx *= scale;
+    car.vz *= scale;
+  }
+
   _enter(car) {
     this._active = true;
     // Clamped into the boat's own operating range rather than carried over exactly — a car
     // arriving at 90 km/h should not spend its first boating frame governed back down as
     // though it had hit a wall; see BOAT_MAX_SPEED/BOAT_REVERSE_MUL for the range.
-    this.speed = clamp(car.speed, -BOAT_MAX_SPEED * BOAT_REVERSE_MUL, BOAT_MAX_SPEED);
+    /* HITTING WATER STOPS YOU. Operator: "u need to be stopped when hitting water and switched
+     * to boat". Water is not a ramp — a car that arrives at 60 km/h does not keep 60 km/h once
+     * it is floating, and carrying the speed over is what made the entry read as sliding into
+     * the lake rather than meeting it. So the entry speed is scaled hard and then clamped into
+     * the boat's own range: you arrive, you are stopped by the water, and you set off again
+     * under the boat's own power. Reverse is left alone — backing INTO water is already
+     * deliberate. */
+    const arriving = car.speed > 0 ? car.speed * ENTER_SPEED_KEPT : car.speed;
+    this.speed = clamp(arriving, -BOAT_MAX_SPEED * BOAT_REVERSE_MUL, BOAT_MAX_SPEED);
+    // and the car itself stops dead, so nothing of the old momentum survives the handover
+    car.vx = 0;
+    car.vz = 0;
+    car.speed = this.speed;
     this.yaw = car.yaw;
     this.roll = 0;
     this._bounceCooldown = 0; // a fresh voyage starts with the exit test live, not mid-cooldown

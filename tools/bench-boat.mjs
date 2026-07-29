@@ -242,17 +242,32 @@ console.log('\n── UNLOCKED: the boat engages, covers real ground, and hands 
   // the only variable that changed between the two sections is the wallet.
   let enteredAt = null;
   let enterX = 0, enterZ = 0;
+  let enterDepth = 0, approachKph = 0, prevKph = 0;
   for (let i = 0; i < 60 * 10 && enteredAt === null; i++) {
     const t = i * DT;
-    if (!boat.active) car.update(DT, DRIVE);
-    boat.update(DT, car, T.surface(car.x, car.z), DRIVE);
+    if (!boat.active) {
+      car.update(DT, DRIVE);
+      prevKph = Math.abs(car.kph); // the last speed the CAR had before the handover
+    }
+    const surfNow = T.surface(car.x, car.z);
+    boat.update(DT, car, surfNow, DRIVE);
     if (boat.active) {
       enteredAt = t;
       enterX = car.x;
       enterZ = car.z;
+      enterDepth = rescueWaterDepth(surfNow); // rescue.js's own helper — the same one boat.js gates on
+      approachKph = prevKph;
     }
   }
   check(enteredAt !== null, 'boat mode engages once unlocked and deep enough', enteredAt === null ? 'never' : `${enteredAt.toFixed(2)} s`, 'within 10 s');
+  /* THE OPERATOR'S TWO COMPLAINTS, MEASURED. "u need to be stopped when hitting water and
+   * switched to boat -- right now i can cover half my car in water before that": so the depth
+   * at the moment of handover must be about a wheel, not about a door sill, and the car must
+   * arrive at a crawl rather than at speed. */
+  console.log(`       handover at ${enterDepth.toFixed(2)} m of water, arriving at ${approachKph.toFixed(1)} km/h`);
+  check(enterDepth < 0.45, 'the switch happens at the WATERLINE, not half way up the car', `${enterDepth.toFixed(2)} m`, '< 0.45 m (a wheel is 0.34 m)');
+  check(approachKph < 16, 'and the water has already stopped the car by then', `${approachKph.toFixed(1)} km/h`, '< 16 km/h');
+  check(Math.abs(boat.speed) < 4, "the boat sets off under its own power, not the car's momentum", `${Math.abs(boat.speed).toFixed(2)} m/s`, '< 4 m/s');
 
   // 20 s of throttle, out across open water. car.update() is never called while active — see
   // main.js's own wiring — boat.update() is the whole of the car's motion here.
