@@ -242,6 +242,51 @@ Deno.serve(async (req) => {
       return json(req, res);
     }
 
+    /* ── leaderboard ─────────────────────────────────────────────────────────
+     * Submit-and-fetch in one call, the same fused idiom as the tick below: the request
+     * carries your best, the response carries the top of the table. One round trip.
+     *
+     * MONOTONIC BY CONSTRUCTION. A row only ever moves up — a submission lower than what is
+     * already stored is ignored rather than written. That is not politeness, it is what stops
+     * a player losing their place because they opened the game and immediately hit a tree, and
+     * it means the client can submit as often as it likes without needing to know the state.
+     *
+     * Filtered by SEED, because a streak on one world is not comparable to a streak on another:
+     * different roads, different corners, different luck. Ranking them together would be
+     * meaningless and would quietly reward whoever found the straightest world.
+     */
+    if (op === 'board') {
+      const seed = Number.isFinite(body.seed) ? Math.max(0, Math.floor(body.seed)) : 0;
+      const claim = Number.isFinite(body.best) ? Math.max(0, Math.floor(body.best)) : 0;
+
+      /* The one number a stranger supplies, so it is bounded here as well as on the client.
+       * 4000 km is far past any real run and still cheap to store; beyond that the submission
+       * is a bug or a liar, and either way it does not belong on the board. */
+      if (claim > 0 && claim <= 4000000) {
+        const rows = await db.Leaderboard.filter({ playerId: me, seed }, '-best', 1);
+        const row = rows[0] ?? null;
+        if (!row) {
+          await db.Leaderboard.create({
+            playerId: me, seed, best: claim, at: nowS,
+            name: cleanName(body.name) || '',
+          }).catch(() => {});
+        } else if (claim > (row.best ?? 0)) {
+          await db.Leaderboard.update(row.id, {
+            best: claim, at: nowS, name: cleanName(body.name) || row.name || '',
+          }).catch(() => {});
+        }
+      }
+
+      const top = await db.Leaderboard.filter({ seed }, '-best', 20).catch(() => []);
+      res.board = top.map((r, i) => ({
+        rank: i + 1,
+        name: r.name || 'someone',
+        best: r.best ?? 0,
+        you: r.playerId === me,
+      }));
+      return json(req, res);
+    }
+
     /* ── tick ────────────────────────────────────────────────────────────── */
     const car = body.car && typeof body.car === 'object' ? body.car : {};
     let x = num(car.x, 1e7);

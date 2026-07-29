@@ -1,0 +1,36 @@
+// One row per player: the longest they have ever driven without leaving the road.
+//
+// The streak is the only mechanic in this game — distance without touching the verge — so it
+// is the only thing worth ranking. A row is written at most once per player and only ever
+// grows: the function refuses a submission lower than the one already stored, so a player
+// cannot lose their place by having a bad run afterwards.
+//
+// Deliberately thin. No history, no per-run rows, no timestamps beyond the one needed to break
+// ties. A leaderboard that stores every attempt is a table that grows without limit for a
+// number nobody reads twice.
+{
+  "name": "Leaderboard",
+  "type": "object",
+  "title": "Leaderboard",
+  "description": "Longest streak without leaving the road, one row per player.",
+  "properties": {
+    "playerId": { "type": "string", "minLength": 12, "maxLength": 12, "pattern": "^[0-9a-f]{12}$" },
+
+    // Shown next to the score. Cleaned and length-capped client-side and again in the function,
+    // because it is the one field here a stranger chooses the contents of.
+    "name": { "type": "string", "maxLength": 24 },
+
+    // Metres. Integer: a leaderboard arguing about centimetres is noise.
+    "best": { "type": "integer", "minimum": 0 },
+
+    // Which world the run happened in. A streak on one seed is not comparable to a streak on
+    // another — the roads are different — so the board is filtered by seed and the default
+    // world has its own ranking.
+    "seed": { "type": "integer", "minimum": 0 },
+
+    // Seconds. Only used to order two identical scores, oldest first, so being first to reach
+    // a number is worth something.
+    "at": { "type": "integer", "minimum": 0 }
+  },
+  "required": ["playerId", "best", "seed"]
+}

@@ -108,6 +108,14 @@ function wr_db(): PDO
     $pdo->exec('CREATE INDEX IF NOT EXISTS presence_cell ON presence(cell, seen)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS saves(
         player_id TEXT PRIMARY KEY, seed INTEGER, body TEXT NOT NULL, updated REAL NOT NULL)');
+    /* The leaderboard: longest run without leaving the road, one row per player per seed.
+     * Keyed on both because a streak on one world is not comparable to a streak on another.
+     * The best column only ever moves up -- see the board op for why. */
+    $pdo->exec('CREATE TABLE IF NOT EXISTS board(
+        player_id TEXT NOT NULL, seed INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '',
+        best INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(player_id, seed))');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS board_rank ON board(seed, best DESC, at ASC)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, n INTEGER NOT NULL, win REAL NOT NULL)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS signals(
@@ -396,6 +404,38 @@ function wr_handle(): void
     }
 
     /* ── save / load ─────────────────────────────────────────────────────── */
+    /* Leaderboard: submit and fetch in one call, mirroring the Base44 function exactly.
+     * A submission below the stored best is ignored rather than written, so a player cannot
+     * lose their place with a bad run and the client can submit whenever it likes. */
+    if ($op === 'board') {
+        $seed = wr_int($req['seed'] ?? 0, 0, PHP_INT_MAX);
+        $claim = wr_int($req['best'] ?? 0, 0, 4000000);
+        if ($claim > 0) {
+            $nm = isset($req['name']) && is_string($req['name']) ? mb_substr($req['name'], 0, 24) : '';
+            $up = $pdo->prepare('INSERT INTO board(player_id, seed, name, best, at) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(player_id, seed) DO UPDATE SET
+                    best = MAX(board.best, excluded.best),
+                    name = excluded.name,
+                    at   = CASE WHEN excluded.best > board.best THEN excluded.at ELSE board.at END');
+            $up->execute([$me, $seed, $nm, $claim, $now]);
+        }
+        $q = $pdo->prepare('SELECT player_id, name, best FROM board WHERE seed = ? ORDER BY best DESC, at ASC LIMIT 20');
+        $q->execute([$seed]);
+        $out = [];
+        $i = 0;
+        foreach ($q->fetchAll() as $r) {
+            $i++;
+            $out[] = [
+                'rank' => $i,
+                'name' => ($r['name'] !== '' ? $r['name'] : 'someone'),
+                'best' => (int) $r['best'],
+                'you'  => ($r['player_id'] === $me),
+            ];
+        }
+        $res['board'] = $out;
+        return $pdo;
+    }
+
     if ($op === 'save' || $op === 'load') {
         $st = $pdo->prepare('SELECT seed, body FROM saves WHERE player_id = ?');
         $st->execute([$me]);
