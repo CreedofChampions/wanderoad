@@ -239,7 +239,7 @@ function sampleAttachEvents(camPos, carX, carZ, carYaw) {
             rz = t.z - carZ;
           const rl = Math.hypot(rx, rz) || 1;
           const cosAhead = (rx * fwdX + rz * fwdZ) / rl;
-          events.push({ dist, ahead: cosAhead > Math.cos((50 * Math.PI) / 180), simT: simClock / 1000, kind: t.kind });
+          events.push({ dist, ahead: cosAhead > Math.cos((50 * Math.PI) / 180), simT: simClock / 1000, kind: t.kind, level: entry.level, cx: entry.cx, cz: entry.cz, mx: entry.mx, mz: entry.mz });
         }
       }
     } else if (!attached) {
@@ -316,13 +316,28 @@ function report(label, evs) {
   if (allStats) console.log(`  ALL:     min ${allStats.min.toFixed(1)} m   p10 ${allStats.p10.toFixed(1)} m   median ${allStats.p50.toFixed(1)} m   mean ${allStats.mean.toFixed(1)} m   max ${allStats.max.toFixed(1)} m`);
   if (aheadStats) {
     console.log(`  AHEAD:   min ${aheadStats.min.toFixed(1)} m   p10 ${aheadStats.p10.toFixed(1)} m   median ${aheadStats.p50.toFixed(1)} m   mean ${aheadStats.mean.toFixed(1)} m   max ${aheadStats.max.toFixed(1)} m`);
-    const worstEvents = evs.filter((e) => e.ahead).sort((a, b) => a.dist - b.dist).slice(0, 5);
-    console.log('  closest 5 (ahead):');
+    const worstEvents = evs.filter((e) => e.ahead).sort((a, b) => a.dist - b.dist).slice(0, 10);
+    console.log('  closest 10 (ahead):');
     for (const e of worstEvents) {
-      console.log(`    ${e.dist.toFixed(1)} m ahead (${e.kind}), t=${e.simT.toFixed(1)}s  -- ${(e.dist / cruiseMs).toFixed(1)}s from the car at mean speed`);
+      console.log(`    ${e.dist.toFixed(1)} m ahead (${e.kind}), t=${e.simT.toFixed(1)}s  -- ${(e.dist / cruiseMs).toFixed(1)}s from the car at mean speed  [node level ${e.level} @ (${e.mx.toFixed(0)},${e.mz.toFixed(0)})]`);
     }
   } else {
     console.log('  (no forward attach events recorded in this window)');
+  }
+  // by-level breakdown: which LOD level is actually producing the close attaches?
+  const byLevel = new Map();
+  for (const e of evs.filter((e) => e.ahead)) {
+    let s = byLevel.get(e.level);
+    if (!s) {
+      s = [];
+      byLevel.set(e.level, s);
+    }
+    s.push(e.dist);
+  }
+  console.log('  by node level (ahead only):');
+  for (const [lv, arr] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
+    const s = stats(arr);
+    console.log(`    level ${lv}: ${arr.length} events, min ${s.min.toFixed(1)} m, median ${s.p50.toFixed(1)} m, <400m: ${arr.filter((d) => d < 400).length}, <800m: ${arr.filter((d) => d < 800).length}`);
   }
   return { aheadStats, allStats };
 }

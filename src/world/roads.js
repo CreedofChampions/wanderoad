@@ -47,7 +47,31 @@ export const TIERS = [
     // straightest of them ran 116 deg/km — nine bends over 2 km, with long straight runs
     // between them. Same radius, more of them: the worst arterial in an eight-seed sweep went
     // from 148 to 168 deg/km and the tightest radius on the tier did not move (median 103 m).
-    curve: 0.44, step: 38, bend: 155, radius: 122, swing: 0.10, grade: 222,
+    //
+    // step 19, not 38 — the operator: "roads need to be smoother -- less 2/4s attached end to
+    // end more smooth winding track". That is not a complaint about HOW MUCH the road turns
+    // (R5 already passes) but about the road being delivered as chords: a polyline stepping
+    // `step` metres round a radius R breaks by step/R at every vertex, so at 38 m on this
+    // tier's 122 m floor every bend was an 18-degree-per-vertex polygon. Measured over the
+    // 12 km box at the default spawn (`node tools/diag-smooth.mjs`, new this round): the
+    // arterial facet angle goes mean 9.17 -> 5.88 deg, p95 17.85 -> 11.15, max 27.00 -> 18.23,
+    // and the share of vertices breaking by more than 10 deg goes 44.6% -> 9.0%.
+    //
+    // IT IS CHEAP, which is the only reason it ships: `bench-chunk.mjs` over all eight levels
+    // 1183 -> 1231 ms, +4%. The vertex count doubles but the terrain sampling, not the road
+    // polyline, is what a chunk build actually spends its time on. R5 went UP as a side effect,
+    // 216 -> 232 deg/km, because the finer polyline resolves turn the old chords cut off, and
+    // `diag-cliffs.mjs` improved 48 -> 31 samples over 45 deg (finer sampling, less earthwork —
+    // the same effect recorded when the winding first landed). `diag-seam.mjs` clean.
+    //
+    // The `grade` smoothing length below is in METRES and `passesFor` converts it to a pass
+    // count, so halving the step does not shorten the elevation smoothing — but it does need
+    // 273 passes where 38 m needed 68, which is why that function's clamp had to go from 160
+    // to 320. Without that the road would have started following the ground it used to ride
+    // over. It also costs about a third of the density headroom: `diag-density.mjs` arterial
+    // length kept goes 77.7% -> 75.6% against its 74% bar, because the water cull samples the
+    // base polyline and a finer one clips three more arterials into a lake.
+    curve: 0.44, step: 19, bend: 155, radius: 122, swing: 0.10, grade: 222,
   },
   {
     cell: 620, jitter: 0.42, connect: 0.5, width: 6.2, verge: 3.0,
@@ -98,11 +122,75 @@ export function nodePos(i, j, tier, seed, out) {
   return out;
 }
 
-/** Does cell (i,j) connect east (dir 0) or south (dir 1)? */
-export function connects(i, j, dir, tier, seed) {
+/** The raw hash test — does cell (i,j) connect east (dir 0) or south (dir 1)? */
+function connectsRaw(i, j, dir, tier, seed) {
   const T = TIERS[tier];
   const h = hash2i(i * 2 + dir, j, seed ^ (tier === 0 ? 0x9c41 : 0x4f77));
   return h * F < T.connect;
+}
+
+/** Degree from the raw hash alone. Never calls connects(), so the rescue below cannot recurse. */
+function rawDegree(i, j, tier, seed) {
+  return (
+    (connectsRaw(i, j, 0, tier, seed) ? 1 : 0) +
+    (connectsRaw(i, j, 1, tier, seed) ? 1 : 0) +
+    (connectsRaw(i - 1, j, 0, tier, seed) ? 1 : 0) +
+    (connectsRaw(i, j - 1, 1, tier, seed) ? 1 : 0)
+  );
+}
+
+/* The four links at a node, in a fixed order: [i, j, dir] of each candidate. Shared by the
+ * degree counts and the rescue so "the node's links" means one thing everywhere. */
+const LINKS_AT = (i, j) => [
+  [i, j, 0],
+  [i, j, 1],
+  [i - 1, j, 0],
+  [i, j - 1, 1],
+];
+
+/**
+ * Would this link be ADDED to rescue a dead end at (ni, nj)?
+ *
+ * THE OPERATOR'S RULE, verbatim: "no road should fail to connect to other roads." Every
+ * previous attempt at this DELETED the offending lane, and every one of them cost too much:
+ * one ply took junction density to 65.1% against a 66% floor, a full cascade to 60.3%, and a
+ * road network with a third of its roads missing is a worse game than one with a few stubs.
+ *
+ * So this does the opposite. A node the hash gave exactly ONE link gets a SECOND one, chosen
+ * deterministically from its own remaining candidates. Nothing is deleted, the network only
+ * ever gains road, and a dead end stops existing rather than being decorated with a turning
+ * head. Density goes UP, which is the first time any answer to this has moved that number the
+ * right way.
+ *
+ * It is pure and symmetric: both endpoints of a link run the identical test against the same
+ * hashes, so the two sides always agree without talking to each other — which is what lets
+ * this work in a chunked, infinitely streamed world with no global pass.
+ *
+ * ONE PLY ONLY, and deliberately. Adding a link changes the degree of the node at its far end,
+ * so a full fixed point is a global solve on an infinite lattice. One ply removes the dead end
+ * the player is actually looking at.
+ */
+function rescueLink(i, j, dir, tier, seed) {
+  // Which node is this link's "own" node, and which is the far one.
+  const fi = dir === 0 ? i + 1 : i;
+  const fj = dir === 0 ? j : j + 1;
+  for (const [ni, nj] of [[i, j], [fi, fj]]) {
+    if (rawDegree(ni, nj, tier, seed) !== 1) continue;
+    /* Pick this node's rescue link deterministically: the first candidate that the hash did
+     * NOT already give it. Fixed order, so every caller picks the same one. */
+    for (const [li, lj, ld] of LINKS_AT(ni, nj)) {
+      if (connectsRaw(li, lj, ld, tier, seed)) continue;
+      // The first unused candidate IS the rescue. Is it the link being asked about?
+      return li === i && lj === j && ld === dir;
+    }
+  }
+  return false;
+}
+
+/** Does cell (i,j) connect east (dir 0) or south (dir 1)? */
+export function connects(i, j, dir, tier, seed) {
+  if (connectsRaw(i, j, dir, tier, seed)) return true;
+  return rescueLink(i, j, dir, tier, seed);
 }
 
 /**
@@ -301,6 +389,39 @@ function drownsInWater(i, j, dir, tier, seed, tag) {
 function linkLive(i, j, dir, tier, seed, tag) {
   if (!connects(i, j, dir, tier, seed)) return false;
   return !drownsInWater(i, j, dir, tier, seed, tag);
+}
+
+/**
+ * A road that runs out into open water and STOPS.
+ *
+ * The operator, with a screenshot of a carriageway ending on a lake shore: "roads should not go
+ * out into the middle of the sea and stop like this either."
+ *
+ * These are not hash dead ends — the hash gave the node two or more links, so `isLeafLane` and
+ * the degree-1 rescue both correctly leave it alone. What happened is that the water cull
+ * deleted the CONTINUATION for drowning in a lake, and the surviving stub was left pointing at
+ * the water it was culled from. The right answer is not to rescue it (that would put the road
+ * back over the lake, which is the thing the cull exists to prevent) and not to decorate it —
+ * it is to take the stub away too, so the network stops short of the shore instead of walking
+ * into it.
+ *
+ * NARROW ON PURPOSE. It fires only when the far node has no live link left OTHER than this one
+ * AND at least one of the links it lost was lost to water. A blanket live-degree cull was
+ * measured twice and cost the junction count its floor (65.1% and 60.3% against 66%); this
+ * targets the specific shape in the screenshot and nothing else.
+ */
+function drownedStub(i, j, dir, tier, seed, tag) {
+  const fi = dir === 0 ? i + 1 : i;
+  const fj = dir === 0 ? j : j + 1;
+  let others = 0;
+  let drowned = 0;
+  for (const [li, lj, ld] of LINKS_AT(fi, fj)) {
+    if (li === i && lj === j && ld === dir) continue; // the link being tested
+    if (!connects(li, lj, ld, tier, seed)) continue; // the hash never offered it
+    if (drownsInWater(li, lj, ld, tier, seed, tag)) drowned++;
+    else if (!isLeafLane(li, lj, ld, tier, seed)) others++;
+  }
+  return others === 0 && drowned > 0;
 }
 
 /**
@@ -871,7 +992,7 @@ function baseGeomFor(i, j, dir, tier, seed, _tag) {
  * layers — the final one and the base one — without the reach formula existing twice and
  * quietly drifting apart.
  */
-function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0) {
+function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0, onlyTier) {
   const out = [];
   /* Once per call, not once per edge: the fingerprint of the height field the water cull's
    * cache is keyed on. Two land-and-water samples — the same price `worldTag` pays for the
@@ -880,6 +1001,12 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0) {
    * so a single `buildGeom` can never see the field change halfway through itself. */
   const tag = tag0 !== undefined ? tag0 : fieldTag(seed);
   for (let tier = 0; tier < TIERS.length; tier++) {
+    /* An arterial only ever levels against other arterials, and asking for the lanes as well
+     * meant BUILDING every lane's geometry inside a 1.8 km box just to filter it straight back
+     * out — measured at +280 ms on an 8 km coarse chunk (tools/bench-chunk.mjs L7 498 -> 775 ms).
+     * Skipping the tier here is exactly equivalent to filtering the result, so nothing about
+     * box-independence changes; it just does not pay for the answer it throws away. */
+    if (onlyTier !== undefined && tier !== onlyTier) continue;
     const T = TIERS[tier];
     const maxChord = T.cell * (1 + 2 * T.jitter);
     const bulge = (8 / 27) * Math.min(T.curve * 2, 1.25) * maxChord + T.swing * maxChord;
@@ -893,6 +1020,7 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0) {
         for (let dir = 0; dir < 2; dir++) {
           if (!linkLive(i, j, dir, tier, seed, tag)) continue; // no hash link, or it crosses a lake
           if (isLeafLane(i, j, dir, tier, seed)) continue; // a lane to nowhere is not a road
+          if (drownedStub(i, j, dir, tier, seed, tag)) continue; // a road that ends in a lake
           const g = fetch(i, j, dir, tier, seed, tag);
           const m = g.width * 0.5 + g.verge + pad;
           if (g.maxX < x0 - m || g.minX > x1 + m || g.maxZ < z0 - m || g.minZ > z1 + m) continue;
@@ -967,8 +1095,23 @@ const CROSS_TANGENT_TRIALS = [1.6, 1.4, 1.2, 1, 0.72, 0.5, 0.34, 0.22];
  * Not every crossing can reach 90 degrees AND this radius inside a window this file is willing
  * to spend — see `DELTA_BACKOFF` — so this is a target `squareCrossings` tries hard for, not a
  * guarantee; `unknot` is the guarantee.
+ *
+ * 62 -> 40, and the reason it is affordable now is `CROSS_WIN_K`/`CROSS_WIN_MAX` below, which
+ * were raised in the same change. The instrumented sweep that produced this (a copy of this
+ * file with counters in `squareCrossings`) found the mechanism was not radius-limited by the
+ * BEND, it was window-limited: at 62 the mean correction ASKED for was 30.9 deg and the mean
+ * actually APPLIED was 14.7 deg — under half — with 34 of 181 corrected crossings backed all
+ * the way off to 0.16 of their ask. Widening the window first and only then dropping the
+ * radius target buys the correction back at almost no curvature cost: over seven seeds and a
+ * 12 km box each, tightest radius anywhere in the network improves on five seeds
+ * (37/52/45/26/50/40/58 m -> 37/47/45/26/50/46/48 m), and the two that fall (52 -> 47,
+ * 58 -> 48) stay well clear of `UNKNOT_RADIUS`. Swept: 30 and 35 square up slightly better
+ * still (all-seed mean 14.8 and 15.1 against 15.5) and were REJECTED, because at 30 the
+ * tightest turn on the 4 km box falls 56 -> 38 m — a road nobody should have to steer round at
+ * cruising speed, which is the wrong trade for a cozy game (the same reasoning as `radius` at
+ * the top of this file).
  */
-const CROSS_SAFE_RADIUS = 62;
+const CROSS_SAFE_RADIUS = 40;
 
 /**
  * Fallback fractions of the full `delta` correction, tried in order until the best hermite
@@ -981,8 +1124,14 @@ const CROSS_SAFE_RADIUS = 62;
  * to meet a junction; landing exactly at 90 degrees by turning inside 30 m reads as a car spun
  * out at the junction. The task this file was built for accepts the former as an honest
  * partial fix and asks for the number, not a cliff-edge switch to "give up entirely".
+ *
+ * Finer than it was (six steps -> eight), because the search takes the FIRST fraction that
+ * clears `CROSS_SAFE_RADIUS` and coarse steps therefore throw away everything between that
+ * fraction and the one above it: a crossing that could afford 0.7 of its ask was being handed
+ * 0.58. Worth about 1.5 deg of the ask on its own, and it cannot cost anything, since every
+ * fraction is still checked against the same radius.
  */
-const DELTA_BACKOFF = [1, 0.78, 0.58, 0.42, 0.28, 0.16];
+const DELTA_BACKOFF = [1, 0.85, 0.7, 0.58, 0.46, 0.34, 0.22, 0.12];
 
 /**
  * Best hermite tangent length among `CROSS_TANGENT_TRIALS` (of the chord) — whichever peaks
@@ -1122,7 +1271,25 @@ function squareCrossings(base, seed, tag) {
     // The window grows with the correction so a near-parallel crossing (up to 90 deg to
     // find) gets the room to bend without turning tighter than CROSS_SQUARE_RADIUS; a
     // crossing already close to square gets a short, barely-visible nudge.
-    const desiredM = clamp(24 + Math.abs(delta) * 160, 24, 230);
+    //
+    // CROSS_WIN_K/CROSS_WIN_MAX doubled (160/230 -> 320/420), and this — not the radius
+    // target — is what was actually holding the correction back. Turning `delta` inside a
+    // half-window of W metres needs a radius of about W/delta, so a 45 deg crossing asked for
+    // a 150 m window and therefore a ~190 m radius on paper, but a hermite's PEAK curvature
+    // runs several times its mean, so the radius test kept failing and DELTA_BACKOFF kept
+    // giving the correction away. Twice the window is twice the radius for the same ask, and
+    // it is spent on exactly the crossings that need it (the window is proportional to the
+    // ask, so a nearly-square crossing still gets a short nudge). The window is still clamped
+    // below by this edge's own nodes and by its neighbouring crossings, so a long arterial can
+    // use the whole 420 m and a short lane simply gets less.
+    const desiredM = clamp(24 + Math.abs(delta) * 320, 24, 420);
+    // Symmetric on purpose. An ASYMMETRIC window (all the room on whichever side has it) was
+    // built and measured, and it is a trap: it rescues the 39-of-220 crossings that currently
+    // get no correction at all for lack of room, and the all-seed mean and median both improve
+    // (15.7 -> 14.4, 8.2 -> 6.5) — but the WORST crossing in the 12 km box goes 63 deg off
+    // square to 87 deg off, because bending an edge hard against one end swings a nearby
+    // stretch of it into near-parallel with something else. Worse worst case is a regression
+    // on the exact thing being fixed here, so the lopsided window is not taken.
     let win = Math.max(2, Math.round(desiredM / Math.max(base.span, 1e-3)));
     win = Math.min(win, kc - Math.max(cursor, 0), n - 1 - kc);
     if (idx < mine.length - 1) win = Math.min(win, Math.floor((clamp(Math.round(mine[idx + 1].ka), 1, n - 2) - kc) * 0.5));
@@ -1534,7 +1701,7 @@ function blur(y, tmp, n, passes, w) {
  * has a floor rather than being "as fine as you like".
  */
 function passesFor(metres, spacing, w) {
-  return clamp(Math.round((metres * metres) / (2 * w * spacing * spacing)), 1, 160);
+  return clamp(Math.round((metres * metres) / (2 * w * spacing * spacing)), 1, 320);
 }
 
 /* ── a node has ONE height ───────────────────────────────────────────────────
@@ -1727,10 +1894,12 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
  * So the levelling neighbourhood is now derived from the EDGE, never from the caller:
  *
  *   raw   profileEdge and nothing else. Already pure.
- *   L1    raw, levelled against every ARTERIAL that crosses this edge. Arterials are never
- *         moved by anything, so for tier 0 this is also the final answer.
+ *   L0    raw, levelled against the ARTERIALS that outrank it where they cross it away from
+ *         its own lattice nodes. Only tier 0 has one, and for tier 0 it is the final answer.
+ *   L1    raw, levelled against the L0 height of every ARTERIAL that crosses this edge.
  *   L2    L1, levelled against the L1 height of every LANE that crosses it and outranks it
- *         (the same stable key order the old two-pass code used).
+ *         (the same stable key order the old two-pass code used), and never in a place the
+ *         arterial pass already claimed.
  *
  * Each level is a pure function of (seed, edge key, height field) and is memoised, so every
  * sampler in every worker returns the same number and the recursion is one hop deep — L2
@@ -1762,6 +1931,8 @@ const CARVE_REACH = 80;
 const PROFILE_CAP = 4096;
 /** key -> { y, water, land } straight out of profileEdge */
 const RAW = new Map();
+/** key -> Float32Array, an ARTERIAL levelled against the arterials that outrank it. Tier 0 only. */
+const LVL0 = new Map();
 /** key -> Float32Array, levelled against arterials only */
 const LVL1 = new Map();
 /** key -> { y, water }, the final canonical profile */
@@ -1862,27 +2033,128 @@ function partnersOf(e, seed) {
   return out;
 }
 
+/** `partnersOf`, but only the ARTERIALS — the same box, without building the lanes in it. */
+function arterialPartnersOf(e, seed) {
+  const list = geomsInBox(e.minX, e.minZ, e.maxX, e.maxZ, seed, CROSS_PAD, geomFor, undefined, 0).map(edgeFrom);
+  const out = [];
+  for (const o of list) if (o.key !== e.key) out.push(o);
+  out.sort(keyOrder);
+  return out;
+}
+
 /**
- * Levelled against the arterials that cross it, each at its RAW height. Final for arterials,
- * which are never moved by anything.
+ * How close to a lattice node an arterial's profile becomes untouchable, in metres.
  *
- * Letting arterials level against each other was tried and is in the git history of this
- * comment for a reason: two arterials SHARE their end node, and each smooths its own profile
- * over its own kilometre of ground, so at a pass one arrives 18 m below the land and the
- * other 18 m above it. Levelling that pair moved every arterial in a 4 km square, by up to
- * 36 m, and put a 134% gradient on the trunk network where tools/diag-relief.mjs had been
- * reading 24%. The disagreement is real and worth fixing one day — at the source, with a
- * node height that both edges are pinned to — but it is not a levelling problem.
+ * The whole reason arterial-vs-arterial levelling was reverted last time is at a node: two
+ * arterials that SHARE an end node each smooth their own profile over their own kilometre of
+ * ground, arrive at that node disagreeing, and pulling one onto the other there moved 17 of 17
+ * arterials in a 4 km square by up to 36 m and put a 134% gradient on the trunk network.
+ *
+ * `pinToNodes` already settles the node itself — both edges are pinned to ONE `nodeY`. So the
+ * node is not a levelling question and never was; the crossing a kilometre AWAY from it is.
+ * This radius is what separates the two. 150 m: four tier-0 samples (step 38 m) of ramp, so a
+ * correction feathers in over a real length rather than stepping; comfortably past the 18 m
+ * capture radius below so a node can never be levelled "by accident" as the nearest point on a
+ * partner; and a twelfth of the 1800 m tier-0 cell, so it cannot swallow a genuine mid-edge
+ * crossing.
+ */
+const GUARD_RADIUS = 150;
+
+/** World positions of the two lattice nodes an edge runs between, as a flat [x,z,x,z]. */
+function edgeNodeXZ(e, seed) {
+  const [tier, rest] = e.key.split(':');
+  const [i, j, dir] = rest.split(',').map(Number);
+  const t = Number(tier);
+  const p = [0, 0];
+  const out = new Array(4);
+  nodePos(i, j, t, seed, p);
+  out[0] = p[0];
+  out[1] = p[1];
+  nodePos(dir === 0 ? i + 1 : i, dir === 0 ? j : j + 1, t, seed, p);
+  out[2] = p[0];
+  out[3] = p[1];
+  return out;
+}
+
+/**
+ * THE elevation of an ARTERIAL: raw, levelled against the arterials that outrank it where they
+ * genuinely cross it mid-run, and never touched within `GUARD_RADIUS` of its own lattice nodes.
+ *
+ * ── WHY THIS EXISTS, AND WHY IT IS NOT THE THING THAT WAS REVERTED ──────────────────────────
+ *
+ * Two arterials crossing each other were never levelled at all, and the census in
+ * tools/diag-crosslevel.mjs prices that at 19 crossings over 1 m across five seeds in a 6 km
+ * box, worst 27.33 m — a road passing bodily through another road, which is the fall-through
+ * this project spent days eliminating. It is also what held back the operator's #1 request:
+ * spawning the car facing the other way down the road drives it through one of them.
+ *
+ * The earlier attempt failed for a reason that is precise, and this is the difference:
+ *
+ *   IT FIRED AT SHARED NODES. Two arterials leaving one node run side by side there by
+ *   construction (`nodeDir` gives them one shared tangent), so `levelAgainst`'s 18 m capture
+ *   finds the partner at the node itself, on every adjacent pair in the network — which is
+ *   every arterial, not a handful of crossings. `guard` closes that: an arterial's own two
+ *   nodes are untouchable, so this pass can only ever move the MIDDLE of a road.
+ *
+ * The measurement that says it worked this time is not "17 of 17 moved" against "some moved" —
+ * it is the same numbers the revert was judged on: tools/diag-relief.mjs's per-preset worst
+ * gradient and tools/diag-seam.mjs's S3 (edges meeting at a shared node), both of which the
+ * reverted version wrecked and both of which are gates on this one.
+ *
+ * Recursion is bounded the same way L1/L2 are: an arterial yields only to arterials whose key
+ * sorts BEFORE its own, so the chain is strictly decreasing and cannot cycle, and every level
+ * is memoised.
+ */
+function level0(e, tag, seed, land, waterAt) {
+  const k = `${tag}:${e.key}`;
+  const hit = LVL0.get(k);
+  if (hit) return hit;
+  const raw = rawProfile(e, tag, seed, land, waterAt);
+  const winners = arterialPartnersOf(e, seed).filter((o) => o.key < e.key);
+  if (!winners.length) return cacheSet(LVL0, k, raw.y);
+  // Claim the cache BEFORE recursing so a partner that somehow asks back gets the raw profile
+  // rather than looping. The key order makes that impossible, but a cache that depends on an
+  // invariant holding elsewhere is the kind of thing this file has been bitten by.
+  cacheSet(LVL0, k, raw.y);
+  const work = workEdge(e, raw);
+  for (const o of winners) o.y.set(level0(o, tag, seed, land, waterAt));
+  levelAgainst(work, winners, winners.length, { guard: edgeNodeXZ(e, seed) });
+  /* NO POST-CLAMP HERE, and that is a measured decision, not an omission.
+   *
+   * canonicalProfile ends with an earthwork-and-water clamp over the lane it just levelled, so
+   * the obvious thing is to do the same to an arterial. Doing it cost the trunk network its
+   * gradients, and by a lot: worst arterial grade rolling 27.8% -> 45.2%, alpine 28.1% -> 50.1%,
+   * dunes 21.9% -> 46.7% on tools/diag-relief.mjs, with everything else in this function
+   * unchanged. Removing the clamp put all six presets back on their exact pre-change figures.
+   *
+   * The mechanism is written down 300 lines below, in levelAgainst's own comment: a clamp
+   * applied AFTER the feather puts a step in the profile between one sample and the next, which
+   * is a wall, not a road. An arterial's raw profile can legitimately sit outside the ±18 m
+   * earthwork budget already (profileEdge's clamp is against a different quantity), so the
+   * clamp was not trimming a correction, it was cutting the ORIGINAL profile in half a metre of
+   * road — and tier 0's samples are 19 m apart, so a 4 m cut is a 21% gradient on its own.
+   *
+   * The two things the clamp was there to protect are protected where they belong instead:
+   * levelAgainst caps its TARGET at land ± MAX_EARTHWORK before it feathers anything, and no
+   * road may go under water — which is a gate, `node tools/diag-water.mjs`, held at 0 samples
+   * underwater across this change.
+   */
+  return cacheSet(LVL0, k, work.y);
+}
+
+/**
+ * Levelled against the arterials that cross it, each at its FINAL height. Final for arterials,
+ * which are settled by `level0`.
  */
 function level1(e, tag, seed, land, waterAt) {
-  if (e.tier === 0) return rawProfile(e, tag, seed, land, waterAt).y;
+  if (e.tier === 0) return level0(e, tag, seed, land, waterAt);
   const k = `${tag}:${e.key}`;
   const hit = LVL1.get(k);
   if (hit) return hit;
   const raw = rawProfile(e, tag, seed, land, waterAt);
   const work = workEdge(e, raw);
   const arts = partnersOf(e, seed).filter((o) => o.tier === 0);
-  for (const o of arts) applyRaw(o, rawProfile(o, tag, seed, land, waterAt));
+  for (const o of arts) o.y.set(level0(o, tag, seed, land, waterAt));
   levelAgainst(work, arts, arts.length);
   return cacheSet(LVL1, k, work.y);
 }
@@ -1896,7 +2168,7 @@ function canonicalProfile(e, tag, seed, land, waterAt) {
   const hit = LVL2.get(k);
   if (hit) return hit;
   const raw = rawProfile(e, tag, seed, land, waterAt);
-  if (e.tier === 0) return cacheSet(LVL2, k, { y: raw.y, water: raw.water });
+  if (e.tier === 0) return cacheSet(LVL2, k, { y: level0(e, tag, seed, land, waterAt), water: raw.water });
 
   const arts = [];
   const lanes = [];
@@ -1908,13 +2180,23 @@ function canonicalProfile(e, tag, seed, land, waterAt) {
   }
 
   const work = workEdge(e, raw);
-  for (const o of arts) applyRaw(o, rawProfile(o, tag, seed, land, waterAt));
-  levelAgainst(work, arts, arts.length);
+  for (const o of arts) o.y.set(level0(o, tag, seed, land, waterAt));
+  /* The authority the ARTERIAL pass takes, kept and handed to the lane pass below.
+   *
+   * Without it the second pass quietly undid the first. At (-253,1182) on the shipped seed —
+   * 990 m from spawn, straight down the reversed heading, which is why it mattered — lane
+   * 1:-1,1,0 crosses arterial 0:-1,0,0 and was correctly pulled onto it, and then crosses
+   * lane 1:-1,0,1 SEVENTEEN METRES further on, which is inside the 18 m capture radius, and
+   * was pulled straight back off it. Result: 2.51 m out of level at an arterial junction, in
+   * every box, on a road the player is now pointed at. The arterial is the top of the
+   * priority order or it is not; this is what makes it so. */
+  const held = new Float32Array(work.y.length);
+  levelAgainst(work, arts, arts.length, { record: held });
   cacheSet(LVL1, k, Float32Array.from(work.y));
   // Each outranking lane at ITS OWN level-1 height. One hop, and no further: that bound is
   // the difference between an answer and the unbounded chain the old code had.
   for (const o of lanes) o.y.set(level1(o, tag, seed, land, waterAt));
-  levelAgainst(work, lanes, lanes.length);
+  levelAgainst(work, lanes, lanes.length, { respect: held });
 
   /* Floors last, and both of them. levelCrossings runs after profileEdge's earthwork clamp,
    * so a correction that meets a road in a valley can leave the lane far outside the 18 m
@@ -2159,7 +2441,7 @@ export class RoadField {
          * note above is about what happens when these two copies stop agreeing, so when one
          * moves the other moves in the same commit. See terrain.js's CUT_BATTER for why the
          * cutting side can afford a wider shoulder and the fill side cannot. */
-        const shoulder = Math.min(half + 3.0 + drop * (landH > ey ? 2.0 : 1.6), reach);
+        const shoulder = Math.min(half + 3.0 + drop * (landH > ey ? 2.2 : 1.6), reach);
         w = 1 - smoothstep(half, shoulder, ed);
         if (w <= 0.0005) continue;
       }
@@ -2240,8 +2522,23 @@ export function roadCamber(c) {
  * WHO `others` IS MATTERS MORE THAN WHAT THIS FUNCTION DOES. See canonicalProfile: the list
  * is derived from the lane's own bounds and never from a caller's query box, which is what
  * makes the result a property of the world instead of of the question.
+ *
+ * `opts` carries the three things a SECOND levelling pass over the same edge needs, all of
+ * them measured requirements rather than options anybody chose:
+ *
+ *   record   Float32Array(n) — the authority this pass took at each sample, written out.
+ *   respect  Float32Array(n) — authority an EARLIER pass took, which this one may not undo.
+ *            Without it the lane-vs-lane pass silently overwrote the lane-vs-arterial pass
+ *            17 m away from an arterial junction and put the lane back 2.51 m above the
+ *            arterial it had just been levelled onto — measured at (-253,1182) on the shipped
+ *            seed, 990 m from spawn straight down the reversed heading.
+ *   guard    [x,z,...] — points this edge's profile may not be moved near, at GUARD_RADIUS.
+ *            Used for an edge's OWN lattice nodes when arterials level against each other:
+ *            an arterial endpoint is pinned to a node height its neighbours are also pinned
+ *            to, and moving it is precisely how the reverted attempt put a 134% gradient on
+ *            the trunk network.
  */
-function levelAgainst(lane, others, count) {
+function levelAgainst(lane, others, count, opts = null) {
   if (!count) return;
 
   /* Which of `others` could touch this lane at all? One box test each, hoisted out of the
@@ -2260,13 +2557,33 @@ function levelAgainst(lane, others, count) {
   if (!nn) return;
 
   const n = lane.y.length;
+  const respect = opts && opts.respect;
+  const record = opts && opts.record;
+  const guard = opts && opts.guard;
   // Pass 1: find every point of this lane that sits on another road, and by how much it is
   // out. Feathering happens in pass 2 so one crossing cannot undo another.
   const fix = new Float32Array(n);
   const weight = new Float32Array(n);
+  /* What share of each sample this pass may touch AT ALL — kept so the feather in pass 2 can be
+   * masked by it too. Smoothing a correction outwards is exactly how a pass reaches into a
+   * sample it was not allowed to claim directly. */
+  const own = new Float32Array(n);
+  for (let k = 0; k < n; k++) own[k] = 1;
   for (let k = 0; k < n; k++) {
     const x = lane.pts[k * 2];
     const z = lane.pts[k * 2 + 1];
+    /* How much of this sample this pass is allowed to own: nothing an earlier, higher-priority
+     * pass already claimed, and nothing inside a guarded node. Computed before the distance
+     * search so a fully-blocked sample costs no segment tests at all. */
+    let allow = respect ? 1 - respect[k] : 1;
+    if (guard && allow > 0) {
+      for (let g = 0; g < guard.length; g += 2) {
+        const gd = Math.hypot(x - guard[g], z - guard[g + 1]);
+        if (gd < GUARD_RADIUS) allow = Math.min(allow, smoothstep(0, GUARD_RADIUS, gd));
+      }
+    }
+    own[k] = allow;
+    if (allow <= 0.001) continue;
     let bestD = Infinity;
     let bestY = 0;
     for (let ai = 0; ai < nn; ai++) {
@@ -2294,9 +2611,10 @@ function levelAgainst(lane, others, count) {
       const ld = lane.land ? lane.land[k] : lane.y[k];
       const tgt = clamp(bestY, ld - MAX_EARTHWORK, ld + MAX_EARTHWORK);
       fix[k] = tgt - lane.y[k];
-      weight[k] = w;
+      weight[k] = w * allow;
     }
   }
+  if (record) for (let k = 0; k < n; k++) if (weight[k] > record[k]) record[k] = weight[k];
 
   /* Pass 2: apply, then feather the correction into the neighbouring points so the lane ramps
    * up to the junction instead of stepping at it. The ramp is a LENGTH — about 85 m of lane,
@@ -2316,7 +2634,7 @@ function levelAgainst(lane, others, count) {
     }
     delta.set(smooth);
   }
-  for (let k = 0; k < n; k++) lane.y[k] += delta[k];
+  for (let k = 0; k < n; k++) lane.y[k] += delta[k] * own[k];
 }
 
 /**

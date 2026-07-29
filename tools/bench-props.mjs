@@ -16,7 +16,8 @@ import { Object3D } from 'three';
 import {
   PROP_KINDS, PROP_IDS, PROP_BY_ID, propsInBox, stationsInBox, stationSpacing, fuelCansInBox,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, CAN_FOOT, STATION_MAX_GRADE, STATION_APRON_HALF_DEPTH, STATION_APRON_HALF_WIDTH,
-  nearestStation, stationSpur, STATION_MAX_STEP,
+  nearestStation, stationSpur, stationPad, stationSits, STATION_MAX_STEP,
+  STATION_MAX_ROUGH, STATION_MAX_DOOR, PAD_BURY_MAX,
 } from '../src/world/props.js';
 import { Props, missingGeometry, measureAll, CAN_BOB_AMP, stationSolids, buildStation } from '../src/render/props.js';
 import { PB } from '../src/render/painted.js';
@@ -370,6 +371,26 @@ console.log('\n── petrol stations ──────────────
   check(sp.metresPerStation > 1500 && sp.metresPerStation < 5000, 'metres of arterial per station',
     sp.metresPerStation.toFixed(0), '1500 .. 5000 (a tank is ~9 km)');
 
+  /* ...and the same number a DRIVER gets, which is not the same number. `stationSpacing` is
+   * pure — it counts every station the placement chose. The tiler then drops the ones whose
+   * forecourt cannot be graded onto the real, road-carved ground it is standing on (see
+   * stationPad / STATION_MAX_ROUGH / STATION_MAX_DOOR in src/world/props.js), and a station
+   * that is never drawn is not a station you can refuel at. Reporting only the pure figure
+   * after adding that filter would overstate the world by exactly the drop rate, so the drop
+   * rate is measured here, on real Terrain, and the effective spacing is printed next to it. */
+  {
+    const all = stationsInBox(-4500, -4500, 4500, 4500, SEED);
+    let kept = 0;
+    for (const s of all) {
+      const t = new Terrain(SEED, s.x - 40, s.z - 40, s.x + 40, s.z + 40, 40);
+      if (stationSits(s, (x, z) => t.height(x, z))) kept++;
+    }
+    const eff = sp.metresPerStation * (all.length / Math.max(1, kept));
+    console.log(`       real-ground test keeps ${kept} of ${all.length} (${((100 * kept) / all.length).toFixed(0)}%) -> effective ${eff.toFixed(0)} m of arterial per station`);
+    check(kept / all.length >= 0.7, 'forecourts that survive the real ground', `${kept}/${all.length}`, '>= 70%');
+    check(eff < 5000, 'EFFECTIVE metres of arterial per drawn station', eff.toFixed(0), '< 5000 (a tank is ~9 km)');
+  }
+
   // Pure? Two different boxes must agree on the same station.
   const a = stationsInBox(0, 0, 4000, 4000, SEED);
   const b = stationsInBox(-2000, -2000, 6000, 6000, SEED).filter((s) => s.x >= 0 && s.x < 4000 && s.z >= 0 && s.z < 4000);
@@ -399,26 +420,32 @@ console.log('\n── petrol stations ──────────────
    * the fix (STATION_MAX_STEP in world/props.js + PAD_STEP in render/props.js), across three
    * seeds and 30 stations: worst burial 11.27 m, 24.3% of all hitboxes gated out, and at 12 of
    * the 30 stations 4-6 of the 7 were gone. After: 0.95 m and 0.0%. */
-  // The identical clamp render/props.js's _bake applies. If PAD_STEP ever moves there this
-  // copy has to move with it; there is no way to import it, deliberately, since nothing but
-  // the bake may choose a pad height.
-  const PAD_STEP = 1.2;
+  /* ── 28 July: the pad height is NOT re-derived here any more ────────────────
+   * This block used to carry its own copy of the bake's clamp (`pad = clamp(hi + 0.04,
+   * s.y ± 1.2)`) with a comment saying there was deliberately no way to import it. That copy
+   * outlived the thing it was copying, and worse, both copies were grading against `s.y` —
+   * the host edge's own height off `land()`, a surface the car does not drive on (see
+   * stationPad's header in src/world/props.js). The harness therefore agreed with the renderer
+   * about a number that was wrong in both places, and reported 1.20 m where the drawn tarmac
+   * was standing 16 m over the ground. It now calls the SAME stationPad() the bake calls, with
+   * a real Terrain, which is the only way this check can catch the two disagreeing again. */
   let worstBury = 0;
   let gatedOut = 0;
   let hitboxes = 0;
+  let worstDoor = 0;
+  let worstRough = 0;
+  let sits = 0;
+  let tried = 0;
   for (const s of a.slice(0, 12)) {
     const terr = new Terrain(SEED, s.x - 40, s.z - 40, s.x + 40, s.z + 40, 40);
-    const ca = Math.cos(s.yaw);
-    const sa = Math.sin(s.yaw);
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const [dx, dz] of [[9, 6], [-9, 6], [9, -6], [-9, -6], [0, 7], [0, -7]]) {
-      const g = terr.height(s.x + dx * ca - dz * sa, s.z + dx * sa + dz * ca);
-      lo = Math.min(lo, g);
-      hi = Math.max(hi, g);
-    }
-    const pad = Math.min(Math.max(hi + 0.04, s.y - PAD_STEP), s.y + PAD_STEP);
-    worstStep = Math.max(worstStep, Math.abs(pad - s.y));
+    const P = stationPad(s, (x, z) => terr.height(x, z));
+    const pad = P.y;
+    tried++;
+    if (stationSits(s, (x, z) => terr.height(x, z))) sits++;
+    else continue; // a station the tiler will not draw cannot be measured as if it were drawn
+    worstDoor = Math.max(worstDoor, P.door);
+    worstRough = Math.max(worstRough, P.rough);
+    worstStep = Math.max(worstStep, Math.abs(pad - P.hRoad));
     worstGrade = Math.max(worstGrade, s.grade);
 
     // Every hitbox this station will register, against the ground actually under each one.
@@ -437,23 +464,31 @@ console.log('\n── petrol stations ──────────────
      * the number that actually decides whether the drawn driveway is a gentle grade or a
      * cliff — the fall-through-class invariant this project has been bitten by once already,
      * now checked for the spur specifically, using the identical Terrain the renderer used. */
-    const spur = stationSpur(s);
-    const hRoad = terr.height(spur.mouthX, spur.mouthZ);
-    if (!isFinite(hRoad)) worstSpurEndFinite = false;
-    else worstSpurRamp = Math.max(worstSpurRamp, Math.abs(hRoad - pad));
+    if (!isFinite(P.hRoad)) worstSpurEndFinite = false;
+    else worstSpurRamp = Math.max(worstSpurRamp, Math.abs(P.hRoad - pad));
   }
-  check(worstStep <= 1.21, 'worst step from road to forecourt (m)', worstStep.toFixed(2), '<= 1.2 (PAD_STEP)');
+  /* The step from the real carriageway edge to the forecourt slab. It used to be held at
+   * PAD_STEP (1.2 m) by a clamp; that clamp is gone, because it was measured against `land()`
+   * and it is what buried forecourts. What replaces it is not a looser bound on the same
+   * quantity, it is a DIFFERENT and stricter guarantee: the slab is graded to the ground at
+   * the driveway's own arrival point (worstDoor below, capped at STATION_MAX_DOOR), and the
+   * spur then follows the real ground from the road to that point instead of spanning it. So
+   * this number is now free to be whatever the hillside is, and tools/diag-spur.mjs is the
+   * check that matters — it measures the DRAWN surface against the DRIVEN one directly. */
+  console.log(`       worst road-to-forecourt height difference ${worstStep.toFixed(2)} m (carried by the spur, which follows the ground)`);
+  check(worstDoor <= STATION_MAX_DOOR + 1e-6, 'step where the driveway meets the slab (m)', worstDoor.toFixed(2), `<= ${STATION_MAX_DOOR} (STATION_MAX_DOOR)`);
+  check(worstRough <= STATION_MAX_ROUGH + 1e-6, 'real ground spread under a forecourt slab (m)', worstRough.toFixed(2), `<= ${STATION_MAX_ROUGH} (STATION_MAX_ROUGH)`);
+  check(sits > 0 && sits >= tried * 0.5, 'forecourts that survive the real-ground test', `${sits}/${tried}`, '> half');
   check(worstGrade <= STATION_MAX_GRADE, 'steepest road a station sits on', worstGrade.toFixed(3), `<= ${STATION_MAX_GRADE} (STATION_MAX_GRADE)`);
-  console.log(`       ${hitboxes} station hitboxes over ${Math.min(a.length, 12)} stations, worst ground-above-pad ${worstBury.toFixed(2)} m`);
+  console.log(`       ${hitboxes} station hitboxes over ${sits} drawn stations, worst ground-above-pad ${worstBury.toFixed(2)} m`);
   check(gatedOut === 0, 'station hitboxes buried out of reach of collide.js', gatedOut, `0 of ${hitboxes}`);
-  /* The bound is not a taste: the placement guarantees the ground is within STATION_MAX_STEP
-   * of the road, the bake may lift the slab PAD_STEP of the way to meet it, so the residue is
-   * their difference. The 0.25 on top is the seven-point pad probe missing a local high spot
-   * between its own samples. Measured across six seeds: 0.95 .. 1.79 m, against a 3.6 m kiosk —
-   * i.e. a forecourt building always stands at least half its own height proud of the hill,
-   * which is what the (separate, absolute) height-gate check above then confirms. */
-  const BURY_MAX = STATION_MAX_STEP - PAD_STEP + 0.25;
-  check(worstBury < BURY_MAX, 'deepest a forecourt is buried in its own hillside (m)', worstBury.toFixed(2), `< ${BURY_MAX.toFixed(2)} (STATION_MAX_STEP - PAD_STEP + probe slack)`);
+  /* The bound is now a hard property of stationPad rather than a residue of two other caps:
+   * the slab is lifted until nothing under it stands more than PAD_BURY_MAX over it, and
+   * PAD_BURY_MAX (1.5 m) is under the height of the shortest forecourt hitbox plus collide.js's
+   * own 0.4 m of slack, so a buried-out-of-reach collider is impossible by construction. The
+   * check above is the one that proves that end-to-end; this one localises a regression to the
+   * grading if it ever fails. Before this round, measured the same way: 0.95 .. 1.79 m. */
+  check(worstBury <= PAD_BURY_MAX + 1e-6, 'deepest a forecourt is buried in its own hillside (m)', worstBury.toFixed(2), `<= ${PAD_BURY_MAX} (PAD_BURY_MAX)`);
   {
     // ...and the placement's own promise, read off the record it wrote rather than re-derived.
     let worstPlaced = 0;
@@ -818,8 +853,12 @@ console.log('\n── a real station hitbox actually stops the car ────�
       // building" is asked of the thing it actually reached first (the pump island stands
       // between the road and the kiosk) rather than only of the kiosk it was aimed at.
       const stationSolidsHere = [];
+      const apronSolidsHere = [];
       for (const list of solids.byChunk.values()) {
-        for (const s of list) if (s.kind === 'station' && Math.hypot(s.x - st.x, s.z - st.z) < 30) stationSolidsHere.push(s);
+        for (const s of list) {
+          if (s.kind !== 'station' || Math.hypot(s.x - st.x, s.z - st.z) > 30) continue;
+          (s.apron ? apronSolidsHere : stationSolidsHere).push(s);
+        }
       }
       check(stationSolidsHere.length === 7, 'forecourt colliders registered with the resolver', stationSolidsHere.length, '7 (STATION_HITBOXES)');
       /* A REAL approach: in off the road at the spur mouth (see approachFrom/launch above),

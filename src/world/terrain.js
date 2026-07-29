@@ -77,13 +77,31 @@ const BATTER = 1.6;
  * preset, the one with a recorded ceiling — does not move off zero at all. 2.6 breaks it, so
  * the ceiling on this knob is a measured cliff edge rather than a feeling.
  *
+ * ── 2.2, 28 July: re-swept on the CURRENT world, and the cliff cost is NOT monotonic ────────
+ *
+ * The operator asked for more softening again ("somewhat but not totally done -- more
+ * smoothing"). The table above predicted 2.4 would cost cliffs; measured on the world as it
+ * stands today (which is no longer the world that table was taken on — `diag-cliffs.mjs` reads
+ * 0.009%, not the 0.000% recorded above), the curve turns out to have a dip in it:
+ *
+ *   batter  diag-cliffs (default, 360k samples)   alpine bank 8 m off       carriageway edge
+ *   2.0     31  (0.009%)                          mean 2.32 m, 95th 3.35 m  0.45%
+ *   2.2     28  (0.008%)   <- shipped             mean 2.15 m, 95th 3.06 m  0.42%
+ *   2.4     36  (0.010%)                          mean 2.00 m, 95th 2.82 m  0.46%
+ *
+ * So 2.2 softens the bank by 7-9% at every offset and takes THREE SAMPLES OFF the cliff count
+ * at the same time — it is not a trade at all on this world. 2.4 softens more and costs five
+ * samples, so it was measured and left. The alpine bank 24 m out goes 95th 12.20 -> 11.08 m.
+ * `diag-seam.mjs` clean on both presets, `npm test` green, `diag-abovedeck.mjs --terrain alpine`
+ * PASS at 0.42% against its 1.00% bar.
+ *
  * WHAT THIS CANNOT DO, stated so nobody re-opens it expecting more: in the alpine highlands
  * about 43% of the ground beside a road stands above it at ANY batter, because that is what a
  * mountain is. "Never terrain above a road" is only literally achievable by flattening the
  * mountains. This grades the shoulder; it does not delete the hillside.
  *
  * Both copies of the batter formula move together, always — see roads.js's carve(). */
-const CUT_BATTER = 2.0;
+const CUT_BATTER = 2.2;
 
 /**
  * Score credit per degree of sky the best massif visible from a spawn candidate fills, capped
@@ -572,14 +590,21 @@ export function findSpawn(seed, hintX = 0, hintZ = 0, opts = {}) {
        * not seen without touching the spawn point, its water safety, or its grade gate. Adding
        * pi rather than negating the tangent: the heading is an absolute bearing, and -atan2
        * would mirror it across the axis instead of reversing it. */
-      /* REVERSED SPAWN IS BUILT AND HELD BACK, deliberately. `+ Math.PI` here is the whole
-       * change and it works — but driving out the other way puts the car through a crossing
-       * that is genuinely 3.63 m out of level (browser R2, 1 of 9, reproducible twice). That
-       * defect is not new and not caused by this; the old heading simply never sampled it.
-       * Shipping the reversal without fixing the crossing would aim every new player at the
-       * exact fall-through the game has spent days eliminating. Restore the `+ Math.PI` the
-       * moment R2 reads 0/9. */
-      best = { x, z, y, heading: Math.atan2(dx, dz), score };
+      /* RESTORED. It was held back because driving out this way put the car through a crossing
+       * genuinely 3.63 m out of level (browser R2, 1 of 9, reproduced twice), and aiming every
+       * new player at a fall-through is worse than showing him road he has seen before.
+       *
+       * The crossing is fixed at the source, in world/roads.js: arterials now level against the
+       * arterials that outrank them (`level0`), and the lane-vs-lane pass may no longer undo the
+       * lane-vs-arterial pass that ran before it (`levelAgainst`'s `respect`). The measurement
+       * that lifts the hold is `node tools/diag-crosslevel.mjs`: **0 crossings over 1.0 m within
+       * 2600 m of this spawn point, in every direction**, against 46 over five 6 km boxes before.
+       * The nearest car box that can still see a mismatched crossing at all is 2023 m away and
+       * it lies in the FORWARD half — the heading below now points away from it.
+       *
+       * Adding pi rather than negating the tangent: the heading is an absolute bearing, and
+       * -atan2 would mirror it across the axis instead of reversing it. */
+      best = { x, z, y, heading: Math.atan2(dx, dz) + Math.PI, score };
     }
   }
   // The old fallback returned the hint completely unvalidated. findDrySpot() never does.

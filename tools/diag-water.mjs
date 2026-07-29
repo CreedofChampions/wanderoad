@@ -2,7 +2,7 @@
  * local water level. The player reported driving underwater; this is the number that says
  * whether it is fixed. */
 import { Terrain, waterFn } from '../src/world/terrain.js';
-const SEED = 20260726;
+const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 const R = 2500;
 const T = new Terrain(SEED, -R, -R, R, R, 200);
 const water = waterFn(SEED);

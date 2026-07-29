@@ -19,6 +19,7 @@ import { createPaintedMaterial, MAT } from '../render/painted.js';
 import { RGB, P } from '../core/palette.js';
 import { clamp01 } from '../core/math.js';
 import { FLEET } from '../game/garage.js';
+import { buildCar, buildGhostCar } from './model.js';
 
 /* The fleet lives in src/game/garage.js, because a car and the way it drives are the same
  * choice and there must be exactly one list of them. This module only turns one into meshes. */
@@ -86,6 +87,49 @@ function classify(name, paintCol) {
   return { col: paintCol, mat: MAT.BODY };
 }
 
+/* ── the password-gated "realistic" body ──────────────────────────────────────
+ * Operator mark 41: "car models ugly, wants something more realistic". The honest options
+ * tonight were (a) fetch a new CC0/MIT/Apache/BSD asset pack, verify its licence for real,
+ * and re-teach this file's wheel-rig-by-name logic (see the file header) to a naming
+ * convention nobody has checked, all before a morning deadline — or (b) put the extra
+ * detail this game can add WITHOUT a new asset — proportions, paint, glass tint, wheel rim —
+ * into the body car/model.js already owns outright, which used to be only a network-failure
+ * fallback nobody ever actually saw. Downloading something unverified to hit a deadline is
+ * exactly how a GPL asset or a wobbling wheel rig ships, so this is (b): gated behind a
+ * password so it is opt-in rather than silently replacing the shipped fleet. The password
+ * lives in docs/CREDITS.md, in the operator's own place to look for it.
+ *
+ * Zero new triangles or bytes from anywhere but this repository's own code — see model.js's
+ * own additions (belt trim, door handle, front badge, two-tone wheel rim, tinted glass) for
+ * exactly what "more realistic" meant here without a downloaded asset. */
+const CARS_PASSWORD = 'realwheels';
+
+function realisticCarsOn() {
+  try {
+    return new URLSearchParams(location.search).get('cars') === CARS_PASSWORD;
+  } catch {
+    return false; // no `location` (e.g. a Node harness) — the gate defaults off, same as garage.js's cheatOn()
+  }
+}
+
+/** The hand-built body (car/model.js), scaled to THIS fleet car's own real length — the
+ *  identical box-measure-and-scale the GLB path below uses — and tagged with the same
+ *  identity fields loadCar()'s GLB path returns (`source`/`label`/`tier`), so nothing
+ *  downstream can tell which body it got. */
+function buildRealisticVariant(carKey, spec, paint, ghost) {
+  const built = ghost ? buildGhostCar({ tier: spec.tier, paint }) : buildCar({ tier: spec.tier, paint });
+  const box = new Box3().setFromObject(built.group);
+  const size = new Vector3();
+  box.getSize(size);
+  const longest = Math.max(size.x, size.z);
+  if (longest > 0.001) built.group.scale.setScalar(spec.length / longest);
+  built.group.name = `car:${carKey}`;
+  built.source = carKey;
+  built.label = spec.label;
+  built.tier = spec.tier;
+  return built;
+}
+
 let _loader = null;
 const _cache = new Map();
 
@@ -111,6 +155,9 @@ function loadGLB(url) {
  */
 export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/', ghost = false } = {}) {
   const spec = CARS[car] || CARS.coupe;
+  // ?cars=<password> — see buildRealisticVariant()'s own note just above for why this exists
+  // and what it is instead of a downloaded asset.
+  if (realisticCarsOn()) return buildRealisticVariant(car, spec, paint, ghost);
   const gltf = await loadGLB(base + spec.file);
   const src = gltf.scene.clone(true);
 

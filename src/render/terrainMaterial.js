@@ -13,10 +13,11 @@
 
 import { RawShaderMaterial, DoubleSide, FrontSide } from 'three';
 import { vertHead, fragHead, GL_HASH, GL_NOISE, GL_SKY, GL_SHADOW, GL_LIGHT, glCloudField, DEPTH_FS } from '../core/glsl.js';
-import { glslPalette, biomeTintArrays } from '../core/palette.js';
+import { glslPalette, biomeTintArrays, biomeGroundArrays, GROUND_SHARPEN } from '../core/palette.js';
 import { sharedUniforms } from './uniforms.js';
 
 const TINTS = biomeTintArrays();
+const RAMPS = biomeGroundArrays();
 
 /** The per-biome tint tables, injected as GLSL constant arrays. */
 function glslBiomeTints() {
@@ -32,8 +33,20 @@ function glslBiomeTints() {
   const n = TINTS.count;
   return /* glsl */ `
 const int NBIOME = ${n};
-const vec3 B_GROUND[${n}] = vec3[${n}](
-  ${arr(TINTS.ground, n, 3)}
+const float GROUND_SHARPEN = ${GROUND_SHARPEN.toFixed(4)};
+// Each biome's OWN four-stop ground ramp. Not a multiplier over one shared green — a
+// multiplier cannot change a hue, which is exactly why five biomes read as three.
+const vec3 B_LIT[${n}] = vec3[${n}](
+  ${arr(RAMPS.lit, n, 3)}
+);
+const vec3 B_MID[${n}] = vec3[${n}](
+  ${arr(RAMPS.mid, n, 3)}
+);
+const vec3 B_SHADE[${n}] = vec3[${n}](
+  ${arr(RAMPS.shade, n, 3)}
+);
+const vec3 B_HOLLOW[${n}] = vec3[${n}](
+  ${arr(RAMPS.hollow, n, 3)}
 );
 const vec3 B_ROCK[${n}] = vec3[${n}](
   ${arr(TINTS.rock, n, 3)}
@@ -95,10 +108,9 @@ void main(){
   float w[NBIOME];
   weights(w);
 
-  vec3 tintG = vec3(0.0), tintR = vec3(0.0), haze = vec3(0.0);
+  vec3 tintR = vec3(0.0), haze = vec3(0.0);
   vec4 scal = vec4(0.0);
   for(int i=0;i<NBIOME;i++){
-    tintG += B_GROUND[i]  * w[i];
     tintR += B_ROCK[i]    * w[i];
     haze  += B_HAZE[i]    * w[i];
     scal  += B_SCAL[i]    * w[i];
@@ -115,36 +127,32 @@ void main(){
   float blot = fbm2(vWorld.xz * 0.0042, 4) * 0.5 + 0.5;
   float grain = pn2(vWorld.xz * 0.16) * 0.5 + 0.5;
 
-  vec3 lit   = mix(K_T_LIT,   K_T_MID,    blot * 0.55);
-  vec3 mid   = mix(K_T_MID,   K_T_SHADE,  blot * 0.40);
-  vec3 shade = mix(K_T_SHADE, K_T_HOLLOW, blot * 0.62);
+  /* The PALETTE blend, sharpened. Measured over a 44 km scan of the shipped seed, meadow's
+   * weight never exceeds 0.509 anywhere and steppe's never exceeds 0.448 — so a linear
+   * blend of five ramps averages every grass biome into one olive and the player reports
+   * "3 biomes". Raising the weights to GROUND_SHARPEN and renormalising pulls the dominant
+   * biome's own ramp forward; it is smooth wherever the weights are, so it adds no edge.
+   * COLOUR ONLY: the same sharpening applied at source in world/biomes.js takes
+   * diag-cliffs from 0.008% to 0.625%, because those weights also blend the terrain. */
+  float gw[NBIOME];
+  float gsum = 0.0;
+  for(int i=0;i<NBIOME;i++){ gw[i] = pow(max(w[i], 0.0), GROUND_SHARPEN); gsum += gw[i]; }
+  gsum = max(gsum, 1e-6);
+  for(int i=0;i<NBIOME;i++) gw[i] /= gsum;
 
-  // Dryness bleaches the greens towards straw. It is a hue rotation, not a desaturation:
-  // dead grass is yellow, not grey.
-  vec3 dry = vec3(0.86, 0.76, 0.42);
-  lit   = mix(lit,   lit   * dry * 1.45, scal.y);
-  mid   = mix(mid,   mid   * dry * 1.32, scal.y);
-  shade = mix(shade, shade * dry * 1.18, scal.y);
-
-  lit *= tintG; mid *= tintG; shade *= tintG;
-
-  // ── sand where the dunes take over ────────────────────────────────────────
-  // The dunes entry in BIOME_TINT is a MULTIPLIER over the green stops above, and a
-  // multiplier cannot turn green into sand: at 89% dunes weight the ground measured
-  // (139,138,93) on screen — dry grass, not the "rose-and-ochre sand sea" the palette
-  // describes. So sand gets its own stops and is blended in by the biome weight, exactly
-  // the way the snow block below already does it. Threshold rather than linear so a
-  // meadow carrying a few per cent of dunes does not go sandy; by the time the sand sea
-  // is genuinely dominant it has fully taken over.
-  float sandAmt = smoothstep(0.30, 0.80, w[3]);
-  if(sandAmt > 0.001){
-    vec3 sLit   = mix(K_SAND_LIT,   K_SAND_MID,    blot * 0.55);
-    vec3 sMid   = mix(K_SAND_MID,   K_SAND_SHADE,  blot * 0.40);
-    vec3 sShade = mix(K_SAND_SHADE, K_SAND_HOLLOW, blot * 0.62);
-    lit   = mix(lit,   sLit,   sandAmt);
-    mid   = mix(mid,   sMid,   sandAmt);
-    shade = mix(shade, sShade, sandAmt);
+  /* Every biome brings its own four stops, so this is a blend of five PALETTES rather than
+   * one palette through five multipliers. The old dry-hue rotation and the special-cased
+   * sand block both collapse into it — steppe's gold and dunes' sand are now simply what
+   * those biomes' ramps ARE. */
+  vec3 lit = vec3(0.0), mid = vec3(0.0), shade = vec3(0.0);
+  for(int i=0;i<NBIOME;i++){
+    lit   += mix(B_LIT[i],   B_MID[i],    blot * 0.55) * gw[i];
+    mid   += mix(B_MID[i],   B_SHADE[i],  blot * 0.40) * gw[i];
+    shade += mix(B_SHADE[i], B_HOLLOW[i], blot * 0.62) * gw[i];
   }
+
+  // Kept for the road ramp below, which still bleaches its tarmac towards sand.
+  vec3 dry = vec3(0.86, 0.76, 0.42);
 
   // ── rock on the steep parts ───────────────────────────────────────────────
   float rockAmt = smoothstep(0.36, 0.66, slope) * (0.55 + 0.45*grain);
@@ -166,8 +174,10 @@ void main(){
   if(onRoad > 0.003){
     // Surface kind comes from the biome mix: tarmac in the green world, gravel in the
     // steppe, sand in the dunes. Blended, so a road entering a desert visibly silts up.
-    float sandy   = w[3];
-    float gravely = w[1];
+    // The SHARPENED weights, so the road silts up over exactly the ground that went sandy
+    // rather than lagging a kilometre behind it.
+    float sandy   = gw[3];
+    float gravely = gw[1];
     vec3 tLit = K_TAR_LIT,  tShd = K_TAR_SHADE;
     tLit = mix(tLit, K_GRAVEL_LIT, gravely*0.85);
     tShd = mix(tShd, K_GRAVEL_SHD, gravely*0.85);

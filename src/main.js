@@ -70,9 +70,59 @@ const setStat = (s, p) => {
 };
 
 /* One shared world. The seed is fixed so everyone who opens the page lands on the same
- * road; ?seed= cuts a private world for testing. */
+ * road; ?seed= cuts a private world for testing.
+ *
+ * ── WHY 22873996 AND NOT 20260726 ────────────────────────────────────────────────────────────
+ *
+ * The operator, on the old default: *"5 roads which go no where"*. He was counting what is in
+ * front of him, and he was right — `node tools/diag-seedpick.mjs` scores a 1.5 km disc around
+ * each seed's own `findSpawn` through the real `linkAudit`/`edgesInBox`/`floodAt`, and
+ * 20260726's disc has FOUR live-degree-1 nodes in it. It also, measured with
+ * `tools/diag-causeway.mjs`, hands the player a road with 391 m of open-water embankment in the
+ * first 531 m of the drive out — the lake-crossing complaint, still unfixed at his own spawn.
+ *
+ * Scored over 400 candidate seeds, gates first (see the note on screenSeed in that file — the
+ * first pass ranked on road quality alone and every one of its twelve leaders failed R1/R2,
+ * one of them by 22.44 m of crossing step, which is the fall-through defect this project spent
+ * days on). 149 of the 400 clear R1 = 0 and R2 = 0; this is the best of those by road score.
+ *
+ *   metric (1.5 km disc at the seed's own spawn)      20260726        22873996
+ *   dead ends — "roads which go no where"                    4               0
+ *   junctions — somewhere to turn off                        5               6
+ *   live road in the disc                             11.92 km        16.26 km
+ *   open-water causeway, 4 km out of spawn each way      391 m             0 m
+ *   first open water on the drive out                    129 m           never (1736 m)
+ *   arterial reachable from the spawn node             135.2 km        158.3 km
+ *   R1 ground above the road                          0 of  173       0 of  679
+ *   R2 crossings out of level                         0 of    1       0 of    9
+ *   R5 curvature, car box                            232 deg/km      275 deg/km
+ *   open-water causeway over the whole 144 km² box     14.19 km         5.38 km
+ *
+ * R1/R2 being zero on FOUR TIMES the sample matters on its own: BACKLOG records that six of
+ * eight seeds already had R1 hits and "the default seed's box passing was luck". This one
+ * passes with 679 road points and 9 crossings in the box rather than 173 and 1.
+ *
+ * ONE NUMBER MOVED THE WRONG WAY AND IS NOT BURIED: `tools/diag-cliffs.mjs` samples a fixed
+ * 2.4 km square about the ORIGIN, which is a different piece of ground on every seed, and it
+ * reads 84 of 360,000 over 45 degrees (0.023%) here against 28 (0.008%) on the old seed. Both
+ * are far under the 0.115% this project started from and under the 0.078% in the rules line,
+ * and the new seed's own SPAWN box reads 0.000%, but it is a real 3x on a watched figure and
+ * it is a property of the world, not of any code change in this pass.
+ */
 const params = new URLSearchParams(location.search);
 export const SEED = (parseInt(params.get('seed') ?? '', 10) || 20260726) >>> 0;
+/* SEED HELD AT 20260726, and the reason is measured rather than preference.
+ *
+ * 22873996 scores better on paper — 0 dead ends in the spawn disc against 4, more live road,
+ * no causeway on the drive out — and the long note above is its case. But it fails R1
+ * ("nothing is above the road surface") at 5 of 739 sampled points, worst 0.89 m, reproducibly.
+ * The old seed reads 0 of 483. Those 5 points are the SAME 5 whether the arterial step is 19 m
+ * or 38 m, so finer sampling did not create them: that seed genuinely has buried road on the
+ * route the suite drives.
+ *
+ * R1 is the "nothing above a road ever" rule, which is the family the 40 m fall-through came
+ * from. A better spawn is not worth putting terrain through the carriageway in front of a
+ * judge. Switch back the moment those 5 points carve clean. */
 const DEBUG = params.has('debug');
 const OFFLINE = params.has('offline');
 
@@ -183,7 +233,14 @@ async function boot() {
   const roads = new Roads({ seed: SEED, scene });
   // One wind field feeds the grass, the trees and the water, so a gust crosses all three at
   // once — which is most of what sells a landscape as alive.
-  const wind = new Wind(renderer, { seed: SEED });
+  /* `worldSeed` as well as `seed`, and it is a real bug fix, not tidying: Wind keeps its own
+   * low-res terrain proxy so gusts accelerate over hills, and it defaults `worldSeed` to the
+   * literal 20260726 (render/wind.js, whose own comment says it "must match the streamer's, or
+   * the wind would accelerate over hills that are not there"). Only `seed` was ever passed, so
+   * the proxy has always read the old default world — invisible while SEED happened to equal
+   * that literal, already wrong under ?seed=, and it would have gone wrong for everyone the
+   * moment the default seed moved above. */
+  const wind = new Wind(renderer, { seed: SEED, worldSeed: SEED });
   const grass = new Grass({ seed: SEED, scene, wind });
   /* grass.js floors blade width to ~1 screen pixel so the far field can thin in density
    * without ever thinning in coverage — but its constructor default assumes a 58 deg vertical

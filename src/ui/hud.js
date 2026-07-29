@@ -50,6 +50,11 @@
  * Markup is built with createElement rather than innerHTML so the whole block can be driven
  * by a stub DOM in node: tools/diag-hud.mjs asserts the real strings this file writes against
  * the real unlock ladder, without a browser.
+ *
+ * ONE MORE THING RIDES THE TOAST: the R hint, a few lines below the caption's own hysteresis
+ * — "the first ten times you go off-road, say R gets you back on." It is not a new mechanism;
+ * it fires off the SAME debounced off-road transition the caption already computes, through
+ * the SAME say()/toast this file already had. See OFFROAD_HINT_KEY's own note for why.
  */
 
 import { fmtScore, fmtDistance } from '../game/streak.js';
@@ -107,6 +112,43 @@ function el(tag, idOrClass, text) {
  * than a hand-copied one.
  */
 export const MILESTONES_KM = [1, 3, 6, 10, 20, 40, 80, 150, 300];
+
+/* ── the R hint ───────────────────────────────────────────────────────────────
+ * Operator, verbatim: "give people the hint that they can click R to get back on road when
+ * they go off-road the first 10 times." Reuses the toast this file already has (`say()`),
+ * on the SAME debounced off-road signal the streak caption already computes below
+ * (`_setCaption`'s confirmed `_capKey === 'grace'`) — not a second flicker-prone flag read
+ * straight off `s.grace` every frame. That debounce already exists precisely because a wheel
+ * on the painted edge of the road can flip `s.grace` many times a second (CAP_CONFIRM_S/
+ * CAP_MIN_HOLD_S above), and a hint that fired on every one of those flickers would be worse
+ * than no hint at all.
+ *
+ * "Never while it is already showing" is `this._toastT <= 0` — the same timer `say()` itself
+ * already drives — so the hint cannot stack on itself and cannot talk over whatever other
+ * toast happens to be up. Persisted the way the streak best is persisted: one small JSON
+ * blob in localStorage, read once in the constructor and written the moment the count moves,
+ * so a shown count survives a reload the same way the streak's best does. */
+export const OFFROAD_HINT_KEY = 'wanderoad.hint.offroad.v1';
+export const OFFROAD_HINT_MAX = 10;
+export const OFFROAD_HINT_TEXT = 'off the road — press R to get back on';
+
+function loadOffroadHintCount() {
+  try {
+    const raw = localStorage.getItem(OFFROAD_HINT_KEY);
+    if (!raw) return 0;
+    return Math.max(0, +JSON.parse(raw).count || 0);
+  } catch {
+    return 0; // corrupt or unavailable store — same tolerance streak.js gives itself
+  }
+}
+
+function saveOffroadHintCount(count) {
+  try {
+    localStorage.setItem(OFFROAD_HINT_KEY, JSON.stringify({ count }));
+  } catch {
+    /* private mode, quota, whatever — the hint still works this session, just unpersisted */
+  }
+}
 
 /* Where a waypoint sits along the bar, 0–100. Log-scaled: linear would put 1 km and 3 km in
  * the first percent of the bar and leave 300 km alone at the far right, which fails exactly
@@ -242,6 +284,10 @@ export class Hud {
     this._capHold = 0;
     this._capPendingKey = null;
     this._capPendingT = 0;
+
+    /* The R hint's own count — see OFFROAD_HINT_KEY's note above. Loaded once here, the same
+     * moment Streak.load() reads `best` in its own constructor. */
+    this._offroadHintCount = loadOffroadHintCount();
   }
 
   /** Write `text` into the caption, but only once `key` has been the SAME desired state for
@@ -359,12 +405,32 @@ export class Hud {
         : s.grace
           ? 'off the road…'
           : 'without leaving the road';
+      const capBefore = this._capKey; // for the R hint's edge test, below — captured before _setCaption can move it
       this._setCaption(capKey, capText, dt);
       // The warm "off the road" colour rides the SAME debounced state as the words it sits
       // under, not the raw frame-to-frame `s.grace` — a caption that has just decided to keep
       // reading "without leaving the road" through a flicker must not still blush warm
       // underneath it. Text and colour agree, or neither moves.
       this.streakEl.classList.toggle('grace', this._capKey === 'grace');
+
+      /* The R hint. Fires on the CONFIRMED off-road transition — `this._capKey` only just
+       * became 'grace' this frame, having not been 'grace' the frame before — never on the
+       * raw `s.grace` this section reads above, for the same flicker reason the caption
+       * itself is debounced (see this file's own OFFROAD_HINT_KEY note). `this._toastT <= 0`
+       * is "not already showing" reusing the one toast timer this file already owns, so the
+       * hint can neither repeat on itself nor talk over another toast that is up. Capped at
+       * OFFROAD_HINT_MAX for the life of the browser's storage, same durability as the
+       * streak's own best. */
+      if (
+        this._capKey === 'grace' &&
+        capBefore !== 'grace' &&
+        this._offroadHintCount < OFFROAD_HINT_MAX &&
+        this._toastT <= 0
+      ) {
+        this._offroadHintCount++;
+        saveOffroadHintCount(this._offroadHintCount);
+        this.say(OFFROAD_HINT_TEXT, 3.4);
+      }
       this.streakMul.textContent = s.multiplier > 1.02 ? `×${s.multiplier.toFixed(2)}` : '';
       this.streakPts.textContent = s.score > 5 ? fmtScore(s.score) : '';
     } else {

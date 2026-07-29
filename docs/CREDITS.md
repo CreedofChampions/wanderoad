@@ -30,11 +30,42 @@ node -e "const fs=require('fs');const bad=[];(function w(d){if(!fs.existsSync(d)
 |---|---|---|
 | "Hoshi-no-Tani — The Valley of Stars" CodePen | Provided by the operator as the visual reference for this project. | The palette, lighting model (`paint()`), sky, post chain, grass, water, cloud and painted-solid pipelines derive from it. It is the reason the game looks the way it does and it should be credited wherever the game is presented. |
 | [Quaternius](https://quaternius.com/packs/cars.html) car models — 7 GLBs in `public/models/cars/` | **CC0 1.0 Universal** (public domain). Attribution not required; given anyway. | Fetched anonymously over plain HTTP from [Poly Pizza](https://poly.pizza). Untextured, so the game re-materials them into its own painted shader. Full text in `public/models/cars/LICENCE.txt`. |
+| The password-gated "realistic" car body — `src/car/model.js`, `src/car/loadedCar.js` | **This project's own work.** No third-party asset, model, texture or snippet. | See the "car bodies" note below. |
 | The 100 roadside props, the petrol stations, and the floating fuel cans — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | See the note below. The fuel can (added 27 July, alongside a fix to petrol-station findability — docs/BACKLOG.md) is built with the same painted primitives as everything else here, so it needs no separate entry beyond this one. |
 | Boats on large open water — `src/render/ships.js` | **This project's own work.** No third-party asset, model, texture or snippet. | Added 27 July alongside sea sound and calm-water damping (docs/BACKLOG.md). Same reasoning as the row above: a hull is five painted-pipeline faces (`pquad`/`ptri`) plus an optional cabin (`pbox`) and mast (`pcyl`), coloured from `src/core/palette.js`'s existing paint chips — nothing downloaded, nothing to audit. |
 | Litter bins beside the fuel cans, and the cans' glow halo — `src/render/props.js` | **This project's own work.** No third-party asset, model, texture or snippet. | Added 27 July for "fuel cans and trash cans: bigger, and glowing" (docs/BACKLOG.md). The bin is `pcyl`/`pbox` in the same painted pipeline as the other hundred props; the halo is a 64 px radial gradient **drawn at runtime into a `<canvas>`** by `haloTexture()` — generated, not a downloaded sprite sheet, so there is no image file in the repo and nothing to license. |
 | The off-road dust spray — `src/game/spray.js` | **This project's own work.** No third-party asset, model, texture, particle library or snippet. | Added 27 July (docs/BACKLOG.md). One `InstancedMesh` of small solid boxes on a stock three.js `MeshBasicMaterial` — no particle engine was added as a dependency and no shader was written. Colours are blended from `src/core/palette.js`'s own sand/dry-grass/rock chips. |
 | The fuel-can pick-up chime — `EngineAudio.pickup()`, `src/audio/engine.js` | **This project's own work.** No sample, no sound pack, no third-party service. | **Recorded here deliberately.** The operator offered API keys to a sound-effects service, held in his password manager, for this one sound. Those keys were **not requested, not opened and not used**, and no audio file was downloaded. The chime is a three-note major arpeggio synthesised live in the WebAudio graph the same way the engine, the horn, the radio and the ambience already are — so it adds zero bytes to the download and carries no licence. |
+
+### Car bodies — why the "more realistic" option is not a downloaded model
+
+Operator mark 41: the shipped Quaternius bodies are ugly, and he wants something more
+realistic, "for now" behind a password. Two honest paths existed:
+
+1. **Fetch a new CC0/MIT/Apache/BSD asset pack tonight**, verify its licence page for real
+   (not just trust a filename), and re-teach `src/car/loadedCar.js`'s wheel-rig-by-name logic
+   (it currently keys off Quaternius's own `*FrontLeftWheel*`/`*BackWheels*` node names —
+   see that file's header) to whatever naming convention the new pack happens to use.
+2. **Add the extra realism this project can build with code it already owns outright** —
+   `src/car/model.js`'s hand-built painted body, which existed only as a network-failure
+   fallback nobody had ever actually seen (it already has chrome wheel rims, glowing brake
+   discs, sills, intakes and a wing that the Quaternius bodies do not) — and push it further:
+   a tinted (not flat) glass tint, a chrome beltline trim tracing the glasshouse, a door
+   handle per flank, a chrome front badge, and a two-tone alloy rim with two more spokes.
+
+Path 1 is the better long-term answer, and is exactly the work a future session with time to
+actually verify a licence and a wheel-naming scheme should do properly. Rushing it before a
+morning deadline is precisely how a GPL-tainted or unverifiable asset, or a wheel rig that
+orbits instead of spins (see docs/BACKLOG.md's own wheel-wobble history), ends up shipped.
+So: path 2. **Nothing was downloaded. Zero new triangles or bytes from anywhere but this
+repository's own code.**
+
+It is opt-in, not a replacement for the shipped fleet: append `?cars=realwheels` to the game's
+URL (e.g. `https://crumbtown.org/cozydriver/?cars=realwheels`) and every car — yours and every
+ghost's — is built from `src/car/model.js` instead of the GLB, scaled to that FLEET car's own
+real length so the fleet's proportions still track (`src/car/loadedCar.js`'s
+`buildRealisticVariant()`). The password lives here, in this file, and nowhere else; it is a
+soft gate against stumbling into it by accident, not a security boundary.
 
 ### The 100 points of interest — why nothing was downloaded
 

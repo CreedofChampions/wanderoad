@@ -22,8 +22,16 @@
  * an arcade car ends up looking like a toy.
  *
  * Budget: the car is drawn twice for the local player (colour + sun shadow) and up to 16
- * more times for other players, so the whole thing is ~1.8 k triangles across 5 meshes.
- * Read `.triangles` if you change the shape and want to check.
+ * more times for other players, so the whole thing is ~2.1 k triangles across 5 meshes (was
+ * ~1.8 k before the belt trim / door handle / front badge / two-tone rim detail pass — see
+ * docs/BACKLOG.md and docs/CREDITS.md's "car bodies" note for why). Read `.triangles` if you
+ * change the shape and want to check.
+ *
+ * THIS FILE ALSO DRIVES THE PASSWORD-GATED "REALISTIC" BODY. It used to be reached only when
+ * loadedCar.js's GLB fetch fails; `?cars=<password>` (src/car/loadedCar.js, docs/CREDITS.md)
+ * now routes every car through it deliberately, scaled to that FLEET car's own real length.
+ * Nothing in THIS file needs to know that — it just builds a car — but a shape change here
+ * now reaches players on purpose, not only on a network hiccup.
  */
 
 import { Group, Mesh } from 'three';
@@ -193,23 +201,32 @@ function buildWheelGeometry(r, hw) {
   const M = PB();
   const tyre = LC('tyre');
   const rim = mixc(LC('chrome'), LC('paintF'), 0.34);
+  // The "more realistic wheel" ask (docs/BACKLOG.md, operator mark 41): a second, darker
+  // lip inboard of the bright outer one, so the rim reads as a machined two-tone alloy
+  // rather than one flat ring of chrome. Same geometry family as the outer lip below —
+  // only the radius and the tint differ — so it costs a dozen triangles, not a new part.
+  const rimInner = tint(rim, 0.55);
   const hub = tint(LC('chrome'), 0.72);
   // A dark iron that goes cherry: the lamp channel multiplies this colour, so it has to
   // start warm or braking hard just makes the disc grey and bright.
   const disc = mixc(LC('tyre'), LC('tail'), 0.34);
+  // Real 5-spoke alloys read as a wagon wheel at this triangle budget; 7 reads as an alloy.
+  const SPOKES = 7;
 
   pcyl(M, [-hw, 0, 0], [hw, 0, 0], r, r, 14, tyre, MAT.MATTE, false, false);      // tread
   pring(M, hw, r, r * 0.68, 14, tint(tyre, 1.18), MAT.MATTE, 1);                  // sidewalls
   pring(M, -hw, r, r * 0.68, 14, tint(tyre, 1.18), MAT.MATTE, -1);
   pcyl(M, [-hw * 0.92, 0, 0], [hw * 0.92, 0, 0], r * 0.68, r * 0.68, 8, tint(rim, 0.7), MAT.METAL, false, false);
-  pring(M, hw * 0.92, r * 0.68, r * 0.52, 12, rim, MAT.METAL, 1);                 // rim lip
-  pring(M, -hw * 0.92, r * 0.68, r * 0.52, 12, rim, MAT.METAL, -1);
-  for (let i = 0; i < 5; i++) {
-    const a = (i / 5) * TAU, ca = Math.cos(a), sa = Math.sin(a);
+  pring(M, hw * 0.92, r * 0.68, r * 0.58, 12, rim, MAT.METAL, 1);                 // outer rim lip
+  pring(M, -hw * 0.92, r * 0.68, r * 0.58, 12, rim, MAT.METAL, -1);
+  pring(M, hw * 0.86, r * 0.58, r * 0.52, 12, rimInner, MAT.METAL, 1);            // inner lip, darker — the two-tone edge
+  pring(M, -hw * 0.86, r * 0.58, r * 0.52, 12, rimInner, MAT.METAL, -1);
+  for (let i = 0; i < SPOKES; i++) {
+    const a = (i / SPOKES) * TAU, ca = Math.cos(a), sa = Math.sin(a);
     for (const s of [-1, 1]) {
       const x = s * hw * 0.9;
       pcyl(M, [x, r * 0.18 * ca, r * 0.18 * sa], [x, r * 0.56 * ca, r * 0.56 * sa],
-        r * 0.07, r * 0.06, 4, rim, MAT.METAL, false, false);
+        r * 0.065, r * 0.055, 4, rim, MAT.METAL, false, false);
     }
   }
   pcyl(M, [-hw * 0.96, 0, 0], [hw * 0.96, 0, 0], r * 0.19, r * 0.19, 8, hub, MAT.METAL, true, true);
@@ -225,7 +242,11 @@ function buildBodyGeometry(t, paint, ghost) {
   const accent = paint.accent;
   const dark = LC('paintF');
   const chrome = LC('chrome');
-  const glass = LC('glass');
+  // Tinted a shade darker than the raw palette glass — the "more realistic" ask (docs/
+  // BACKLOG.md, operator mark 41) reads partly as flat, untinted windows; real cabin glass
+  // is never as bright as the sky it reflects. Kept subtle: still MAT.GLASS, so it still
+  // takes the fresnel rim and the sky tint the shader already gives it.
+  const glass = tint(LC('glass'), 0.82);
   const head = LC('head');
   const tailC = LC('tail');
 
@@ -253,6 +274,36 @@ function buildBodyGeometry(t, paint, ghost) {
     pbox(M, s * (sill.wb + 0.01), sill.yb + 0.07, sillZ,
       0.035, 0.07, (t.axle[0] - t.axle[1]) * 0.5 - 0.34, 0, dark, MAT.MATTE);
   }
+
+  // Beltline trim: a thin bright strip exactly where the glasshouse meets the shell, run
+  // the cabin's own length so it always frames the glass rather than floating free of it.
+  // This is the single cheapest cue that separates "a shape" from "a car that was designed"
+  // — see the loadCar/model.js file headers for the operator's mark this answers.
+  const beltZ0 = t.cabin[0].z;
+  const beltZ1 = t.cabin[t.cabin.length - 1].z;
+  const beltMidZ = (beltZ0 + beltZ1) * 0.5;
+  const beltHull = hullAt(t.hull, beltMidZ);
+  for (const s of [-1, 1]) {
+    pbox(M, s * (beltHull.wt + 0.008), beltHull.yt - 0.012, beltMidZ,
+      0.012, 0.02, Math.abs(beltZ0 - beltZ1) * 0.5 + 0.06, 0, tint(chrome, 0.85), MAT.METAL);
+  }
+
+  // Door handle: one per flank (this silhouette is a two-door, so one handle is the honest
+  // read of it), set a third of the way from the door pillar down to the sill.
+  const doorZ = lerp(t.cabin[0].z, sillZ, 0.32);
+  const doorHull = hullAt(t.hull, doorZ);
+  for (const s of [-1, 1]) {
+    pbox(M, s * (doorHull.wb + 0.014), lerp(doorHull.yb, doorHull.yt, 0.56), doorZ,
+      0.014, 0.016, 0.10, 0, tint(chrome, 0.8), MAT.METAL);
+  }
+
+  // A front badge — the one spot a real car always puts something and this shell had
+  // nothing at all before. (No rear plate: every candidate position measured against the
+  // tail-light geometry below either sat inside the bumper band or inside the tail lamp
+  // volume — this file has no GPU to check a close call like that against, so it is left
+  // out rather than risk a z-fighting flicker nobody here could see coming.)
+  pcyl(M, [0, lerp(nose.yb, nose.yt, 0.75), noseZ - 0.01], [0, lerp(nose.yb, nose.yt, 0.75), noseZ - 0.04],
+    0.036, 0.036, 8, tint(chrome, 0.92), MAT.METAL, false, true);
 
   // Front: splitter, intake, lamps. The intake is MAT.GLASS so it reads as a hole rather
   // than a black sticker.

@@ -301,11 +301,75 @@ console.log('\n── UNLOCKED: the boat engages, covers real ground, and hands 
 
 console.log('\n── CONTROL RETENTION: a steep-bank bounce never eats the driver\'s input ──');
 {
-  /* The SAME steep-bank fixture section 2 uses (see the file header for why) — findFixture()'s
-   * own `road`/`water`/`headingOut` are untouched by that file's own fix round 2, so this is
-   * still whatever bank tripped the original "boat freezes at any steep shoreline nose-in"
-   * report. */
-  const FIX = findFixture(SEED);
+  /* THE FIXTURE IS FOUND BY A STEEPNESS CRITERION, not inherited from findFixture().
+   *
+   * It used to be `findFixture(SEED)` — the gem-ranked pick section 2 uses. That rotted, in
+   * exactly the way this file's own header warns a hard-coded coordinate would: `findFixture`
+   * ranks candidate shores by how close a gem is, over a 25 m grid, gated on the road being
+   * 12-45 m away. Resampling the arterial polyline finer (world/roads.js TIERS[0].step 38 -> 19,
+   * the "roads read as chords" fix) moves the drawn road by up to the chord sagitta — 1.5 m —
+   * and that was enough to flip which candidate won the gem ranking, from (721.1, 384.6) to
+   * (774.9, 390.3). Measured: the new pick's transect is still steep by the static test
+   * (0.4535 against boat.js's EXIT_STEEP_SLOPE of 0.36), and the boat still declined to bounce
+   * there — it curved in on a gentler line and beached. Four checks then failed reading `false`
+   * and `0.000 rad`, which looks exactly like the bounce-recovery feature being broken. It is
+   * not: the rig had simply lost its steep bank. Nothing in the boat code changed.
+   *
+   * A single transect is not a strong enough precondition, and that is the lesson: the boat
+   * arrives on whatever heading its own turning circle gives it, so a bank that is steep along
+   * ONE line can still be exited a few degrees either side of it. So the search below requires
+   * the bank to be steep across a FAN of headings — every 10 degrees over a 120 degree arc, the
+   * first point shallower than EXIT_DEPTH walking inward must read steeper than
+   * EXIT_STEEP_SLOPE, using boat.js's own exit probe. A shore that passes that is one the exit
+   * check must decline whichever way the boat noses in, so the bounce path is exercised by
+   * construction rather than by luck.
+   *
+   * This is NOT "search until the test passes": the selector is a static geometric criterion
+   * evaluated before any boat is driven, and the rig's assertions below are unchanged and
+   * unweakened. Verified independent of the change that exposed the rot — the first six shores
+   * this finds all bounce and all stay in boat mode at arterial step 38 AND at 19. */
+  const findSteepBank = () => {
+    const scan = new Terrain(SEED, -3600, -3600, 3600, 3600, 240);
+    const sw = new Float32Array(BIOME_COUNT);
+    const sdepth = (x, z) => {
+      const y = scan.height(x, z);
+      scan.weights(x, z, sw);
+      const wy = waterLevelAt(sw, y);
+      return wy === null ? 0 : wy - y;
+    };
+    /** boat.js's own exit probe, walked inward from the water on heading `a`. */
+    const declinesExit = (wx, wz, a) => {
+      const ux = Math.cos(a),
+        uz = Math.sin(a);
+      for (let t = 0; t <= 40; t += 0.5) {
+        const x = wx + ux * t,
+          z = wz + uz * t;
+        if (sdepth(x, z) >= EXIT_DEPTH) continue;
+        const hereY = scan.height(x, z);
+        const aheadY = scan.height(x + ux * EXIT_PROBE_DIST, z + uz * EXIT_PROBE_DIST);
+        return (aheadY - hereY) / EXIT_PROBE_DIST > EXIT_STEEP_SLOPE;
+      }
+      return false; // never reached shallow water inside 40 m — not a bank at all
+    };
+    for (let z = -3000; z <= 3000; z += 25) {
+      for (let x = -3000; x <= 3000; x += 25) {
+        if (sdepth(x, z) < 2.5) continue;
+        const q = scan.roads.query(x, z);
+        if (!isFinite(q.d) || q.d > 45 || q.d < 12) continue;
+        if (sdepth(q.qx, q.qz) > 0 || !isDryAt(q.qx, q.qz, SEED)) continue;
+        const ang = Math.atan2(q.qz - z, q.qx - x); // from the water back toward the road
+        let allSteep = true;
+        for (let k = 0; k < 13 && allSteep; k++) {
+          allSteep = declinesExit(x, z, ang - Math.PI / 3 + (k * Math.PI) / 18);
+        }
+        if (!allSteep) continue;
+        return { road: { x: q.qx, z: q.qz }, water: { x, z }, headingOut: Math.atan2(x - q.qx, z - q.qz) };
+      }
+    }
+    throw new Error('bench-boat: no bank steep across a 120 degree fan found in a 6 km square');
+  };
+  const FIX = findSteepBank();
+  console.log(`  steep-bank fixture: road (${FIX.road.x.toFixed(1)}, ${FIX.road.z.toFixed(1)}) -> water (${FIX.water.x}, ${FIX.water.z})`);
   const FT = new Terrain(SEED, FIX.road.x - 320, FIX.road.z - 320, FIX.road.x + 320, FIX.road.z + 320, 240);
   const car = new Vehicle({ tier: 'sports', terrain: FT, preset: 'sport' });
   car.placeAt(FIX.road.x, FIX.road.z, FIX.headingOut);

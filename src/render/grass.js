@@ -140,18 +140,34 @@ const SLOPE_N1 = 0.85;
  * as scorched earth. */
 const CANOPY_THIN = 0.45;
 
-/* Operator report: "grass still tips in on the edge of the road — keep grass at a distance
+/* Operator report (round 2 — round 1's flat 0.4 m margin below did NOT fix this, re-measured
+ * rather than assumed): "grass still tips in on the edge of the road — keep grass at a distance
  * from the road, 1 foot." The lattice below already zeroes blade DENSITY on the carriageway
  * via `T.roads.carve(x,z).edge` (W2 passes 118/118 on the centreline), but that mask is
  * roads.js's own shoulder fade — full suppression only up to `half-0.4`, faded out entirely by
  * `half+0.35`, a ~0.75 m band straddling the physical tarmac edge (see `carve()`'s `edgeHere`
- * in world/roads.js). A blade BASE rooted right where that fade is already partway back can
- * still lean its TIP over the white line under wind. Never widened in roads.js itself — that
- * function also drives the terrain carve and the drawn ribbon, which must stay on ONE shared
- * elevation profile (gotcha 6) — so it is re-derived here, in grass.js only, from the distance
- * (`d`) and blended width (`width`) `carve()` already hands back: the identical `edgeHere`
- * shape, with its whole fade window pushed this many extra metres out from the centreline. */
-const ROAD_GRASS_MARGIN = 0.4;
+ * in world/roads.js). Round 1 pushed that whole window out by a flat `ROAD_GRASS_MARGIN`, but
+ * that only ever tests the blade's ROOT — GRASS_VS's own Bezier solve (`iv2`, then the gravity
+ * droop `gF` and the wind term `wf`, then the length-preserving rescale `rr = hgt/L`) swings the
+ * TIP up to `hgt` sideways of the root, and `hgt` scales with each ring's own `uLodB.y` (`R.hs`
+ * here — 1.0 near, 1.95 far). A base standing just past a flat margin can carry a tip that
+ * swings straight back onto the tarmac; a byte-for-byte CPU port of that vertex shader
+ * (`tools/diag-grasslean.mjs` — hashes, `vn2`, the Bezier solve, both state corrections, run
+ * against the real `Terrain`/`carve()`) measured it directly at the shipped 0.4 m: **2253 of
+ * 100354 surviving blade tips (2.25%) landed ON the tarmac**, worst offender 0.392 m deep, at
+ * the near ring alone — 3170 of 61449 (5.2%), worst 0.836 m, at the far ring's taller grass.
+ *
+ * Fixed by making the margin a function of the ring's own height scale rather than one flat
+ * number — swept `tools/diag-grasslean.mjs --formula` against all four shipped rings (hs = 1.0,
+ * 1.08, 1.36, 1.95), three seeds, three terrain presets and the wind field's own upper gust-
+ * meander bound (1.45x base speed): `ROAD_GRASS_MARGIN_A + ROAD_GRASS_MARGIN_B * R.hs` first
+ * reaches 0 tip-on-tarmac occurrences, with a real margin of safety, at A=0.55/B=0.45 — near
+ * ring 1.00 m, far ring 1.43 m. `_buildChunk` computes it once per chunk from `R.hs`, never
+ * per blade. Widened significantly past "about a foot": that request was against the ROOT, and
+ * the honest finding here is that guaranteeing the TIP never crosses costs more than a foot at
+ * the tallest grass — recorded rather than split the difference and re-opening this again. */
+const ROAD_GRASS_MARGIN_A = 0.55;
+const ROAD_GRASS_MARGIN_B = 0.45;
 
 /* Operator report: "there's grass in the water." The lattice never compared a blade's base
  * against the local water plane at all — a stub that silently omits `.wy` "does not fail, it
@@ -691,11 +707,12 @@ class GrassChunk {
     this.minY = 0;
     this.ySpan = 1;
     // The terrain lattice this chunk was built from, kept so a densening does not have to
-    // resample the ground. ~4.5 kB on the coarse rings, and it is the single biggest saving
+    // resample the ground. ~5.2 kB on the coarse rings, and it is the single biggest saving
     // in the whole rebuild path: half of all rebuilds are densenings. 6th channel per node is
-    // the raw "is this node submerged" flag — see pass 3's own comment on why that is kept
-    // separately from the already-suppressed density channel.
-    this.lat = new Float32Array((ring.R.lat + 1) * (ring.R.lat + 1) * 6);
+    // the raw "is this node submerged" flag, 7th is the node's own clearance from the nearest
+    // tarmac edge — see pass 3's own comments on why both are kept separately from the
+    // already-suppressed density channel.
+    this.lat = new Float32Array((ring.R.lat + 1) * (ring.R.lat + 1) * 7);
 
     this.iPos = new Uint16Array(cap * 2);
     this.iGrd = new Uint16Array(cap);
@@ -1161,8 +1178,17 @@ export class Grass {
       }
     }
 
+    // Needed by pass 3 on EVERY call (not just a lattice rebuild): the lattice cell's own
+    // diagonal, i.e. the largest gap a road narrower than the lattice could hide inside
+    // without touching any of the four corners it interpolates between.
+    const step = cs / L;
+    const cellDiag = step * Math.SQRT2;
+
     if (chunk.built === 0) {
-      const step = cs / L;
+      // Taller grass leans further (hgt scales with R.hs — see GRASS_VS's `hgt *= uLodB.y`),
+      // so its tip needs more clearance from the tarmac than a short blade's does. Computed
+      // once per chunk build, not per node: see ROAD_GRASS_MARGIN_A/B's comment for the sweep.
+      const roadGrassMargin = ROAD_GRASS_MARGIN_A + ROAD_GRASS_MARGIN_B * R.hs;
 
       /* Canopy shade at the chunk's four CORNERS, interpolated across the lattice below.
        * `canopyShade` is fbm and costs ~0.8 µs — a per-node lookup would be 225 of them on
@@ -1205,13 +1231,14 @@ export class Grass {
           // what makes a road read as cut into the land rather than mown around.
           const rc = T.roads.carve(x, z);
           let edge = rc.edge;
-          // Widen the carriageway suppression a foot-ish further than roads.js's own shoulder
-          // fade reaches — see ROAD_GRASS_MARGIN's comment. `rc.width` only reads back a real
-          // blended half-width while SOME edge still has weight here (roads.js's carve(), same
-          // file); off in open country it is 0 and this term drops out on its own.
+          // Widen the carriageway suppression past roads.js's own shoulder fade reach, far
+          // enough that the TIP a leaning blade can reach never lands on tarmac either — see
+          // ROAD_GRASS_MARGIN_A/B's comment. `rc.width` only reads back a real blended
+          // half-width while SOME edge still has weight here (roads.js's carve(), same file);
+          // off in open country it is 0 and this term drops out on its own.
           if (rc.width > 0) {
             const half = rc.width * 0.5;
-            const marginEdge = 1 - smoothstep(half - 0.4 + ROAD_GRASS_MARGIN, half + 0.35 + ROAD_GRASS_MARGIN, rc.d);
+            const marginEdge = 1 - smoothstep(half - 0.4 + roadGrassMargin, half + 0.35 + roadGrassMargin, rc.d);
             if (marginEdge > edge) edge = marginEdge;
           }
           // No grass with its base under water — see GRASS_WATER_FREEBOARD's comment.
@@ -1228,7 +1255,7 @@ export class Grass {
               break;
             }
           }
-          const k = (j * N + i) * 6;
+          const k = (j * N + i) * 7;
           lat[k] = y;
           lat[k + 1] = submerged || inApron ? 0 : g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
           lat[k + 2] = dry;
@@ -1237,6 +1264,11 @@ export class Grass {
           // The raw "is this NODE itself submerged" flag, kept separately from the density
           // above — see pass 3's own comment on why.
           lat[k + 5] = submerged ? 1 : 0;
+          // This NODE's own clearance from the nearest tarmac edge (negative = the node
+          // itself sits on the carriageway). See pass 3's "EXACT road re-check" comment: a
+          // node being clear does not mean the CELL is, if a narrow road threads between
+          // this node and its neighbours without touching any of the cell's four corners.
+          lat[k + 6] = rc.width > 0 ? rc.d - rc.width * 0.5 : Infinity;
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
         }
@@ -1252,10 +1284,10 @@ export class Grass {
           const im = i > 0 ? i - 1 : i;
           const ip = i < N - 1 ? i + 1 : i;
           const dx = (ip - im) * step;
-          const gx = (lat[(j * N + im) * 6] - lat[(j * N + ip) * 6]) / dx;
-          const gz = (lat[(jm * N + i) * 6] - lat[(jp * N + i) * 6]) / dz;
+          const gx = (lat[(j * N + im) * 7] - lat[(j * N + ip) * 7]) / dx;
+          const gz = (lat[(jm * N + i) * 7] - lat[(jp * N + i) * 7]) / dz;
           const ny = 1 / Math.sqrt(gx * gx + gz * gz + 1);
-          lat[(j * N + i) * 6 + 1] *= smoothstep(SLOPE_N0, SLOPE_N1, ny);
+          lat[(j * N + i) * 7 + 1] *= smoothstep(SLOPE_N0, SLOPE_N1, ny);
         }
       }
 
@@ -1290,10 +1322,10 @@ export class Grass {
       if (iz > L - 1) iz = L - 1;
       const tx = fx - ix;
       const tz = fz - iz;
-      const k00 = (iz * N + ix) * 6;
-      const k10 = k00 + 6;
-      const k01 = k00 + N * 6;
-      const k11 = k01 + 6;
+      const k00 = (iz * N + ix) * 7;
+      const k10 = k00 + 7;
+      const k01 = k00 + N * 7;
+      const k11 = k01 + 7;
       const w00 = (1 - tx) * (1 - tz);
       const w10 = tx * (1 - tz);
       const w01 = (1 - tx) * tz;
@@ -1317,7 +1349,26 @@ export class Grass {
         wet10 = lat[k10 + 5],
         wet01 = lat[k01 + 5],
         wet11 = lat[k11 + 5];
-      const needsBladePos = stations.length > 0 || wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11;
+      /* EXACT road re-check, same principle, for the carriageway itself. `edge`/`ROAD_GRASS_
+       * MARGIN_A/B` suppress density at each NODE, but a road wide enough to matter (a two-lane
+       * arterial, ~7-8 m) is narrower than the far ring's own ~11.4 m node spacing — a real
+       * lane can thread THROUGH a cell without any of its four corners reading close to it at
+       * all, so `dens` above can come out fully unsuppressed for a point standing on tarmac.
+       * Caught with real, driven `Grass` output (not assumed): base positions as deep as
+       * 0.25 m onto real pavement, concentrated in exactly the coarse rings this predicts (ring
+       * 2: 0.63% of instances, ring 3: 0.53%, ring 0 at 1.5 m spacing: 0.08%). `clr` is each
+       * node's own signed clearance from the nearest tarmac edge (pass 1's `lat[k+6]`,
+       * `Infinity` off in open country); if the SMALLEST of the four is inside one cell
+       * diagonal (`cellDiag` — the largest gap a road could hide inside without touching a
+       * corner), a road could plausibly be threading this cell and the exact position is worth
+       * the one extra `carve()` call. Chunks with nothing nearby (open country, most of the
+       * world) never pay it. */
+      const clr00 = lat[k00 + 6],
+        clr10 = lat[k10 + 6],
+        clr01 = lat[k01 + 6],
+        clr11 = lat[k11 + 6];
+      const nearRoad = Math.min(clr00, clr10, clr01, clr11) < cellDiag;
+      const needsBladePos = stations.length > 0 || nearRoad || wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11;
       const bx = needsBladePos ? x0 + ux * INV_U16 * cs : 0;
       const bz = needsBladePos ? z0 + uz * INV_U16 * cs : 0;
       if (wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11) {
@@ -1325,6 +1376,18 @@ export class Grass {
         const bw = T.weights(bx, bz).w;
         const waterY = waterLevelAt(bw, -Infinity);
         if (waterY !== null && by < waterY + GRASS_WATER_FREEBOARD) continue;
+      }
+      if (nearRoad) {
+        // `carve()`, not the cheaper single-edge `query()` — tried query() first (5.7x
+        // cheaper per call) and it let real on-tarmac blades straight back through at real
+        // junctions: `query()` picks whichever ONE edge is nearest by centreline distance,
+        // but a point can sit on edge A's own tarmac while a narrower edge B happens to have
+        // the closer centreline, so `query()`'s d/width pair describes the WRONG edge. `edge`
+        // above (what pass 1 actually gates on) is computed from carve()'s blended field, so
+        // the exact re-check has to match it or it is exact against a different question.
+        // Measured (not assumed) after the swap: 0 on-tarmac survivors across six seeds.
+        const rc2 = T.roads.carve(bx, bz);
+        if (rc2.width > 0 && rc2.d < rc2.width * 0.5) continue;
       }
 
       /* EXACT station-apron re-check, at the blade's own precise world position, not the

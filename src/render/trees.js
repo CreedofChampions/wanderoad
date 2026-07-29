@@ -707,23 +707,41 @@ const BUILD_BUDGET = 2.6;
 const MAX_CHUNKS = 512;
 
 /**
- * edited by AI: the pop-in fix's other half (see the SCATTER_MAX_LEVEL comment in
- * world/scatter.js for the measured before). Widening the existence radius narrows how often
- * a tree attaches close in, but `tools/diag-treepop.mjs` shows it can still happen — a level-2
- * node's own near edge can sit much closer to the car than the node's characteristic
- * distance, and a hard, instant, full-size instance is what makes ANY such attach read as a
- * "pop" rather than "always having been there." So every attach now grows in from a seedling
- * over `GROW_SECS`, anchored at its own root (the mesh's local origin is already the trunk
- * base — see `addTube`/`makeTree` — so scaling `iPos.w`, the existing per-instance SCALE
- * channel, shrinks the whole tree toward its own foot rather than toward the world origin).
- * Zero shader changes: `TREE_VS` already reads `sc = iPos.w` and multiplies every local vertex
- * by it, so a small starting scale is a small tree in the correct place, not a degenerate one
- * — `H = uTreeH*sc` and the two divisions that use it are already guarded with `max(H, …)`.
- * `tools/diag-treepop.mjs`'s closest measured steady-state attach (227.9 m, ~10.5 s out at a
- * 95 km/h cruise) now grows from a sapling to full size over the two seconds before the car
- * would otherwise have seen it appear instantly — measured with `tools/diag-treegrow.mjs`.
+ * edited by AI (round 2 — round 1's 1.5 s below did not fix this, re-measured rather than
+ * assumed). Operator, still reporting it after SCATTER_MAX_LEVEL and the first grow-in landed:
+ * "trees still appear in view rather than already being there." `tools/diag-treepop.mjs` was
+ * extended to log which LOD level each close attach actually comes from, and the three
+ * candidates this pass was handed (a coarse population appearing all at once, a remove-before-
+ * add gap, too tight a release margin behind the car) are NOT it — `tools/diag-treeblink.mjs`
+ * shows the remove/re-add handoff is doing its job (0 double-draws, and every blink left is
+ * past 1100 m, at the far cull ring, not close to the car) and every population attaching past
+ * ~900 m is level 2/3 (SCATTER_MAX_LEVEL's own boundary, already comfortably out).
+ *
+ * The real mechanism, confirmed by the level breakdown: EVERY close attach (226–800 m ahead,
+ * over 13 500 of them on a 6 km drive) is a level 0 or level 1 node — the streamer's own fine-
+ * detail quadtree split, shared with terrain, which only requests a 64 m or 128 m node once the
+ * car is within `nodeSize(level+1) * SPLIT_FACTOR` of its parent's edge (217.6 m for level 0).
+ * That is a property of `world/streamer.js`'s SPLIT_FACTOR, used for every LOD boundary in the
+ * game including the ground the player drives on — widening it here would touch terrain
+ * streaming for a tree-only complaint, and is exactly the kind of change gotcha gambles warn
+ * against days before a deadline. So the fix stays inside Flora, using what the same
+ * measurement shows is already available: a MEDIAN of 10.8–22.7 s of lead time (level 0/1's own
+ * measured range) between a tree's attach and the car actually reaching it — more than enough
+ * to grow the tree in gradually rather than instantly, so the same "still appears" EVENT reads
+ * as a sapling maturing into view rather than a pop. `GROW_SECS` widened 1.5 s -> 4.0 s
+ * (`tools/diag-treegrow.mjs` still shows a smooth, monotonic, real-geometry ramp reaching full
+ * size, just over a longer real window) — short enough that even the single closest measured
+ * attach (226.3 m, 9.8 s of lead at the project's 95 km/h cruise) finishes growing with 5.8 s
+ * (~153 m) still to spare, long enough to noticeably soften the thousands of ordinary level 0/1
+ * attaches that happen every drive. Every attach now grows in from a seedling over `GROW_SECS`,
+ * anchored at its own root (the mesh's local origin is already the trunk base — see
+ * `addTube`/`makeTree` — so scaling `iPos.w`, the existing per-instance SCALE channel, shrinks
+ * the whole tree toward its own foot rather than toward the world origin). Zero shader changes:
+ * `TREE_VS` already reads `sc = iPos.w` and multiplies every local vertex by it, so a small
+ * starting scale is a small tree in the correct place, not a degenerate one — `H = uTreeH*sc`
+ * and the two divisions that use it are already guarded with `max(H, …)`.
  */
-const GROW_SECS = 1.5;
+export const GROW_SECS = 4.0;
 /** Starting fraction of full size. Not exactly 0: keeps the shader's H-based divisions well
  *  away from their guards rather than merely inside them. */
 const GROW_START = 0.05;

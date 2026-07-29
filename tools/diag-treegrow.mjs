@@ -23,7 +23,7 @@ import { setBiomeBias } from '../src/world/biomes.js';
 import { applyCarFeel, FLEET_BY_ID, FIRST_CAR } from '../src/game/garage.js';
 import { LEAF, LEVELS, nodeSize, buildChunk } from '../src/world/chunk.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from '../src/world/scatter.js';
-import { Flora } from '../src/render/trees.js';
+import { Flora, GROW_SECS } from '../src/render/trees.js';
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -186,18 +186,26 @@ while (frames < 200000) {
 
   if (!watched) {
     // grab the first tree block that attaches once the world has settled a little, so it is
-    // an ordinary leading-edge attach and not the very first frame's mass spawn-in.
+    // an ordinary leading-edge attach and not the very first frame's mass spawn-in. Skipped if
+    // its live scale is already at target: a handoff replacement (`_attach(e, false, true)`)
+    // legitimately lands at full size instantly — see RETIRE_MAX_S's comment in trees.js — and
+    // picking one of those would prove nothing about the grow-in this tool exists to verify.
     if (simClock > 3000) {
       for (const [key, entry] of flora.chunks) {
         if (entry.blocks && !wasAttached.has(key)) {
           for (const block of entry.blocks) {
             if (block.len > 0 && block.batch.kind !== 'scrub') {
-              watched = { block, idx: 0, targetScale: block.g.pos[3], attachClock: simClock };
-              break;
+              const target = block.g.pos[3];
+              const live = block.batch.iPos[block.start * 4 + 3]; // instance 0 of this block
+              if (live < target * 0.99) {
+                watched = { block, idx: 0, targetScale: target, attachClock: simClock };
+                break;
+              }
             }
           }
         }
         if (entry.blocks) wasAttached.add(key);
+        if (watched) break;
       }
     }
   }
@@ -206,7 +214,7 @@ while (frames < 200000) {
     const { block, idx, targetScale } = watched;
     const liveScale = block.alive ? block.batch.iPos[(block.start + idx) * 4 + 3] : null;
     curve.push({ t: (simClock - watched.attachClock) / 1000, scale: liveScale, needsUpdate: block.batch.aPos.needsUpdate });
-    if (curve.length > 130) break; // > GROW_SECS worth of frames at 60 Hz, plus margin
+    if (curve.length > Math.round(GROW_SECS * 60) + 20) break; // > GROW_SECS worth of frames at 60 Hz, plus margin
   }
 
   frames++;

@@ -271,6 +271,73 @@ export const BIOME_TINT = [
   },
 ];
 
+/* ── per-biome GROUND RAMPS ────────────────────────────────────────────────
+ *
+ * BIOME_TINT's `ground` entry is a MULTIPLIER over the one shared green ramp above, and a
+ * multiplier cannot change a hue — it can only make the same green lighter, darker or
+ * warmer. That limitation has now cost two separate rounds. The dunes entry claimed a
+ * "rose-and-ochre sand sea" for months while the ground measured (139,138,93) olive, and it
+ * was only fixed by giving sand its OWN stops; then the operator looked at the finished
+ * world and said "u just renamed them but they are similar 3 biomes sand, snow, hills".
+ *
+ * Same disease, four more patients. So every biome now declares its own four-stop ramp —
+ * lit / mid / shade / hollow, the same four the terrain shader has always mixed by its
+ * `blot` field — and the shader blends the RAMPS by biome weight instead of blending one
+ * ramp through five multipliers. One extra table, no new mechanism, and the special-cased
+ * `sand` block in terrainMaterial.js collapses into it.
+ *
+ * MEADOW IS THE BASE PALETTE, UNCHANGED, ON PURPOSE. Its four entries are literally tLit /
+ * tMid / tShade / tHollow, so the reference valley the pen drew renders exactly as it did
+ * before this table existed, and any colour difference measured anywhere else is a real
+ * difference rather than a global shift.
+ *
+ * The four others are chosen to separate on HUE, not on brightness, because brightness is
+ * what the sun and the aerial haze already vary by the time it reaches the eye:
+ *   STEPPE    gold/straw — the yellow of standing dead grass, the one colour the meadow's
+ *             green can never be mistaken for.
+ *   HIGHLAND  cold blue-slate. Its old tint was a 0.82/0.90/0.98 multiplier — a slightly
+ *             bluer green, i.e. still green, which is why "hills" was one of the three
+ *             biomes he could name and "highland" was not one of the five.
+ *   DUNES     the existing sand stops, promoted out of their special case.
+ *   WETLAND   silver-teal peat, desaturated the way standing water and mist desaturate.
+ */
+export const BIOME_GROUND = [
+  [P.tLit, P.tMid, P.tShade, P.tHollow], // 0 MEADOW — the pen's own valley, untouched
+  ['#D7D278', '#A9B84A', '#7F8438', '#57592B'], // 1 STEPPE   — sun-bleached gold
+  ['#9FB0B8', '#748A99', '#4E6274', '#36455A'], // 2 HIGHLAND — cold blue slate
+  [P.sandLit, P.sandMid, P.sandShade, P.sandHollow], // 3 DUNES — rose-and-ochre sand
+  ['#8BBCC2', '#5A939D', '#3B6A7A', '#254550'], // 4 WETLAND  — silver-teal peat
+];
+
+/* How hard the ground palette snaps to the dominant biome, as one exponent.
+ *
+ * The weights arriving at the shader are a genuine 5-way partition and they are SOFT: over a
+ * 44 km scan of the shipped seed, meadow never exceeds 0.509 and steppe never exceeds 0.448
+ * (`node tools/diag-biomes.mjs`). Blend five ramps by those and every green biome averages to
+ * the same olive — which is exactly the report. Raising the weights to a power and
+ * renormalising pulls the dominant biome's own ramp forward without introducing any
+ * discontinuity: it is smooth wherever the weights are, and it preserves the partition and
+ * the ordering.
+ *
+ * IT IS APPLIED TO COLOUR ONLY. Sharpening the weights at source in world/biomes.js was tried
+ * and swept, and it takes `node tools/diag-cliffs.mjs` from 0.008% to 0.625% at the equivalent
+ * strength, because those same weights blend the terrain relief. See the long note in
+ * biomes.js. 3.0 is swept — see docs/BACKLOG.md. */
+export const GROUND_SHARPEN = 3.0;
+
+/** Flat Float32Array of the per-biome ground ramps: 4 stops x vec3, linear. */
+export function biomeGroundArrays() {
+  const n = BIOME_GROUND.length;
+  const out = [0, 1, 2, 3].map(() => new Float32Array(n * 3));
+  BIOME_GROUND.forEach((ramp, i) => {
+    ramp.forEach((hex, s) => {
+      const c = new Color(hex).convertSRGBToLinear();
+      out[s].set([c.r, c.g, c.b], i * 3);
+    });
+  });
+  return { lit: out[0], mid: out[1], shade: out[2], hollow: out[3], count: n };
+}
+
 /** Flat Float32Array of the biome tints, ready to upload as a uniform array. */
 export function biomeTintArrays() {
   const n = BIOME_TINT.length;

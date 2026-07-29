@@ -17,6 +17,62 @@ import { mountInvite } from '../net/invite.js';
 
 const ESC = ['Escape', 'KeyM'];
 
+/* ── the seed ────────────────────────────────────────────────────────────────
+ * "Need to be able to change seed value." `?seed=` has always worked; nothing in the running
+ * game ever said so, and typing a query string is not a control.
+ *
+ * A RELOAD IS THE HONEST MECHANISM, not laziness. The world is seed-deterministic and it is
+ * meshed in workers from that number — the same reason the Land buttons a few lines up reload.
+ * Swapping it live would mean tearing down every chunk, every prop, the road cache, the
+ * streamer and the car's own position mid-frame, and the button would be lying about what it
+ * did the moment one of them held a stale reference. The label says "reloads".
+ *
+ * The three functions below are exported and pure so `node tools/diag-seedui.mjs` can hold the
+ * real produced URL to account without a browser and without navigating anywhere.
+ */
+const SEED_MAX = 4294967295; // the world reads it through `>>> 0`, so this is the real range
+
+/** Whatever the player typed -> a usable seed, or null. Long numbers wrap rather than fail. */
+export function normaliseSeed(text) {
+  const digits = String(text ?? '').replace(/[^0-9]/g, '');
+  if (!digits) return null;
+  const n = Number(digits);
+  if (!Number.isFinite(n)) return null;
+  const wrapped = n % (SEED_MAX + 1);
+  return (wrapped || 1) >>> 0; // seed 0 is the "absent" value in main.js's parseInt fallback
+}
+
+/** A fresh random world. Never 0, for the same reason. */
+export function rollSeed() {
+  return (Math.floor(Math.random() * SEED_MAX) + 1) >>> 0;
+}
+
+/**
+ * The query string that lands the player in `seed`, carrying the rest of the configuration
+ * so changing the world does not silently cost them their car, feel or land.
+ */
+export function seedSearch(seed, current = {}, search = '') {
+  const p = new URLSearchParams(search);
+  p.set('seed', String(seed >>> 0));
+  if (current.terrain) p.set('terrain', current.terrain);
+  if (current.feel) p.set('feel', current.feel);
+  if (current.car) p.set('car', current.car);
+  return p.toString();
+}
+
+/**
+ * The seed this page is actually running. The URL is authoritative when it carries one;
+ * otherwise the live world's own value is read off `window.WANDEROAD.SEED` — the same object
+ * tools/browser-test.mjs reads — rather than re-deriving main.js's default here, which is
+ * exactly how a second opinion about one number starts.
+ */
+export function currentSeed() {
+  const fromUrl = normaliseSeed(new URLSearchParams(globalThis.location?.search ?? '').get('seed'));
+  if (fromUrl !== null) return fromUrl;
+  const live = globalThis.WANDEROAD?.SEED;
+  return Number.isFinite(live) ? live >>> 0 : null;
+}
+
 /* ── the controls, as they actually are ──────────────────────────────────────
  * "Controls need to be visible in the Garage" — the operator. This is the only place in the
  * running game that says what the keys do, so it has to be RIGHT, and every line below was
@@ -110,6 +166,15 @@ export class Menu {
         <h3>Land <small>reloads the world</small></h3>
         <div class="row" data-group="terrain"></div>
 
+        <h3>Seed <small>the number this whole world is grown from — reloads</small></h3>
+        <div class="row seedRow">
+          <input data-seed type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
+                 aria-label="World seed" placeholder="world seed"
+                 style="font:inherit;font-size:0.92rem;color:var(--ink);background:rgba(255,252,244,0.9);border:1px solid rgba(58,67,86,0.28);border-radius:10px;padding:0.42rem 0.7rem;width:11ch;letter-spacing:0.06em">
+          <button data-act="seedRoll">Roll a new one</button>
+          <button data-act="seedGo">Use this seed</button>
+        </div>
+
         <h3>Controls <small>a gamepad or a touchscreen works too</small></h3>
         ${CONTROLS.map(
           ([heading, rows]) => `
@@ -144,6 +209,16 @@ export class Menu {
     this._fill('terrain', Object.keys(TERRAINS).map((k) => [k, TERRAINS[k].label]));
 
     el.addEventListener('click', (e) => this._onClick(e));
+    /* Enter inside the seed field does what the button does. Bound on the field itself so it
+     * cannot reach the game's own key handling, and stopPropagation for the same reason: the
+     * Garage is open, but `M` is still a global binding and typing a seed must not toggle it. */
+    const seedEl = el.querySelector('[data-seed]');
+    if (seedEl) {
+      seedEl.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') this.applySeed();
+      });
+    }
     addEventListener('keydown', (e) => {
       if (!ESC.includes(e.code)) return;
       e.preventDefault();
@@ -215,6 +290,12 @@ export class Menu {
       this._mark();
       return this.hide();
     }
+    if (act === 'seedRoll') {
+      const f = this.root.querySelector('[data-seed]');
+      if (f) f.value = String(rollSeed());
+      return;
+    }
+    if (act === 'seedGo') return this.applySeed();
 
     if (group === 'car') {
       const spec = FLEET_BY_ID[key];
@@ -247,8 +328,37 @@ export class Menu {
     this._mark();
   }
 
+  /**
+   * Take whatever is in the field and go there. Returns the query string it navigated to (or
+   * null if the field held nothing usable), so the harness can assert on the real value this
+   * method produced rather than on a re-implementation of it.
+   */
+  applySeed() {
+    const f = this.root.querySelector('[data-seed]');
+    const seed = normaliseSeed(f && f.value);
+    if (seed === null) {
+      // Nothing usable typed. Do not navigate — silently reloading the same world would read
+      // as a broken button. Put the current seed back so the field is never left empty.
+      this.refreshSeed();
+      return null;
+    }
+    const q = seedSearch(seed, this.current, globalThis.location?.search ?? '');
+    if (globalThis.location) globalThis.location.search = q;
+    return q;
+  }
+
+  /** Show the seed the world is actually running. Called every time the Garage opens. */
+  refreshSeed() {
+    const f = this.root.querySelector('[data-seed]');
+    if (!f) return null;
+    const s = currentSeed();
+    f.value = s === null ? '' : String(s);
+    return f.value;
+  }
+
   show() {
     this._fillCars();
+    this.refreshSeed();
     this.open = true;
     this.root.hidden = false;
     this._mark();

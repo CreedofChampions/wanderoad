@@ -40,7 +40,15 @@ export const MAX_SUBSTEPS = 5; // clamp at 41 ms; below that we accept slow moti
  * looking at is worth more here than 300 km/h you are surviving.
  */
 
-/* ── chassis ────────────────────────────────────────────────────────────── */
+/* ── chassis ──────────────────────────────────────────────────────────────
+ * edited by AI from here — UNITS, because one of these was silently read in the wrong ones.
+ * `rollPerG` is DEGREES of body roll per g of cornering (3.4 / 2.5 / 1.7 are textbook roll
+ * gradients for a grand tourer, a sports car and a hypercar). vehicle.js converts it at the
+ * point of use; it used to multiply it straight into a radian angle, which made it 195 °/g and
+ * pinned the drawn lean at BODY.rollClamp from 0.03 g upwards — the "wobbles like a scooter"
+ * report. Everything else in this file that is an angle carries its own explicit `* Math.PI /
+ * 180`; if you add another angle here, do the same or convert it where it is used.
+ */
 export const TIERS = {
   gt: {
     name: 'Grand Tourer',

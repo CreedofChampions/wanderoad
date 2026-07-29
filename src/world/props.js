@@ -845,14 +845,26 @@ function stationForEdge(e, seed, stats = null) {
  * Every petrol station whose forecourt centre lands inside the box.
  * Pure: same seed, same answer, no ground probe needed.
  * `stats`, if given, is forwarded to stationForEdge — see it for what gets tallied.
+ *
+ * `probe`, if given, must be the tile's REAL ground probe ({ height(x, z) }) — the same one
+ * propsInBox already takes. With it, a forecourt whose real ground is too broken to grade a
+ * slab into is dropped here rather than drawn floating over a ravine (see stationPad's own
+ * header for the measurement and STATION_MAX_ROUGH for the cap). WITHOUT it this function is
+ * unchanged and still pure, which is what `nearestStation` over a 10 km box and
+ * `stationSpacing` rely on — a carve-aware probe is far too expensive at that size.
  */
-export function stationsInBox(x0, z0, x1, z1, seed, stats = null) {
+export function stationsInBox(x0, z0, x1, z1, seed, stats = null, probe = null) {
   const out = [];
   const edges = edgesInBox(x0 - 60, z0 - 60, x1 + 60, z1 + 60, seed, 20);
+  const h = probe && probe.height;
   for (const e of edges) {
     const st = stationForEdge(e, seed, stats);
     if (!st) continue;
     if (st.x < x0 || st.x >= x1 || st.z < z0 || st.z >= z1) continue;
+    if (h && !stationSits(st, h)) {
+      if (stats) stats.rejectRoughGround = (stats.rejectRoughGround || 0) + 1;
+      continue;
+    }
     out.push(st);
   }
   return out;
@@ -895,6 +907,132 @@ export function stationSpur(st) {
   const apronX = st.x - st.nx * (STATION_APRON_HALF_DEPTH - 0.4);
   const apronZ = st.z - st.nz * (STATION_APRON_HALF_DEPTH - 0.4);
   return { mouthX, mouthZ, apronX, apronZ };
+}
+
+/* ── the forecourt against the ground the car actually drives on ──────────────
+ * MEASURED, 2026-07-28, and this is the "who asked?" bug (tools/diag-seam.mjs's own header)
+ * reopening in a new place. Every ground test in stationForEdge above — apronStep, and the
+ * STATION_MAX_STEP guarantee it exists to enforce — asks `land()`, the RAW biome relief. The
+ * car, the terrain mesher and the drawn ribbon all ask `Terrain.height()`, which is that land
+ * BENT BY THE ROAD CARVE. Beside a road those two are not the same surface, and stations live
+ * 19 m from a road by construction. Profiled across the normal at one real station
+ * (st:0:0,-2,1, seed 20260726): land() runs a smooth 267 -> 254 while Terrain.height() runs
+ * 262 -> 248 with a 17 m trench at 10 m off the centreline, where a neighbouring edge is cut
+ * into the hill. The placement scored that site at `step` 0.07 m — a perfect forecourt, on a
+ * surface nothing else in the game uses.
+ *
+ * The consequence is exactly the operator's report ("the roads that lead to them need to work
+ * (no fall through)"): the apron slab and its access spur were drawn on `land`'s ground and
+ * the wheels are on `Terrain.height`'s, so the tarmac floated. Measured over 42 stations on
+ * three seeds before this landed: worst drawn-above-driven 16.28 m, and 24 of the 42 over
+ * half a metre (tools/diag-spur.mjs).
+ *
+ * Making the PLACEMENT carve-aware is not available at this size: a carve sample needs a
+ * RoadField, `stationsInBox` is called per streamed tile AND by `nearestStation` over a 10 km
+ * box, and the field for one arterial edge already costs render/road.js about 10 ms. So the
+ * two numbers a forecourt actually stands on are computed HERE, once, from whatever real
+ * ground probe the caller has (the tiler always has one), and everything downstream — the
+ * slab height, the access spur, the collision hitbox base, and the acceptance harness — reads
+ * this one function instead of each grading the station its own way.
+ */
+
+/** Where the slab's own ground is sampled, in the station's local (along-road, toward-road)
+ *  frame: the four corners, the four edge midpoints and the centre of the apron rectangle. */
+export const STATION_PAD_PROBES = [
+  [0, 0],
+  [STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH], [-STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH],
+  [STATION_APRON_HALF_WIDTH, -STATION_APRON_HALF_DEPTH], [-STATION_APRON_HALF_WIDTH, -STATION_APRON_HALF_DEPTH],
+  [0, STATION_APRON_HALF_DEPTH], [0, -STATION_APRON_HALF_DEPTH],
+  [STATION_APRON_HALF_WIDTH, 0], [-STATION_APRON_HALF_WIDTH, 0],
+];
+
+/**
+ * How much the REAL ground may vary under one forecourt slab before that slab stops being a
+ * forecourt and becomes a mesa. A petrol station is a graded pad and a graded pad is flat, so
+ * some plinth is correct and unavoidable — measured over 185 stations on five seeds, the
+ * median real-ground spread under an apron is 1.60 m and the 90th percentile 4.04 m. This cap
+ * is the tail: 12 of those 185 (6.5%) stand on ground that moves more than the canopy is tall,
+ * and those are the ones drawn floating over a ravine. They are dropped rather than drawn,
+ * which is the same trade STATION_MAX_STEP already makes ("better a slightly longer hunt than
+ * a petrol station you can drive through") and which the floating fuel cans exist to backstop.
+ */
+export const STATION_MAX_ROUGH = 5.0;
+
+/**
+ * How big a step the slab may still stand over the access spur's own arrival point. Zero for
+ * most stations — the pad is graded to that exact point — and non-zero only where the bank
+ * behind the forecourt would otherwise bury it deeper than PAD_BURY_MAX, at which point the
+ * two constraints fight and this is the one that gives. Measured over the same 185 stations:
+ * the median door step is 0.04 m and 80% are inside 0.25 m, and then the tail jumps straight
+ * past a metre — there is almost nothing in between (door > 0.5 m: 32 stations; door > 1.0 m:
+ * 23). So the cap buys the tight guarantee for very little: together with STATION_MAX_ROUGH,
+ * 0.5 keeps 152 of 185 (82.2%) where 1.0 keeps 161 (87.0%). The 18% dropped are the ones whose
+ * forecourt sits on ground no flat slab can be cut into — precisely the set that was being
+ * drawn floating, and the floating fuel cans are the layer that exists to backstop a rarer
+ * station (see the CAN_SLOT comment below).
+ */
+export const STATION_MAX_DOOR = 0.5;
+
+/**
+ * The forecourt's real seating: where the slab's top face goes, and the ground it is standing
+ * on. `height(x, z)` must be the SAME ground the car drives on — src/render/props.js hands in
+ * its tile Terrain's own `height`, tools/bench-props.mjs and tools/diag-spur.mjs hand in a
+ * real Terrain's. Never `land()`; see this section's header for what that cost.
+ *
+ *   y     the slab's top face. CUT AND FILL, the way a real forecourt on a slope is built,
+ *         rather than a clamp toward the road's own graded height. That clamp (padY within
+ *         PAD_STEP of `s.y`) is what BURIED forecourts — up to 3.23 m of hillside standing
+ *         over the slab, which is the mechanism that made collide.js's own height gate throw
+ *         the hitboxes away and produced "the collisions of fuel stations are still
+ *         non-existent" twice. The slab is graded to the highest real ground on its ROAD-FACING
+ *         half, so the access spur arrives flush and the player drives in level; the back half
+ *         is allowed to be cut into the bank behind it, but never by more than PAD_BURY_MAX,
+ *         which is under every forecourt hitbox's own height and so can never gate one out.
+ *   lo    the lowest ground under the apron — how deep the skirt has to reach.
+ *   rough hi - lo, the number STATION_MAX_ROUGH caps.
+ *   hRoad the real drivable height at the spur's mouth, i.e. the edge of the carriageway.
+ */
+/** How deep the bank behind a forecourt may stand over its slab. Every entry in
+ *  render/props.js STATION_HITBOXES is at least 2.0 m tall and collide.js only gates a solid
+ *  out once the car's own ground is more than `h + 0.4` above its base, so 1.5 m keeps every
+ *  forecourt collider reachable with a margin of half a metre on the shortest of them. */
+export const PAD_BURY_MAX = 1.5;
+
+export function stationPad(st, height) {
+  const ca = Math.cos(st.yaw);
+  const sa = Math.sin(st.yaw);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const [dx, dz] of STATION_PAD_PROBES) {
+    const g = height(st.x + dx * ca - dz * sa, st.z + dx * sa + dz * ca);
+    if (g < lo) lo = g;
+    if (g > hi) hi = g;
+  }
+  /* Graded to the ground AT THE DOOR — the exact point where the access spur meets the slab.
+   * That is the one place the drawn tarmac has to be continuous, because it is where the
+   * player drives on, and grading anywhere else (the road's height, the apron's high corner,
+   * the apron's mean) leaves a step there that is a fall-through by another name. Everything
+   * else about the slab is then absorbed: the high side is cut into the bank (capped at
+   * PAD_BURY_MAX so no collider is ever gated out), and the low side stands on its own batter
+   * skirt, which is what a skirt is for. */
+  const sp = stationSpur(st);
+  const gEnd = height(sp.apronX, sp.apronZ);
+  const y = Math.max(gEnd + 0.04, hi - PAD_BURY_MAX);
+  return {
+    y, lo, hi, gEnd,
+    /** How far the slab still stands over the spur's own arrival point — the residual step
+     *  the last section of the driveway has to swallow. Zero unless the burial cap bound. */
+    door: y - gEnd,
+    rough: hi - lo,
+    hRoad: height(sp.mouthX, sp.mouthZ),
+  };
+}
+
+/** Does this forecourt stand on ground a flat slab can actually be graded into, with a
+ *  driveway that meets it? See STATION_MAX_ROUGH and STATION_MAX_DOOR. */
+export function stationSits(st, height) {
+  const p = stationPad(st, height);
+  return p.rough <= STATION_MAX_ROUGH && p.door <= STATION_MAX_DOOR;
 }
 
 /**

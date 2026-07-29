@@ -4,7 +4,7 @@
 import { Terrain, landHeight } from '../src/world/terrain.js';
 import { biomeWeights, BIOME_NAMES, BIOME_TERRAIN, BIOME_COUNT } from '../src/world/biomes.js';
 
-const SEED = 20260726;
+const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 const R = 1200, STEP = 4;
 const T = new Terrain(SEED, -R, -R, R, R);
 const hits = [];

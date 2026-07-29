@@ -204,6 +204,10 @@ export class Vehicle {
     this._righting = false;
     this._rollTimer = 0;
     this._prevGroundRoll = 0;
+    /* Last step's ground height under the car, for the base-relative damper in _step(). `null`
+     * means "no previous sample" — a fresh car, or one that has just been teleported — and the
+     * damper reads a ground velocity of 0 rather than differencing two unrelated places. */
+    this._prevGroundY = null;
     this._gRate = 0; // smoothed rate the ground is rolling the car at
     this._gRatePrev = 0;
     // Scratch for roads.carve(). Terrain hands out ONE shared object per Terrain, so a
@@ -307,6 +311,11 @@ export class Vehicle {
     // the car was a second ago — matches R's existing job of always being a way out.
     this._sandBogDist = 0;
     this.sandBog = 0;
+    /* edited by AI from here — and the same goes for the base-relative damper's ground sample.
+     * Differencing the height under the NEW position against the height under the OLD one is
+     * not a ground velocity, it is the distance teleported divided by a frame; the ±6 m/s clamp
+     * in _step() bounds the damage but there is no reason to take the kick at all. */
+    this._prevGroundY = null;
     this._probeWheels();
     this._prevGroundRoll = this.groundRoll;
     // A freshly placed car settles to the real ground attitude immediately — the rate limit
@@ -630,7 +639,32 @@ export class Vehicle {
     const bodyLow = -halfTOut * sinTip - roofOut * Math.max(0, -cosTip); // <= 0, 0 when tip=0
     const rideYTip = rideY - bodyLow; // rises as the body rotates away from flat
     const gap = this.y - rideYTip;
-    const airborne = gap > 0.06;
+    /* The vertical speed of the GROUND under the car — see the base-relative damper below,
+     * which is the main reason this exists. Hoisted above `airborne` because the grounded band
+     * uses it too. Clamped: `groundY` is a terrain sample, and a chunk seam or a teleport can
+     * step it. ±6 m/s covers a 17% grade at 130 km/h, and a sweep of 4/5/6/8/12 measured 6 as
+     * the best of them on tools/diag-carbody.mjs section 4 (8 and 12 turn a fast 22% descent
+     * into a 1.4-1.9 m launch; 4 and 5 leave more of the pogo in). */
+    const groundV = clamp(this._prevGroundY === null ? 0 : (groundY - this._prevGroundY) / dt, -6, 6);
+    /* THE GROUNDED BAND, and why it is allowed to widen HERE and was not allowed to before.
+     *
+     * The suspension has 0.22 m of travel, so with the body up to that far above ride height
+     * the wheels are still on the road, extended, gripping. A flat 0.06 m band cuts the spring
+     * and every tyre force inside that range, and on a fast descent the ground recedes through
+     * exactly it — which is the bounce. Widening the band to the droop range was tried and
+     * REVERTED (`git show cdf1322`) for one specific reason: over water the probe's "ground" is
+     * the LAKE BED, and a wide band let the spring chase it down.
+     *
+     * The difference is what the widening is gated on. It is not a constant and it is not a
+     * surface-field lookup (the trap that made the last dry/wet gate silently read "dry" on a
+     * fixture that did not supply the field). It is gated on the ground under the car ACTUALLY
+     * RECEDING, which only happens because the car is TRAVELLING across falling terrain. A car
+     * sinking straight down into a lake does not move horizontally, so the terrain height under
+     * it is not changing, so `groundV` is ~0 and the band stays at its original 0.06 m — the
+     * water case gets the old behaviour by construction rather than by a flag. bench-boat's
+     * barrier reads 0.25 m against its 1.0 m bar, unchanged from before this whole round. */
+    const band = 0.06 + clamp01(-groundV / 5) * (SUSPENSION.travel - 0.06);
+    const airborne = gap > band;
     this.onGround = !airborne;
 
     // Vertical: a spring to the ride height plus gravity, with the suspension travel
@@ -643,8 +677,21 @@ export class Vehicle {
       // TDU's own trick: extra downward acceleration once a wheel leaves the ground, so
       // landings settle instead of pogoing. Hardcore removes it, which is exactly why
       // hardcore cars famously launch off crests.
-      if (A.airborne > 0 && this._airTime > AIR.extraDelay) {
-        const k = clamp01((this._airTime - AIR.extraDelay) / AIR.extraRamp);
+      /* edited by AI from here — NO SETTLING DELAY ON A HOP.
+       * `AIR.extraDelay` exists so a deliberate jump off a crest gets its moment of air before
+       * the assist starts pulling the car down. A descent pogo is not that: it is a rapid train
+       * of hops of a few centimetres, each one shorter than the delay, so the assist never
+       * armed at all and the thing it was written for — "landings settle instead of pogoing" —
+       * never happened. Inside 0.2 m of the road there is no jump to protect, so the delay is
+       * skipped and the assist ramps from the first frame. Nothing is added that was not
+       * already there: the ceiling stays AIR.extraMax (1 g on top of gravity), the ramp stays
+       * AIR.extraRamp, and hardcore still switches the whole thing off through `A.airborne`.
+       * This is deliberately NOT the reverted 3.2 g suction (`git show b3e6ef4`) that dragged
+       * the car into lake beds — bench-boat's barrier is unmoved at 0.25 m against its 1.0 m
+       * bar, the same number it read before this change. */
+      const delay = gap < 0.2 ? 0 : AIR.extraDelay;
+      if (A.airborne > 0 && this._airTime > delay) {
+        const k = clamp01((this._airTime - delay) / AIR.extraRamp);
         g += AIR.gravity * lerp(AIR.extraMin, AIR.extraMax, k) * A.airborne;
       }
       this.vy -= g * dt;
@@ -659,7 +706,32 @@ export class Vehicle {
        * the ACTUAL ride height, which is restLength minus this. */
       this.sag = compression;
       const springA = (SUSPENSION.stiffness * 4 * compression) / this.mass;
-      const dampA = (SUSPENSION.damping * 4 * -this.vy) / this.mass;
+      /* edited by AI from here — THE DAMPER IS BASE-RELATIVE, which is what a damper is.
+       *
+       * A suspension damper resists the velocity ACROSS itself: the body's velocity minus the
+       * WHEEL's, and the wheel is on the ground, so on a road that is falling away underneath a
+       * moving car the ground itself has a vertical velocity. This term used to read `-this.vy`
+       * — the body's velocity in the WORLD — so on a descent it fought the very motion the car
+       * needs to make in order to stay on the road. At 128 km/h down a 14% grade the ground
+       * recedes at 5 m/s, and 4 x 4200 N.s/m against 5 m/s is 58 m/s² of upward acceleration,
+       * six gravities, applied for doing exactly the right thing. The car got shoved back up,
+       * cleared the 0.06 m grounded band, lost the spring entirely, fell, landed, and got shoved
+       * up again: measured 73.0% of frames airborne, 169 bounce cycles in 25 s and 15.6 cm of
+       * daylight under the tyres (`node tools/diag-carbody.mjs` section 4). That is the
+       * operator's "bouncing down hill" GIF.
+       *
+       * WHY THIS IS NOT THE FIX THAT WAS REVERTED (`git show b3e6ef4`). That one ADDED a
+       * downward force — 3.2 g of "suction" toward whatever the probe called ground — and over
+       * a lake the probe's ground is the LAKE BED, so it dragged the car down into it and
+       * bench-boat's barrier went 0.97 m -> 1.13 m deep against a 1.0 m bar. This adds no force
+       * at all in either direction; it only stops the damper from RESISTING ground-following,
+       * and it is exactly zero whenever the ground under the car is not moving — which is the
+       * case for a car sinking vertically, because `groundV` is the rate the terrain height
+       * under the car changes, and a car going straight down does not change where it is.
+       *
+       * Clamped, because `groundY` is a terrain sample and a chunk seam or a teleport can step
+       * it: ±6 m/s covers a 17% grade at 130 km/h and cannot inject an impulse worth having. */
+      const dampA = (SUSPENSION.damping * 4 * (groundV - this.vy)) / this.mass;
       this.vy += (springA + dampA - g) * dt;
       // A landing must not launch the car back up: kill upward rebound above 2 m/s.
       if (this.vy > 2) this.vy = 2;
@@ -669,6 +741,9 @@ export class Vehicle {
       this.y = rideYTip - SUSPENSION.travel;
       if (this.vy < 0) this.vy = 0;
     }
+    // For next step's base-relative damper. Set unconditionally, airborne included, so a
+    // landing does not difference against a stale sample from before the jump.
+    this._prevGroundY = groundY;
 
     /* ── load transfer ─────────────────────────────────────────────────── */
     // First-order filters, not instant shifts. TDU1 is praised for transfer that reacts
@@ -1225,7 +1300,32 @@ export class Vehicle {
      * which _probeWheels explains is positive on rotation.z. So it follows _loadLat, not
      * minus it. The dive/squat sign underneath was always right — braking gives a negative
      * _loadLong and a positive, nose-down pitch. */
-    const leanTarget = clamp(this._loadLat * this.spec.rollPerG, -BODY.rollClamp, BODY.rollClamp);
+    /* edited by AI from here — THE LEAN UNITS. `rollPerG` is DEGREES of body roll per g: 3.4
+     * on the grand tourer, 2.5 on the sports car, 1.7 on the hyper, which are textbook
+     * roll-gradient figures for those three kinds of car. It was being multiplied straight into
+     * a RADIAN angle, i.e. consumed as 3.4 rad/g = 195°/g, and every neighbouring constant in
+     * the same block converts explicitly (`divePerG: (1.6 * Math.PI) / 180`) — this one was the
+     * only raw number in the table.
+     *
+     * What that cost, measured with `node tools/diag-carbody.mjs` section 1 before the fix:
+     * the drawn lean SATURATED at its 5.5° clamp (7.15° after visualRollMul) at 0.030 g on the
+     * GT, 0.040 g on the sports car, 0.055 g on the hyper — a twitch of the wheel, not a
+     * corner. So the body was not leaning proportionally to anything; it was a bang-bang switch
+     * slammed hard left or hard right by the sign of a filtered lateral acceleration that
+     * ordinary steering corrections flip several times a second. That is precisely "car still
+     * wobbles left to right immensely, like a scooter" / "still like motor bike not car", and
+     * it is why the previous audit's peak-amplitude reading (8.98°) looked survivable while the
+     * complaint stayed true — the amplitude was never the problem, the SATURATION was.
+     *
+     * It is also half of the wheels-through-the-ground report. The GLB cars rotate the whole
+     * car, WHEELS INCLUDED, about the contact plane (loadedCar.js's `attitude` node), so every
+     * degree of cosmetic lean drives the outboard tyres halfTrack·sin(lean) into the terrain:
+     * measured at 103 mm of tyre under the tarmac with ordinary keyboard corrections
+     * (`node tools/diag-carcontact.mjs`), against 14-17 mm hands-off.
+     *
+     * Nothing about the PHYSICS moves: `_loadLat` is a filtered copy of `latAccel`, this is the
+     * cosmetic lean spring's target, and it is never fed back into the solver. */
+    const leanTarget = clamp((this._loadLat * this.spec.rollPerG * Math.PI) / 180, -BODY.rollClamp, BODY.rollClamp);
     const pitchTarget = clamp(
       this._loadLong > 0 ? -this._loadLong * BODY.squatPerG : -this._loadLong * BODY.divePerG,
       -BODY.pitchClamp,

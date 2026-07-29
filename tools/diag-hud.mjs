@@ -86,7 +86,10 @@ globalThis.localStorage = {
 };
 globalThis.location = { search: '' };
 
-const { Hud, MILESTONES_KM, CAP_MIN_HOLD_S, CAP_CONFIRM_S } = await import('../src/ui/hud.js');
+const {
+  Hud, MILESTONES_KM, CAP_MIN_HOLD_S, CAP_CONFIRM_S,
+  OFFROAD_HINT_KEY, OFFROAD_HINT_MAX, OFFROAD_HINT_TEXT,
+} = await import('../src/ui/hud.js');
 const { Streak, fmtDistance } = await import('../src/game/streak.js');
 const { FLEET, fmtUnlock } = await import('../src/game/garage.js');
 const { StreakTrail } = await import('../src/render/trail.js');
@@ -101,6 +104,10 @@ const streak = new Streak();
 const car = { speed: 33.3, onGround: true, kph: 120, gear: 3, reverse: false, x: 0, z: 0 };
 const ON = { onRoad: 1, dominant: 0 };
 const OFF = { onRoad: 0, dominant: 0 };
+// `dominant: -1` matches a fresh Hud's own `_lastBiome` resting value, so it never trips the
+// "crossing into a new biome" toast — used only where a section wants the toast slot clean
+// for something else entirely (the R hint tests, further down) rather than testing biome text.
+const QUIET = { onRoad: 1, dominant: -1 };
 const DT = 1 / 60;
 
 const readout = () => ({
@@ -280,6 +287,124 @@ check(
   ev.length === 2 && ev[1].text === 'without leaving the road' && ev[1].t - ev[0].t >= CAP_MIN_HOLD_S - DT,
   ev.length === 2 ? `"off the road…" was on screen for ${(ev[1].t - ev[0].t).toFixed(3)}s before it changed again` : `${ev.length} change(s), expected 2`
 );
+
+/* ── 1a-bis. the R hint — off-road transitions, debounced, capped at 10 ─────────────────────
+ * Operator: "give people the hint that they can click R to get back on road when they go
+ * off-road the first 10 times." src/ui/hud.js reuses the toast (say()) and the SAME debounced
+ * off-road signal the caption above already computes — this section proves the three things
+ * that instruction actually demands: it appears on a real off-road transition, it does not
+ * repeat while the toast it rides is already showing, and it stops for good at 10.
+ *
+ * Real state throughout: a real Hud, real hud.toast.textContent reads, and the real
+ * persisted count read back out of the SAME stub localStorage streak.js itself uses — never
+ * a claim about an internal flag. */
+
+console.log('\nthe R hint — "press R to get back on the road", first 10 off-road transitions only:\n');
+
+// A clean slate: OFFROAD_HINT_KEY is one shared key in the stub store, and earlier sections
+// of this very file (the real `hud`/`streak` at the top, and `hud2` above) already drove real
+// and fake off-road spells through it. A fresh Hud here must be checked against a real,
+// explicit zero rather than whatever those earlier sections happened to leave behind.
+globalThis.localStorage.setItem(OFFROAD_HINT_KEY, JSON.stringify({ count: 0 }));
+
+/** Drives `h` for `frames` real DT ticks against `fake`, calling `mutate(i, t)` before each
+ *  frame, and returns every frame the hint ACTUALLY FIRED as `{ t, text }` — real internal
+ *  state (`h._offroadHintCount`, the same counter that gets persisted, incrementing) rather
+ *  than a comparison against the DOM text node. That matters here specifically: this stub
+ *  DOM's `document.getElementById()` hands back ONE shared node per id (see this file's own
+ *  header), so `hud.toast`, `hud2.toast` and every Hud built below are literally the SAME
+ *  object — a before/after TEXT comparison on it would wrongly read "no change" the moment
+ *  two Huds in this file happen to want the toast to say the same thing in a row, which is
+ *  exactly what happens once hud2's own caption tests above (real off-road spells, on the
+ *  same shared toast node) already leave it reading this exact hint. The counter has no such
+ *  cross-instance ambiguity: it is per-Hud, and it only ever moves when THIS `h` really
+ *  called `say()` for the hint. `surface: QUIET` (not ON) so a fresh Hud's very own first-
+ *  frame biome toast cannot occupy the slot for a reason that has nothing to do with the R
+ *  hint — that guard interaction is real and correct, just not what this section is proving. */
+function recordHint(h, fake, frames, mutate) {
+  const events = [];
+  let prevCount = h._offroadHintCount;
+  let t = 0;
+  for (let i = 0; i < frames; i++) {
+    if (mutate) mutate(i, t);
+    h.update(DT, { car, streak: fake, surface: QUIET });
+    t += DT;
+    if (h._offroadHintCount > prevCount) events.push({ t, text: h.toast.textContent });
+    prevCount = h._offroadHintCount;
+  }
+  return events;
+}
+
+/* A: a genuine, steady off-road departure shows the hint once, after the same CAP_CONFIRM_S
+ * the caption itself waits for — not instantly, and not off a single-frame flicker. */
+{
+  const hud3 = new Hud();
+  const fake3 = new FakeStreak();
+  fake3.distance = 500;
+  const SETTLE = 0.05;
+  const ev = recordHint(hud3, fake3, Math.round(2.0 / DT), (i, t) => {
+    fake3.grace = t >= SETTLE;
+  });
+  check(
+    'a genuine off-road transition shows the hint, once, after CAP_CONFIRM_S',
+    ev.length === 1 && ev[0].text === OFFROAD_HINT_TEXT &&
+      ev[0].t >= SETTLE + CAP_CONFIRM_S - DT && ev[0].t <= SETTLE + CAP_CONFIRM_S + 0.1,
+    ev.length ? `shown at ${ev[0].t.toFixed(3)}s, reading "${ev[0].text}"` : 'never shown'
+  );
+}
+
+/* B: "never while it is already showing". Two confirmed 'grace' states can never arrive less
+ * than 4 s apart on their own — each swap costs the caption's own CAP_MIN_HOLD_S (2.0 s) TWICE
+ * (once off 'grace', once back onto it), measured directly: test A's departure confirms at
+ * 0.35 s, and the caption-hysteresis section above measures the SAME departure's own recovery
+ * at 2.37 s — so a second genuine grace confirmation is structurally always past the hint's
+ * own 3.4 s toast on its own, and there would be nothing for this section to catch by trying
+ * to race it. What CAN legitimately be showing when a confirmed off-road transition lands is
+ * a DIFFERENT toast — a biome line, a milestone, a streak-break blip — since none of those
+ * share the caption's hysteresis clock. So this drives the actual guard directly: `say()` is
+ * called for something else first (exactly how hud.js's own biome/milestone/break lines
+ * already do, unconditionally, elsewhere in this file), then a real, fully-settled off-road
+ * transition arrives while it is still up. */
+{
+  const hud4 = new Hud();
+  const fake4 = new FakeStreak();
+  fake4.distance = 500;
+  hud4.say('something else is already showing', 2.0);
+  const beforeCount = hud4._offroadHintCount;
+  const ev = recordHint(hud4, fake4, Math.round(2.5 / DT), (i, t) => {
+    fake4.grace = t >= 0.05;
+  });
+  check(
+    'the hint does not fire while the toast it shares is already showing something else',
+    ev.length === 0 && hud4._offroadHintCount === beforeCount && hud4.toast.textContent === 'something else is already showing',
+    `${ev.length} appearance(s), count ${hud4._offroadHintCount} (was ${beforeCount}), toast reads "${hud4.toast.textContent}"`
+  );
+}
+
+/* C: the cap. Thirteen well-separated, fully genuine off-road spells — each one settled past
+ * the caption's own hold, each one given time for the toast to clear before the next — and
+ * only the persisted count (the same store, read the same way streak.js reads `best`) says
+ * how many were actually shown. Coarse timesteps here on purpose: this section is not
+ * re-testing the debounce (A and B already did, at real frame rate), only the cap. */
+{
+  const hud5 = new Hud();
+  const fake5 = new FakeStreak();
+  fake5.distance = 500;
+  const SPELLS = 13;
+  for (let i = 0; i < SPELLS; i++) {
+    fake5.grace = true;
+    hud5.update(6.0, { car, streak: fake5, surface: QUIET }); // clears CAP_CONFIRM_S and any hold
+    fake5.grace = false;
+    hud5.update(6.0, { car, streak: fake5, surface: QUIET }); // clears the hold AND the 3.4 s toast
+  }
+  const persisted = JSON.parse(globalThis.localStorage.getItem(OFFROAD_HINT_KEY)).count;
+  check(
+    `the hint stops for good at OFFROAD_HINT_MAX (${OFFROAD_HINT_MAX}), even across ${SPELLS} genuine transitions`,
+    persisted === OFFROAD_HINT_MAX,
+    `persisted count ${persisted}`
+  );
+  check('the persisted count is real storage, not a guess', OFFROAD_HINT_MAX === 10, `OFFROAD_HINT_MAX = ${OFFROAD_HINT_MAX}`);
+}
 
 /* ── 1b. the milestone dots ──────────────────────────────────────────────── */
 

@@ -39,13 +39,89 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
-- [ ] **BLOCKING — arterial-vs-arterial crossings are never levelled, and it is holding back the
-      operator's #1 request.** He asked to spawn people facing the OPPOSITE way down the road.
-      That change is one line (`+ Math.PI` in findSpawn, already written and commented in
-      src/world/terrain.js with its restore condition). It is HELD because driving out that way
-      routes the car through a crossing **3.63 m out of level** — browser R2, 1 of 9, reproduced
-      twice — and shipping it would aim every new player at exactly the fall-through this project
-      spent days eliminating.
+- [x] **THE REVERSED SPAWN IS RESTORED — crossings are levelled and the hold is lifted.**
+      `+ Math.PI` is back in `findSpawn`. The gate it was waiting on, measured by the new
+      `node tools/diag-crosslevel.mjs`: **0 crossings over 1.0 m within 2600 m of the default
+      spawn, in every direction.** Everything below this paragraph is the original entry, kept
+      because two of its three claims turned out to be WRONG and the corrections are the useful
+      part.
+
+      **CORRECTION 1 — the crossing that held the spawn was not arterial-vs-arterial.** Driving
+      out reversed from (429,463) on the shipped seed, the first mismatch was at **(-253,1182),
+      990 m out, 2.51 m, and it was tier0 x tier1** — an arterial the lane was already supposed
+      to be levelled against.
+
+      **CORRECTION 2 — the two "arterial x arterial" lines below are real, but they were
+      classified by the wrong test.** Asking whether the two EDGES share a lattice node says
+      nothing about where THIS intersection is: `0:-2,-2,0` and `0:-2,-2,1` both leave node
+      (-2,-2) and then cross each other again 1.6 km away, which is a genuine mid-edge junction.
+      Classifying by the crossing POINT's distance to a shared node instead moved 19 crossings
+      from "shared node, not a junction" to "real, and unlevelled". A pair-identity test on a
+      per-point question is the same shape of error as the `.wy` stub probe already recorded here.
+
+      **CORRECTION 3 — "a wide diagnostic box re-levels edges the game never uses" is no longer
+      true and it hid a real bug.** `canonicalProfile` derives its partner list from the EDGE's
+      own bounds, so a profile is box-independent — verified directly: the (-253,1182) mismatch
+      read 2.51 m at box half-widths of 420, 840, 1500 and 3000 m, to the centimetre.
+
+      **THE TWO REAL DEFECTS, and the fixes, in src/world/roads.js:**
+
+      1. *The lane-vs-lane pass silently undid the lane-vs-arterial pass.* A lane is levelled onto
+         the arterial it crosses, and then levelled against outranking LANES — and at (-253,1182)
+         the outranking lane crosses it 17 m further on, inside the 18 m capture radius, and put
+         it straight back. `levelAgainst` now takes a `respect` mask: the arterial pass records
+         the authority it took and the lane pass may not spend it. The arterial is the top of the
+         priority order or it is not.
+      2. *Arterials never levelled against each other at all.* New `level0`: an arterial yields to
+         the arterials whose key sorts before its own (the existing `outranks` order, so the chain
+         is strictly decreasing and cannot cycle), feathered exactly like the lane path — and
+         **guarded within 150 m of its own lattice nodes**, which is the whole difference from the
+         attempt that was reverted. That one fired at shared nodes, where `nodeDir` puts two
+         arterials side by side by construction, so it caught every adjacent pair in the network.
+         This one can only move the MIDDLE of a road.
+
+      **What it moved, A/B on identical geometry (the switch was in the build, not two commits —
+      a concurrent edit to `TIERS[0].step` was changing the world underneath):**
+
+      ```
+                                             before   after
+      crossings over 1 m, 5 seeds, 6 km box     50      35
+        arterial x arterial, true mid-edge      22      10
+        arterial x lane                         22      19
+      car boxes near spawn holding one          67      19
+      mismatched crossings within 2600 m         ?       0   <- the gate
+      ```
+
+      **THE ONE REGRESSION IT DID CAUSE, and what it actually was.** The first version clamped an
+      arterial's levelled profile to land ± MAX_EARTHWORK, the way `canonicalProfile` already does
+      for lanes. Worst arterial gradient went rolling **27.8% -> 45.2%**, alpine 28.1% -> 50.1%,
+      dunes 21.9% -> 46.7% — the same failure the reverted attempt had, one third as bad. It was
+      not the levelling. It was the clamp: applied AFTER the feather it puts a step between one
+      sample and the next, which `levelAgainst`'s own comment has said for months, and tier 0's
+      samples are 19 m apart so a 4 m cut is a 21% gradient on its own. Deleting the clamp put all
+      six presets back on their exact pre-change figures. **If you touch this again, do not
+      re-add it.**
+
+      **Gates, final:** `npm test` green; diag-seam clean (S3 0.68 m / 0.24 m against 1 m);
+      diag-water 0 underwater; diag-cliffs 0.008% over 45° (was 0.013%); diag-curve R1 0/173 and
+      R2 0/1, R5 233; diag-density 76.6/68.5/75.6 against 75/66/74; diag-relief worst grades
+      25.7/27.8/28.1/21.4/21.9/18.7, identical to the same build with this change switched off;
+      diag-deadends 6.1; diag-terminus 14 checks. Costs **+160 ms on an 8 km coarse chunk**
+      (bench-chunk L7 498 -> 659 ms, L6 276 -> 387; L0/L1/L2 unmoved) — an arterial now runs one
+      extra box query for its partners. Halved on the way by asking `geomsInBox` for tier 0 only
+      instead of building every lane in the box and filtering it back out.
+
+      **NOT FIXED, and honestly out of reach of levelling:** 10 arterial-vs-arterial and 19
+      arterial-vs-lane crossings over 1 m remain across five 6 km boxes, worst 24.33 m. They are
+      earthwork-limited, not authority-limited — a road in an 18 m cutting crossing a road on
+      grade cannot be levelled without a bridge, and `levelAgainst` correctly refuses to ask the
+      land for more earthwork than `profileEdge` was allowed. The nearest one to spawn is 2.6 km
+      out and in the FORWARD half, away from where the restored heading points. A bridge deck, or
+      a cull of crossings that steep, is the next move — not a bigger correction.
+
+      ---
+
+      *Original entry, for the record:*
 
       **The mechanism, measured, not guessed.** `levelCrossings()` pulls LANES to the arterial
       they cross; two arterials crossing each other are never touched. Scanning a 6 km box around
@@ -77,6 +153,52 @@ every node-side check that was run against it.
 
       **Restore condition, written at the code site:** put the `+ Math.PI` back the moment R2
       reads 0/9.
+
+- [x] **Roads that end in nothing — the closure now STANDS UP.** The count is unchanged and that
+      is deliberate: 6.1 dead ends per 16 km² is the price of not cascading the culls, and
+      `tools/diag-density.mjs` has already priced the alternative (a second ply on the LIVE degree
+      takes it to 2.8 but drops junction density to 60.3% against a 66% floor; far-node-only 65.1%,
+      still failing). So the road is still allowed to end. What changed is that it now says so.
+
+      **Why a turning head and a closing bar were not enough, and it is arithmetic rather than
+      taste.** Both are PAINT ON THE DECK. At a driver's eye line a 0.7 m stripe lying flat in the
+      road's own plane subtends about **0.02°** at 120 m once foreshortening is taken off it. A
+      0.95 m bollard standing up subtends **0.45°**, and the board on its post **0.82°** — the
+      same order as the chevron boards a player already reads on every bend. The information was
+      always there; it was 20x too small to read in time. That is the entire gap between "the road
+      ended" and "the road ends here".
+
+      **What it is:** a line of pale bollards across the head, standing ON the closing bar's own
+      chord, and one board on a post 1.2 m past the rim facing back down the road at the driver.
+      Cream and slate, no red, no glare, and **no collision** — driving gently into the end of a
+      road must never be punished. Built in `buildTerminus` because that is the only place that
+      knows how wide the head was allowed to be (its radius is the result of a ground search) and
+      the only place holding the same `Terrain` the tarmac is drawn on, so the posts cannot stand
+      on a second opinion about the ground.
+
+      **Two real defects the harness caught before anything shipped, both of which looked fine in
+      the code:**
+      - The board was placed *behind* the bollards *inside* the head. The bar is at 0.62R and the
+        board needs room behind it, so that only fits when R > 5.3 m — and a lane's head is 3.9 m.
+        **24 of 27 dead ends silently got no board at all.** It goes on the verge past the rim now,
+        where a real one goes and where the marker posts already stand.
+      - Standing the bollards a tidy 0.55 m *behind* the paint narrowed the line to **40% of the
+        carriageway** at the worst head, because the head is a circle and its chord is already
+        past widest at the bar — half the lane left open with a row of posts down the middle of
+        it, which reads as an obstacle, not a closure. On the bar itself the narrowest is 77%.
+
+      **Gates:** `tools/diag-terminus.mjs` extended from 8 checks to 14, all passing over 27 real
+      dead ends in 4 windows — every head gets ≥2 bollards (139 total) and exactly one board (27),
+      feet within 0.0000 m of the ground the head is drawn on, no bollard outside the tarmac
+      (furthest 97% of the radius), narrowest line 77% of the road's width. **T13 drives the real
+      `Roads` class with a real three.js scene and counts what actually reaches the scene graph** —
+      11 heads -> 57 bollards + 11 boards instanced — because a geometry that is never added is
+      the exact shape of "a flag set is not a thing visible". Everything else held: `npm test`
+      green, diag-deadends 6.1 (bar 6.5), diag-seam clean, diag-density unmoved.
+
+      **Not verified here and it needs a human eye:** nobody has LOOKED at it. The numbers say the
+      posts are in the world, at the right place, at a size that reads at 120 m. Whether it is
+      pretty is a screenshot question.
 
 - [ ] **BLOCKING-ish — downhill bounce: fix found and REVERTED, cause of the revert recorded.**
       The bounce itself is understood and was measurably fixed (14% wavy descent at 92 km/h:

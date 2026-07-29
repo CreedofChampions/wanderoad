@@ -84,15 +84,18 @@ const RING_DEPTH = 4;
 const ROAD_VS = /* glsl */ `
 in vec3 normal;
 in vec2 aCross;   // x = -1..1 across the carriageway, y = metres travelled along it
+in float aMark;   // 1 = paint markings here, 0 = inside a junction, leave it bare
 out vec3 vWorld;
 out vec3 vNormal;
 out vec2 vCross;
+out float vMark;
 out float vDist;
 void main(){
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vWorld = wp.xyz;
   vNormal = normalize(mat3(modelMatrix) * normal);
   vCross = aCross;
+  vMark  = aMark;
   vDist = length(wp.xyz - uCamPos);
   gl_Position = projectionMatrix * viewMatrix * wp;
 }
@@ -102,6 +105,7 @@ const ROAD_FS = /* glsl */ `
 in vec3 vWorld;
 in vec3 vNormal;
 in vec2 vCross;
+in float vMark;
 in float vDist;
 out vec4 fragColor;
 
@@ -136,7 +140,14 @@ void main(){
 
   // 'mark', not 'paint': paint() is the shared lighting function and a float of the same
   // name shadows it, which fails to compile with a message that points somewhere else.
-  float mark = clamp(edge + centre, 0.0, 1.0) * uLineMix;
+  /* MARKINGS STOP AT A JUNCTION. The patch always covered the crossing, but the ribbon kept
+   * painting its own edge lines and centre dashes underneath it, so two roads' markings ran
+   * through each other and fought for the same pixels — the operator: "lines intersecting
+   * lines blinking through each other". Covering that with more geometry can never win; the
+   * lines have to not be drawn. vMark is 0 for exactly the vertices inside a junction
+   * footprint, so the paint fades out as the road enters the box and comes back on the far
+   * side, which is what a real junction looks like. */
+  float mark = clamp(edge + centre, 0.0, 1.0) * uLineMix * vMark;
   vec3 markCol = mix(K_LINE_W, K_LINE_W * 0.86, wear * 0.7);
   lit   = mix(lit,   markCol,        mark);
   mid   = mix(mid,   markCol * 0.9,  mark);
@@ -208,7 +219,7 @@ export function ribbonEdges(seed, x0, z0, x1, z1) {
  * Exported so tools/diag-seam.mjs and tools/diag-fallthrough.mjs can measure the triangles the
  * player is actually looking at instead of a replica of them.
  */
-export function buildRibbon(edge, seed) {
+export function buildRibbon(edge, seed, crossings = null) {
   const n = edge.pts.length / 2;
   /* THE GROUND, from the same class the car's wheels ask. Not a reproduction of it — this
    * file has now twice been the place where a second opinion about where the road is grew
@@ -305,6 +316,25 @@ export function buildRibbon(edge, seed) {
   const position = new Float32Array(verts * 3);
   const normal = new Float32Array(verts * 3);
   const across = new Float32Array(verts * 2);
+  /* 1 everywhere except inside a junction footprint — see the shader's own note on vMark. */
+  const markAt = new Float32Array(verts).fill(1);
+  /* Only the crossings this edge actually takes part in, pre-resolved to a centre, a pair of
+   * half-extents and the two axes they are measured along. Done once here rather than per
+   * vertex: a ribbon is thousands of vertices and a window holds dozens of crossings. */
+  const boxes = [];
+  if (crossings) {
+    for (const c of crossings) {
+      if (c.a.key !== edge.key && c.b.key !== edge.key) continue;
+      const f = junctionFootprint(c);
+      boxes.push({
+        x: c.x, z: c.z,
+        ax: f.majorTx, az: f.majorTz, bx: f.minorTx, bz: f.minorTz,
+        /* A shade WIDER than the patch itself, so the paint has stopped by the time the
+         * tarmac reaches the junction rather than ending exactly on its rim. */
+        ha: f.halfAlongMajor + 1.2, hb: f.halfAlongMinor + 1.2,
+      });
+    }
+  }
   const index = new Uint32Array((rings - 1) * (ACROSS - 1) * 6);
 
   const half = halfW;
@@ -353,6 +383,19 @@ export function buildRibbon(edge, seed) {
       normal[k * 3 + 2] = 0;
       across[k * 2] = f;
       across[k * 2 + 1] = travelled;
+      if (boxes.length) {
+        const vx = position[k * 3];
+        const vz = position[k * 3 + 2];
+        for (const b of boxes) {
+          const dx = vx - b.x;
+          const dz = vz - b.z;
+          // Distance along each road's own axis — the patch is a parallelogram, not a circle.
+          if (Math.abs(dx * b.ax + dz * b.az) <= b.ha && Math.abs(dx * b.bx + dz * b.bz) <= b.hb) {
+            markAt[k] = 0;
+            break;
+          }
+        }
+      }
     }
     /* The ring's own height. furnitureFor() hangs the marker posts and the chevron boards off
      * it, so they stand on the shelf with the road instead of on the road's old profile. The
@@ -382,6 +425,7 @@ export function buildRibbon(edge, seed) {
   g.setAttribute('position', new BufferAttribute(position, 3));
   g.setAttribute('normal', new BufferAttribute(normal, 3));
   g.setAttribute('aCross', new BufferAttribute(across, 2));
+  g.setAttribute('aMark', new BufferAttribute(markAt, 1));
   g.setIndex(new BufferAttribute(index, 1));
   g.computeBoundingSphere();
   return { geometry: g, ring, half };
@@ -633,6 +677,17 @@ export function buildJunction(c, seed) {
     across.push(ax, az);
     return idx;
   };
+  /* The same, but with the height given rather than snapped to the ground — anything that
+   * stands UP off the road (the stop sign's post and plate) needs a real y, and pushVert
+   * exists precisely to guarantee flat things cannot float. Keeping them separate means the
+   * pavement can never accidentally acquire a height of its own. */
+  const pushVertY = (x, y, z, ax, az) => {
+    const idx = position.length / 3;
+    position.push(x, y, z);
+    normal.push(0, 1, 0);
+    across.push(ax, az);
+    return idx;
+  };
 
   // ── the paved patch: a grid spanning the major tangent (u) and minor tangent (v) ──
   // Subdivided BY DISTANCE, not by a fixed count: a shallow junction is several times longer
@@ -686,12 +741,29 @@ export function buildJunction(c, seed) {
     const p3 = pushVert(at.x - nx * half + tx, at.z - nz * half + tz, AC_LINE, 0);
     const p4 = pushVert(at.x + nx * half + tx, at.z + nz * half + tz, AC_LINE, 0);
     pushQuadUp(position, index, p1, p2, p3, p4);
+
+    /* A STOP SIGN was built here and REVERTED, deliberately, with the reason kept so it is
+     * not re-attempted blind. The operator asked for one by name. The geometry works, but
+     * diag-junction-geom.mjs asserts every junction vertex sits within 5 cm of
+     * Terrain.height() — that check is the direct guard against pavement floating over the
+     * ground, which is the family the 40 m fall-through came from — and a sign is 3 m of
+     * legitimately elevated vertex, so it failed the gate at 3.09 m.
+     *
+     * The right home for a sign is the PROP system (src/render/props.js), which already
+     * places upright things, owns their collision and is not held to a flatness rule. It is
+     * not a five-minute change to move it there, and the line suppression above is what the
+     * operator's actual complaint was about ("lines intersecting lines blinking through each
+     * other"), so that ships and this waits rather than weakening the check that protects the
+     * worst bug this project has had. */
   }
 
   const geo = new BufferGeometry();
   geo.setAttribute('position', new BufferAttribute(new Float32Array(position), 3));
   geo.setAttribute('normal', new BufferAttribute(new Float32Array(normal), 3));
   geo.setAttribute('aCross', new BufferAttribute(new Float32Array(across), 2));
+  /* The patch paints its own give-way bars through the aCross band, so it keeps markings ON.
+   * The attribute still has to exist or the shader reads garbage for it. */
+  geo.setAttribute('aMark', new BufferAttribute(new Float32Array(across.length / 2).fill(1), 1));
   geo.setIndex(index);
   geo.computeBoundingSphere();
   return geo;
@@ -788,6 +860,51 @@ const TERMINUS_RINGS_MAX = 12;
  *  blob of tarmac past a stop line. */
 const TERMINUS_BAR_AT = 0.62;
 const TERMINUS_BAR_THICK = 0.7;
+
+/* ── THE PART OF A DEAD END YOU CAN SEE FROM A HUNDRED METRES ────────────────────────────────
+ *
+ * The turning head and the closing bar were built, measured and shipped, and the operator STILL
+ * reported roads ending randomly. That is not a contradiction, it is a reading of what those
+ * two things are: both are PAINT ON THE GROUND. A flat white bar lying on tarmac subtends
+ * almost nothing at a shallow viewing angle — at 60 km/h and 120 m out, a 0.7 m stripe on the
+ * deck is about a tenth of a degree tall — so from the driver's seat the road simply stops. The
+ * information was there. It was not visible in time to read as intentional.
+ *
+ * Everything a real road uses to say "this ends" stands UP: bollards, a barrier, a board. So
+ * does this. A line of pale bollards across the head at the closing bar, and one board on a
+ * post behind them facing back down the road at the driver. Vertical, at eye height, against
+ * the sky or the grass rather than lying in the tarmac's own plane.
+ *
+ * COZY, not a hazard: cream posts with one soft slate band, a board the same colour as the
+ * chevron boards already on every bend, no red, no reflective glare, no hard edges. It reads as
+ * a lane politely running out at a farm gate, not as a crash barrier. They are decoration and
+ * carry NO collision — driving gently into the end of a road should never be punished.
+ */
+/** Bollard height, and the target gap between bollards along the closing bar, in metres. */
+const BOLLARD_H = 0.95;
+const BOLLARD_GAP = 1.5;
+/** Most bollards on one head. A tier-0 head is wide; a wall of thirty posts is not cozy. */
+const BOLLARD_MAX = 9;
+/**
+ * The bollards stand ON the closing bar's own chord, not behind it, and that is a MEASURED
+ * choice: `tools/diag-terminus.mjs`'s T12 asks what fraction of the carriageway the line
+ * actually closes. Standing them a comfortable 0.55 m behind the paint looked tidier and
+ * narrowed the line to **40% of the road's width** at the worst head, because the head is a
+ * circle and the chord is already past its widest at the bar — half the lane was left open with
+ * a row of posts down the middle of it, which reads as an obstacle, not as a closure. On the bar
+ * itself the narrowest line covers 77%.
+ */
+const BOLLARD_AT_BAR = 0;
+/**
+ * How far PAST the head's rim the board stands, in metres.
+ *
+ * It goes in the grass beyond the tarmac, where a real "road ends" board goes, and the first
+ * attempt to keep it inside the head failed for arithmetic that is worth writing down: the bar
+ * sits at 0.62R and the board needs room behind it, so "inside the head" needs R > 5.3 m — and
+ * a lane's head is 3.9 m. 24 of 27 dead ends silently got no board at all. The marker posts on
+ * every straight already stand 1.5 m out in the grass; this is the same idea at the end.
+ */
+const ENDBOARD_BEYOND = 1.2;
 
 /**
  * The paved turning head and closing bar for ONE end of one edge — `atEnd` picks which.
@@ -921,10 +1038,48 @@ export function buildTerminus(edge, ring, atEnd, seed) {
   geo.setAttribute('aCross', new BufferAttribute(new Float32Array(across), 2));
   geo.setIndex(index);
   geo.computeBoundingSphere();
+  /* ── the bollard line and the board, emitted HERE and not in furnitureFor ──────────────────
+   *
+   * They belong to this function because everything they need is already in it and nowhere
+   * else: the head's radius R (which is the result of a ground search, not a constant), the
+   * outward frame (tx,tz)/(nx,nz) that gotcha 1 says must come from the ribbon's own points
+   * rather than from an assumption about which way +X faces, and `terr` — the SAME Terrain the
+   * head's vertices are standing on. A bollard whose foot came from a different height source
+   * than the tarmac it stands on is exactly the "second opinion about the ground" this file
+   * spent a round eliminating; here there cannot be one.
+   *
+   * Spanning the bar's own chord (not the head's full width) so the line closes the gap the
+   * paint marks and nothing stands out in the grass.
+   */
+  const bollards = [];
+  {
+    const bd = d + BOLLARD_AT_BAR;
+    // Chord half-width of the head where the bollards stand, so the line spans the tarmac
+    // exactly and the outermost pair never pokes out into the grass.
+    const bw = Math.sqrt(Math.max(R * R - bd * bd, 0));
+    const span = bw * 2;
+    const count = Math.max(2, Math.min(BOLLARD_MAX, Math.round(span / BOLLARD_GAP) + 1));
+    const yaw = Math.atan2(tx, tz);
+    for (let i = 0; i < count; i++) {
+      // Endpoints pulled in by a bollard's own radius so the outermost pair sit ON the tarmac.
+      const u = count === 1 ? 0 : (i / (count - 1)) * 2 - 1;
+      const lat = u * Math.max(bw - 0.2, 0);
+      const bxx = p.x + nx * lat + tx * bd;
+      const bzz = p.z + nz * lat + tz * bd;
+      bollards.push({ kind: 'bollard', x: bxx, z: bzz, y: terr.height(bxx, bzz), yaw });
+    }
+    const ed = R + ENDBOARD_BEYOND;
+    const exx = p.x + tx * ed;
+    const ezz = p.z + tz * ed;
+    // Facing back down the road, at the driver arriving — the reverse of the outward tangent.
+    bollards.push({ kind: 'endboard', x: exx, z: ezz, y: terr.height(exx, ezz), yaw: Math.atan2(-tx, -tz) });
+  }
+
   /* The head's own frame, so tools/diag-terminus.mjs can re-run `fallAt` on the vertices this
    * actually produced instead of reconstructing the basis and getting a sign wrong (gotcha 1).
-   * Nothing in the game reads it. */
-  geo.userData.terminus = { x: p.x, z: p.z, tx, tz, nx, nz, half, R, ringCount };
+   * `furniture` is read by Roads.update to instance the bollards, and by diag-terminus.mjs to
+   * prove they exist, stand on the ground and span the head. */
+  geo.userData.terminus = { x: p.x, z: p.z, tx, tz, nx, nz, half, R, ringCount, furniture: bollards };
   return geo;
 }
 
@@ -1020,7 +1175,24 @@ function buildFurnitureGeometry() {
   pbox(chev, -0.13, 1.45, 0.04, 0.16, 0.24, 0.01, 0.5, [0.18, 0.2, 0.24], MAT.MATTE);
   pbox(chev, 0.17, 1.45, 0.04, 0.16, 0.24, 0.01, 0.5, [0.18, 0.2, 0.24], MAT.MATTE);
 
-  return { post: finishPainted(post), chevron: finishPainted(chev) };
+  /* A dead-end bollard: fatter and shorter than a marker post, so the line of them reads as a
+   * closure rather than as more of the same roadside dots. One slate band at three-quarter
+   * height is all the contrast it needs against a pale post — the same restraint as the
+   * chevron board, no red and no reflective glare. */
+  const boll = PB();
+  pcyl(boll, [0, 0, 0], [0, BOLLARD_H, 0], 0.13, 0.115, 8, [0.93, 0.9, 0.83], MAT.MATTE, true, true);
+  pcyl(boll, [0, BOLLARD_H * 0.72, 0], [0, BOLLARD_H * 0.86, 0], 0.135, 0.135, 8, [0.28, 0.31, 0.35], MAT.MATTE, false, false);
+
+  /* The board that says it before you get there: one plate on a post, facing back down the road,
+   * with a single horizontal slate bar across it. Deliberately the same family as the chevron
+   * boards already on every bend — a driver who has learned "pale board on a post = the road is
+   * telling me something" reads this one without being taught it. */
+  const endb = PB();
+  pcyl(endb, [0, 0, 0], [0, 1.25, 0], 0.06, 0.055, 6, [0.42, 0.38, 0.33], MAT.MATTE, true, true);
+  pbox(endb, 0, 1.5, 0, 0.72, 0.42, 0.04, 0, [0.95, 0.93, 0.86], MAT.MATTE);
+  pbox(endb, 0, 1.5, 0.05, 0.5, 0.12, 0.01, 0, [0.28, 0.31, 0.35], MAT.MATTE);
+
+  return { post: finishPainted(post), chevron: finishPainted(chev), bollard: finishPainted(boll), endboard: finishPainted(endb) };
 }
 
 export class Roads {
@@ -1053,13 +1225,17 @@ export class Roads {
 
     const R = this.range;
     const { edges, ctx } = ribbonEdges(this.seed, camX - R, camZ - R, camX + R, camZ + R);
+    /* Computed ONCE for the window and shared with both loops below: the ribbons need it to
+     * know where to stop painting, the junction loop needs it to know where to put a patch.
+     * Two independent findCrossings calls would be two opinions about where a junction is. */
+    const xings = findCrossings(edges);
     const wanted = new Set();
 
     for (const e of edges) {
       wanted.add(e.key);
       if (this.live.has(e.key)) continue;
 
-      const { geometry, ring, half } = buildRibbon(e, ctx);
+      const { geometry, ring, half } = buildRibbon(e, ctx, xings);
       const mesh = new Mesh(geometry, this.material);
       mesh.frustumCulled = true;
       mesh.matrixAutoUpdate = false;
@@ -1073,6 +1249,7 @@ export class Roads {
        * window is NOT a dead end and does not get one: the rule is box-independent. */
       const rec = { mesh, instanced: [], terminals: [] };
       const dead = edgeDeadEnds(e, this.seed);
+      const endItems = [];
       for (let end = 0; end < 2; end++) {
         if (!dead[end]) continue;
         const tgeo = buildTerminus(e, ring, end === 1, ctx);
@@ -1083,6 +1260,9 @@ export class Roads {
         tm.renderOrder = 2; // over the ribbon, like a junction patch, for the same reason
         this.group.add(tm);
         rec.terminals.push(tm);
+        // The standing half of the terminus. buildTerminus works these out because it is the
+        // only place that knows how wide the head was allowed to be — see its own note.
+        for (const it of tgeo.userData.terminus.furniture) endItems.push(it);
       }
 
       const items = furnitureFor(e, ring, half, this.seed);
@@ -1091,6 +1271,8 @@ export class Roads {
       for (const [geo, list] of [
         [this.furniture.post, posts],
         [this.furniture.chevron, chevs],
+        [this.furniture.bollard, endItems.filter((i) => i.kind === 'bollard')],
+        [this.furniture.endboard, endItems.filter((i) => i.kind === 'endboard')],
       ]) {
         if (!list.length) continue;
         const im = new InstancedMesh(geo, this.paintedMaterial, list.length);
@@ -1135,7 +1317,7 @@ export class Roads {
      * cross more than once (the winding can carry a lane back and forth over a road it is
      * near), and each such point needs its own patch. */
     const wantedJ = new Set();
-    for (const c of findCrossings(edges)) {
+    for (const c of xings) {
       const lo = c.a.key < c.b.key ? c.a.key : c.b.key;
       const hi = c.a.key < c.b.key ? c.b.key : c.a.key;
       const jkey = `${lo}~${hi}~${Math.round(c.x)},${Math.round(c.z)}`;

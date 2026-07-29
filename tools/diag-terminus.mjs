@@ -54,6 +54,17 @@ let clippedNoHead = 0;
 let mismatch = 0;
 let sagOver = 0;
 const radii = [];
+/* The standing closure — bollards and the board. Counted per head, not per window, because the
+ * requirement is that EVERY dead end reads as one, not that most of them do. */
+let bollTotal = 0;
+let boardTotal = 0;
+let bollShort = 0;
+let noBoard = 0;
+let furnNaN = 0;
+let outsideHead = 0;
+let worstFoot = { d: 0, at: '' };
+let worstReach = 0;
+let worstSpan = Infinity;
 
 for (const [cx, cz] of SPOTS) {
   const { edges, ctx } = ribbonEdges(SEED, cx - RANGE, cz - RANGE, cx + RANGE, cz + RANGE);
@@ -108,6 +119,46 @@ for (const [cx, cz] of SPOTS) {
         if (rim > worstRim.d) worstRim = { d: rim, at: `(${pos[v].toFixed(0)},${pos[v + 2].toFixed(0)})`, tier: e.tier };
       }
 
+      /* ── T8/T9/T10: the STANDING half of the terminus ────────────────────────────────────
+       *
+       * A head and a bar are paint on the deck, and paint on the deck is what the operator was
+       * already looking at when he reported roads ending randomly — at a driver's viewing angle
+       * a 0.7 m stripe lying flat is a tenth of a degree tall at 120 m. So the closure now also
+       * stands up, and this measures the standing part the same way everything else here is
+       * measured: from the geometry buildTerminus actually produced, never from a flag.
+       *
+       * The apparent height is the number that decides whether it reads at driving speed, so it
+       * is computed rather than asserted: 2*atan(h/2/dist) in degrees at 120 m out.
+       */
+      const furn = u.furniture || [];
+      const bolls = furn.filter((f) => f.kind === 'bollard');
+      const boards = furn.filter((f) => f.kind === 'endboard');
+      if (bolls.length < 2) bollShort++;
+      if (!boards.length) noBoard++;
+      bollTotal += bolls.length;
+      boardTotal += boards.length;
+      for (const f of furn) {
+        if (!Number.isFinite(f.x) || !Number.isFinite(f.y) || !Number.isFinite(f.z) || !Number.isFinite(f.yaw)) furnNaN++;
+        // T9 — it stands ON the ground the head is drawn on, not on a second opinion about it
+        const dg = Math.abs(f.y - terr.height(f.x, f.z));
+        if (dg > worstFoot.d) worstFoot = { d: dg, at: `(${f.x.toFixed(0)},${f.z.toFixed(0)})` };
+        /* T11b — BOLLARDS are on the tarmac (they close the carriageway, so a bollard in the
+         * grass is closing nothing), the BOARD is on the verge just past it, where the marker
+         * posts on every straight already stand. Two different requirements, so two bounds; one
+         * shared bound would either push the board onto the head or let a bollard wander off it. */
+        const rr = Math.hypot(f.x - u.x, f.z - u.z);
+        const lim = f.kind === 'bollard' ? u.R + 0.01 : u.R + 2.0;
+        if (rr > lim) outsideHead++;
+        if (f.kind === 'bollard' && rr / u.R > worstReach) worstReach = rr / u.R;
+      }
+      if (bolls.length >= 2) {
+        const spanM = Math.hypot(
+          bolls[0].x - bolls[bolls.length - 1].x,
+          bolls[0].z - bolls[bolls.length - 1].z,
+        );
+        if (spanM / (u.half * 2) < worstSpan) worstSpan = spanM / (u.half * 2);
+      }
+
       for (let t = 0; t < idx.length; t += 3) {
         const a = idx[t] * 3,
           b = idx[t + 1] * 3,
@@ -160,6 +211,66 @@ check(worstSag.d <= SAG_BAR, 'T5   no chord flies far above the ground between v
  * a dead end is where you stop. */
 check(worstRim.d <= 0.35, 'T6   the head does not fall away sideways from the road', `worst ${worstRim.d.toFixed(3)} m at ${worstRim.at} (tier ${worstRim.tier}, half-width ${(TIERS[worstRim.tier].width / 2).toFixed(2)} m)`, '<= 0.35 m');
 check(clippedNoHead > 0, 'T7   roads leaving the window are NOT treated as dead ends', `${clippedNoHead} clipped ends left with no head`, '> 0');
+
+/* ── T8-T11: does the closure STAND UP? ──────────────────────────────────────────────────────
+ *
+ * T1-T7 all measure paint on the deck, and the operator was looking at a head and a bar when he
+ * said roads still end randomly. The apparent height below is why: at a 120 m sight line, a
+ * 0.7 m stripe lying flat in the road's own plane subtends about 0.06° once foreshortening is
+ * taken off it, while a 0.95 m bollard standing up subtends 0.45° — the same order as the
+ * chevron boards a driver already reads on every bend. That is the difference between "the road
+ * ended" and "the road ends here", and it is the point of the whole change.
+ */
+check(bollShort === 0, 'T8   every dead end gets a bollard line', `${bollShort} heads with fewer than 2 bollards, ${bollTotal} bollards over ${heads} heads`, '0');
+check(noBoard === 0, 'T9   every dead end gets a board facing the driver', `${noBoard} heads without one, ${boardTotal} boards`, '0');
+check(furnNaN === 0, 'T10  no NaN/Infinity furniture', `${furnNaN} bad`, '0');
+check(worstFoot.d <= 0.001, 'T11a its feet are on the same ground the head is drawn on', `worst ${worstFoot.d.toFixed(4)} m at ${worstFoot.at}`, '<= 0.001 m');
+check(outsideHead === 0, 'T11b nothing stands out in the grass', `${outsideHead} outside the head, furthest ${(worstReach * 100).toFixed(0)}% of its radius`, '0');
+check(worstSpan >= 0.7, 'T12  the bollard line spans the carriageway', `narrowest ${(worstSpan * 100).toFixed(0)}% of the road's width`, '>= 70%');
+{
+  const D = 120; // a realistic sight line down a lane
+  const deg = (h) => ((2 * Math.atan(h / 2 / D) * 180) / Math.PI).toFixed(2);
+  console.log(
+    `\n  apparent height at ${D} m: bollard 0.95 m = ${deg(0.95)}°,  board top 1.71 m = ${deg(1.71)}°,` +
+      `  vs the 0.7 m closing bar lying flat = ${deg(0.7 * 0.06)}° after foreshortening at a 3.5° eye line`,
+  );
+}
+
+/* ── T13: the renderer actually PUTS THEM IN THE SCENE ───────────────────────────────────────
+ *
+ * Everything above measures what `buildTerminus` returns. That is not the same claim as "the
+ * player sees them" — gotcha 3, a flag set is not a thing visible — and the gap between the two
+ * is a real place for this to break: the bollards are instanced through a separate list in
+ * `Roads.update`, so a head could be perfect and the posts still never reach the scene graph.
+ *
+ * So drive the real `Roads` class with a real three.js scene (no GL context needed for the
+ * scene graph) and COUNT THE INSTANCES that come out of it, matched back to their source
+ * geometry by vertex count. If this passes, the posts are in the world.
+ */
+{
+  const THREE = await import('three');
+  const { Roads } = await import('../src/render/road.js');
+  const scene = new THREE.Object3D();
+  const roads = new Roads({ seed: SEED, scene, range: RANGE });
+  roads.update(1500, -1500);
+  const byVerts = new Map();
+  for (const k of Object.keys(roads.furniture)) byVerts.set(roads.furniture[k].attributes.position.count, k);
+  const tally = {};
+  roads.group.traverse((o) => {
+    if (!o.isInstancedMesh) return;
+    const kind = byVerts.get(o.geometry.attributes.position.count) || 'unknown';
+    tally[kind] = (tally[kind] || 0) + o.count;
+  });
+  const terminals = [...roads.live.values()].reduce((s, r) => s + r.terminals.length, 0);
+  check(
+    terminals > 0 && (tally.bollard || 0) >= terminals * 2 && (tally.endboard || 0) === terminals,
+    'T13  the renderer puts the standing closure in the scene',
+    `${terminals} heads -> ${tally.bollard || 0} bollards + ${tally.endboard || 0} boards instanced ` +
+      `(alongside ${tally.post || 0} marker posts, ${tally.chevron || 0} chevrons)`,
+    '>= 2 bollards and exactly 1 board per head',
+  );
+  roads.dispose();
+}
 
 const wide = radii.filter((r) => r > 1.01).length;
 console.log(

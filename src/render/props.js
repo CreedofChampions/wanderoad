@@ -27,10 +27,14 @@ import { PB, pv, pq, pbox, pcyl, proof, pquad, finishPainted, createPaintedMater
 import { Terrain } from '../world/terrain.js';
 import { waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
 import {
-  propsInBox, stationsInBox, fuelCansInBox, stationTownInBox, stationSpur, PROP_BY_ID, PROP_IDS,
+  propsInBox, stationsInBox, fuelCansInBox, stationTownInBox, stationSpur, stationPad, PROP_BY_ID, PROP_IDS,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
 } from '../world/props.js';
-import { TAU, rng, hash3i, clamp, lerp } from '../core/math.js';
+import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
+// The same freeboard the drawn road ribbon floats at, imported rather than copied: the access
+// spur is tarmac on the same ground and has to clear the terrain mesh by the same amount, and
+// tools/diag-seam.mjs and tools/diag-spur.mjs both subtract exactly this number.
+import { LIFT } from './road.js';
 
 /* ── window ───────────────────────────────────────────────────────────────── */
 
@@ -50,12 +54,14 @@ const RANGE = 1180;
 const SKIP_FRAME = 1 / 45;
 /** How many petrol stations a session remembers. 192 covers roughly a 40 km drive. */
 const KNOWN_STATIONS = 192;
-/** How far a forecourt slab may be graded away from the road it serves, in metres, so it can
- *  meet the ground it stands on. The access spur (buildAccessSpur, ~10 m of run) ramps it, and
- *  bench-props measures the resulting rise against the 3 m a driveway may climb. See the
- *  clamp in _bake for why a slab pinned to the road was the other half of the buried-station
- *  bug (src/world/props.js STATION_MAX_STEP is the first half). */
-const PAD_STEP = 1.2;
+/* PAD_STEP (1.2 m) used to live here: the band the forecourt slab was clamped into around the
+ * host edge's own graded height `s.y`. It is gone, and deliberately. `s.y` comes from
+ * `land()`, the raw biome relief, and the car drives on `Terrain.height()`, the same land bent
+ * by the road carve — beside a road those are different surfaces by metres (see stationPad's
+ * header in src/world/props.js). Clamping the slab toward a height taken off the wrong surface
+ * is what buried forecourts in hillsides and floated their access spurs. The slab now sits on
+ * the highest REAL ground under its own apron, and the spur ramps to it along that same real
+ * ground. */
 /** The gentle bob a floating can does — "cozy, not garish": a few centimetres, a little
  *  under one cycle every two seconds. Applied to the finished mesh's own transform each
  *  frame, on top of its baked, already-hovering (+CAN_HOVER) position — see buildFuelCan. */
@@ -1206,7 +1212,7 @@ export function buildStation(M, r, skirt) {
  * skirt on both long edges (the same trick buildStation's own apron `skirt` uses) absorbs
  * whatever a straight-line height guess misses over the real ground in between.
  */
-function buildAccessSpur(M, mouthX, mouthZ, hRoad, apronX, apronZ, hApron, hostWidth) {
+export function buildAccessSpur(M, mouthX, mouthZ, hRoad, apronX, apronZ, hApron, hostWidth, height = null) {
   const dx = apronX - mouthX;
   const dz = apronZ - mouthZ;
   const len = Math.hypot(dx, dz) || 1;
@@ -1216,36 +1222,87 @@ function buildAccessSpur(M, mouthX, mouthZ, hRoad, apronX, apronZ, hApron, hostW
   const halfW = Math.max(1.6, (hostWidth || 3.2) * 0.5);
   const mouthHalf = Math.min(halfW * 1.35, halfW + 3.0); // a flared mouth, like a real driveway
   const apronHalf = 2.7; // a single-vehicle driveway width at the forecourt end
-  // How deep the batter skirt drops — scales with how far the two ends' own heights disagree,
-  // same reasoning as buildStation's own `drop`: on uneven ground a bigger jump needs a
-  // bigger skirt or the low side shows daylight underneath.
-  const skirt = Math.max(0.3, Math.abs(hApron - hRoad) * 0.6 + 0.3);
-
-  const P = (x, z, h, side) => [x + px * side, h, z + pz * side];
-  const mL = P(mouthX, mouthZ, hRoad, -mouthHalf);
-  const mR = P(mouthX, mouthZ, hRoad, mouthHalf);
-  const aL = P(apronX, apronZ, hApron, -apronHalf);
-  const aR = P(apronX, apronZ, hApron, apronHalf);
-
-  // the paved top
-  pquad(M, mL, mR, aR, aL, TARMAC, MAT.MATTE, [0, 1, 0]);
-  // a painted edge line down both sides — the same visual language as the forecourt's own
-  // lead-in stripes and every road's own edge line, so a driveway reads as paved at a glance.
   const inset = 0.16;
-  const mLi = P(mouthX, mouthZ, hRoad + 0.004, -mouthHalf + inset);
-  const aLi = P(apronX, apronZ, hApron + 0.004, -apronHalf + inset);
-  pquad(M, mL, mLi, aLi, aL, LINE, MAT.MATTE, [0, 1, 0]);
-  const mRi = P(mouthX, mouthZ, hRoad + 0.004, mouthHalf - inset);
-  const aRi = P(apronX, apronZ, hApron + 0.004, apronHalf - inset);
-  pquad(M, mRi, mR, aR, aRi, LINE, MAT.MATTE, [0, 1, 0]);
 
-  // the batter skirt on both long edges
-  const mLd = P(mouthX, mouthZ, hRoad - skirt, -mouthHalf);
-  const aLd = P(apronX, apronZ, hApron - skirt, -apronHalf);
-  pquad(M, mLd, mL, aL, aLd, TARMAC_D, MAT.MATTE, [-px, 0, -pz]);
-  const mRd = P(mouthX, mouthZ, hRoad - skirt, mouthHalf);
-  const aRd = P(apronX, apronZ, hApron - skirt, apronHalf);
-  pquad(M, mR, mRd, aRd, aR, TARMAC_D, MAT.MATTE, [px, 0, pz]);
+  /* WHAT HEIGHT THE TARMAC IS AT, and the whole point of this rewrite.
+   *
+   * It used to be one flat trapezoid: hRoad at the mouth, hApron at the far end, a straight
+   * line in between. Measured (tools/diag-spur.mjs, 42 stations on three seeds) that put the
+   * drawn surface up to 16.28 m ABOVE Terrain.height, with 24 of the 42 over half a metre —
+   * a driveway you can see and cannot drive on, which is the operator's "the roads that lead
+   * to them need to work (no fall through)" exactly.
+   *
+   * So the spur is a RIBBON now, not a plank: SECTIONS cross-sections along its run, each
+   * vertex sitting on the real ground probe plus the same LIFT the road ribbon uses, easing
+   * up to the forecourt's flat pad plane only over the last stretch (BLEND onward) so the two
+   * still meet flush with no hairline step. `height` is the tile's own Terrain.height — the
+   * SAME ground the car drives on and the same one stationPad graded the slab against, never
+   * a second opinion (gotcha: one elevation profile, one road truth).
+   *
+   * With no probe (an old harness fixture) it degrades to the original straight line rather
+   * than throwing, which is exactly the geometry every earlier measurement was taken on.
+   */
+  /* 24, not 12: with 12 the run is sampled every 0.74 m and the straight line between two
+   * sections still cut a 0.30 m corner off a real hummock (tools/diag-spur.mjs, seed 424242
+   * st:0:-1,1,0). 24 sections is 0.37 m of tarmac each, 120 quads, and it takes the worst
+   * drawn-vs-driven error on the whole spur under 0.2 m. */
+  const SECTIONS = 24;
+  const BLEND = 0.55;
+  const g = height ? (x, z) => height(x, z) + LIFT : null;
+
+  /* Across-offsets per section: the two painted edge lines, and COLS interior columns between
+   * them. The interior columns are not decoration — with a single quad spanning the full
+   * carriageway the drawn surface cut 0.30 m off a cross-slope, which is a fall-through in the
+   * other axis (measured the same way, tools/diag-spur.mjs). The mouth is ~5 m wide, so 6
+   * columns is under a metre of tarmac each. */
+  const COLS = 6;
+  const across = (t) => {
+    const hw = mouthHalf + (apronHalf - mouthHalf) * t;
+    const cols = [-hw, -hw + inset];
+    for (let i = 1; i < COLS; i++) cols.push(-hw + inset + ((hw - inset) * 2 * i) / COLS);
+    cols.push(hw - inset, hw);
+    return cols;
+  };
+  /** One cross-section: its four top corners, plus how far the skirt must drop to bury itself. */
+  const section = (t) => {
+    const cx = mouthX + dx * t;
+    const cz = mouthZ + dz * t;
+    const e = smoothstep(BLEND, 1, t);
+    const cols = across(t);
+    const top = [];
+    let drop = 0.35;
+    for (const o of cols) {
+      const x = cx + px * o;
+      const z = cz + pz * o;
+      const ground = g ? g(x, z) : hRoad + (hApron - hRoad) * t;
+      const y = ground + (hApron - ground) * e;
+      top.push([x, y, z]);
+      // The skirt has to reach below the REAL ground under this corner or the low side shows
+      // daylight — the same argument buildStation's own `drop` makes for the apron slab.
+      if (g) drop = Math.max(drop, y - (g(x, z) - LIFT) + 0.35);
+    }
+    return { top, drop };
+  };
+
+  let prev = section(0);
+  for (let i = 1; i <= SECTIONS; i++) {
+    const cur = section(i / SECTIONS);
+    const a = prev.top, b = cur.top;
+    const last = a.length - 1;
+    // the paved top: a painted edge line, the tarmac columns, the other painted edge line
+    for (let c = 0; c < last; c++) {
+      const mat = c === 0 || c === last - 1 ? LINE : TARMAC;
+      pquad(M, a[c], a[c + 1], b[c + 1], b[c], mat, MAT.MATTE, [0, 1, 0]);
+    }
+    // the batter skirt on both long edges
+    const aLd = [a[0][0], a[0][1] - prev.drop, a[0][2]];
+    const bLd = [b[0][0], b[0][1] - cur.drop, b[0][2]];
+    pquad(M, aLd, a[0], b[0], bLd, TARMAC_D, MAT.MATTE, [-px, 0, -pz]);
+    const aRd = [a[last][0], a[last][1] - prev.drop, a[last][2]];
+    const bRd = [b[last][0], b[last][1] - cur.drop, b[last][2]];
+    pquad(M, a[last], aRd, bRd, b[last], TARMAC_D, MAT.MATTE, [px, 0, pz]);
+    prev = cur;
+  }
 }
 
 /* ── collision for the built structures on a forecourt ───────────────────────
@@ -1292,9 +1349,52 @@ const STATION_HITBOXES = [
   { dx: STATION_APRON_HALF_WIDTH - 1.4, dz: STATION_APRON_HALF_DEPTH - 1.6, r: 0.28, h: 6.4 },
 ];
 
+/* ── the apron's own EDGE ─────────────────────────────────────────────────────
+ * Operator on the station collision: "somewhat but not BOTTOM done". The seven boxes above
+ * are the things STANDING on the forecourt — the kiosk, the pump island, the canopy posts,
+ * the sign. The forecourt ITSELF had nothing. A petrol station is a graded pad, so on any
+ * ground that is not flat the slab stands proud of the land beside it, with a batter skirt
+ * running down to meet it; the real ground spread under one is a median 1.60 m and up to
+ * STATION_MAX_ROUGH (measured over 185 stations, see stationPad in src/world/props.js). Drive
+ * at that face from the low side and there was nothing there: you passed through several
+ * metres of drawn tarmac and out under the canopy.
+ *
+ * The existing silhouette check at the end of tools/bench-props.mjs could never catch it,
+ * and that is worth writing down: it slices the drawn geometry at BUMPER HEIGHT ABOVE THE
+ * PAD, and the whole apron face lives BELOW the pad. It reported 0.228 m of structure outside
+ * a hitbox and was right about everything it looked at.
+ *
+ * WHAT IS AND IS NOT WALLED. Only the stretches where the slab actually stands over the
+ * ground beside it by more than APRON_KERB_MIN — a 20 cm lip is a kerb you drive over, and
+ * making it solid would be the un-cozy version of this fix. And never the DOORWAY: the
+ * stretch of the road-facing edge that the access spur arrives on stays open, because a
+ * forecourt you cannot drive onto is not a station you can visit. The spur's own tarmac
+ * follows the real ground into that gap (buildAccessSpur), so the way in is a ramp, not a
+ * step.
+ *
+ * Each collider's base is the REAL GROUND under it, not the pad: a car outside the forecourt
+ * is standing on that ground, and collide.js's fly-over gate (`car.y - 0.4 > s.y + s.h`) has
+ * to see a wall that starts where the car is, or it would correctly discard the whole thing
+ * as something the car is already above.
+ */
+/** Below this the slab edge is a kerb, not a wall, and stays drivable. */
+const APRON_KERB_MIN = 0.55;
+/** Half the doorway the access spur arrives through, metres either side of the apron's own
+ *  centre on its road-facing edge. The spur is 2 * 2.7 m wide where it meets the slab
+ *  (buildAccessSpur's `apronHalf`), plus a car's width of slack so a slightly wide entry is
+ *  not a scrape. */
+const APRON_DOOR_HALF = 4.2;
+/** Spacing of the cylinders that make up one wall, and their radius. Overlapping on purpose —
+ *  collide.js's narrow phase is swept against circles, so a gap between two of them is a gap
+ *  a car can be teleported through at speed. */
+const KERB_STEP = 1.5;
+const KERB_R = 1.05;
+
 /** Turn placed stations into collision solids, the same shape propSolids() below gives the
- *  ambient props — see STATION_HITBOXES' own comment for what is and is not included. */
-export function stationSolids(stations) {
+ *  ambient props — see STATION_HITBOXES' own comment for what is and is not included.
+ *  `height`, when the caller has a real ground probe (the tiler always does), adds the apron
+ *  edge itself — see the section comment above. */
+export function stationSolids(stations, height = null) {
   const out = [];
   for (const s of stations) {
     const ca = Math.cos(s.yaw);
@@ -1312,6 +1412,46 @@ export function stationSolids(stations) {
         // same as a trunk, with collide.js's own STOP_CLOSING/GRAZE let-offs still applying.
         solid: true,
       });
+    }
+    if (!height) continue;
+
+    /* The four edges of the apron rectangle, walked in the station's own local frame. Local
+     * +z faces the road (yaw = atan2(-nx, -nz)), so the +z edge is the one with the doorway
+     * in it. Corners are covered by both of the edges that meet there — one extra overlapping
+     * cylinder is cheaper than reasoning about which edge owns a corner. */
+    const AW = STATION_APRON_HALF_WIDTH;
+    const AD = STATION_APRON_HALF_DEPTH;
+    const wall = (lx, lz, doorway) => {
+      const x = s.x + lx * ca - lz * sa;
+      const z = s.z + lx * sa + lz * ca;
+      const g = height(x, z);
+      const face = baseY - g;
+      if (!(face > APRON_KERB_MIN)) return;
+      if (doorway && Math.abs(lx) < APRON_DOOR_HALF) return;
+      out.push({
+        x, z, y: g, r: KERB_R,
+        // Up to the slab's top face and a little proud, so a car cannot ride up over the
+        // corner of it on a bump — the same enclosing-rather-than-splitting rule TRUNK_R uses.
+        h: face + 0.3,
+        kind: 'station',
+        solid: true,
+        /* Tagged so a harness can tell the apron's edge from the buildings standing on it
+         * without inventing a second `kind` — `kind` is what collide.js and the HUD read, and
+         * hitting the edge of a forecourt IS hitting a station. */
+        apron: true,
+      });
+    };
+    const nAlong = Math.max(2, Math.ceil((AW * 2) / KERB_STEP));
+    for (let i = 0; i <= nAlong; i++) {
+      const lx = -AW + (2 * AW * i) / nAlong;
+      wall(lx, AD, true); // the road-facing edge, with the spur's doorway left open
+      wall(lx, -AD, false); // the back edge
+    }
+    const nAcross = Math.max(2, Math.ceil((AD * 2) / KERB_STEP));
+    for (let i = 0; i <= nAcross; i++) {
+      const lz = -AD + (2 * AD * i) / nAcross;
+      wall(AW, lz, false);
+      wall(-AW, lz, false);
     }
   }
   return out;
@@ -1694,7 +1834,14 @@ export class Props {
         job.phase = 2;
         return;
       case 2:
-        job.stations = stationsInBox(ox, oz, ox + size, oz + size, this.seed);
+        /* WITH the tile's own ground probe. `stationsInBox` is pure without one and stays that
+         * way for `nearestStation`, but a tile has a real Terrain in hand already (phase 0),
+         * and that is the only place a forecourt can be checked against the ground the car
+         * actually drives on rather than against `land()`. A station whose apron ground is
+         * too broken to grade a slab into is dropped here — see stationPad/STATION_MAX_ROUGH
+         * in src/world/props.js. Costs nine height() calls per candidate on an already-built
+         * Terrain, which is why it is affordable here and nowhere else. */
+        job.stations = stationsInBox(ox, oz, ox + size, oz + size, this.seed, null, job.probe);
         job.phase = 3;
         return;
       case 3:
@@ -1728,39 +1875,29 @@ export class Props {
     }
 
     for (const s of stations) {
-      // Level with the road, but never buried: if the ground at a corner of the apron is
-      // above the road, lift the slab to meet it, capped so the step off the carriageway
-      // stays something a car drives over rather than climbs.
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (const [dx, dz] of [[0, 0], [9, 6], [-9, 6], [9, -6], [-9, -6], [0, 7], [0, -7]]) {
-        const ca = Math.cos(s.yaw);
-        const sa = Math.sin(s.yaw);
-        const g = height(s.x + dx * ca - dz * sa, s.z + dx * sa + dz * ca);
-        if (g < lo) lo = g;
-        if (g > hi) hi = g;
-      }
-      /* ...within PAD_STEP of the road, which is what the access spur has to ramp. The band
-       * used to be (-0.7, +0.3) and it is the second half of the buried-forecourt fix: the
-       * placement now guarantees the ground under the apron is within STATION_MAX_STEP of the
-       * road (src/world/props.js), so a WIDER band here is what lets the slab actually come up
-       * (or down) and meet it instead of being pinned to the road while the hill walks away
-       * from it. Bounded, not free: bench-props measures the resulting spur rise and holds it
-       * under the 3 m a driveway may climb. */
-      const y = clamp(hi + 0.04, s.y - PAD_STEP, s.y + PAD_STEP);
+      /* Where the slab's top face goes, and how deep its skirt has to reach — ONE function,
+       * in src/world/props.js, taking the tile's real ground probe. It used to be seven
+       * offsets and a clamp toward `s.y` written out here, and `s.y` is the host edge's own
+       * graded height from a surface (`land()`) the car does not drive on: see stationPad's
+       * own header for the 16 m of floating tarmac that cost. The slab now sits on the
+       * HIGHEST real ground under the apron, so a forecourt can never be buried. */
+      const pad = stationPad(s, height);
+      const y = pad.y;
       const L = PB();
-      buildStation(L, rng(hash3i(Math.round(s.x), Math.round(s.z), 0x5747, this.seed)), y - lo + 0.4);
+      buildStation(L, rng(hash3i(Math.round(s.x), Math.round(s.z), 0x5747, this.seed)), y - pad.lo + 0.4);
       blit(M, L, s.x, y, s.z, s.yaw, 1);
       s.padY = y;
+      s.padLo = pad.lo;
       s.tile = key;
 
       // The access spur: a real, short, paved connection from the edge of the host road's
       // own tarmac to this forecourt — see buildAccessSpur's own comment for why this shape
       // and not a full lattice junction. Built straight into the shared tile mesh in world
-      // space (no blit() needed), so it costs nothing extra in draw calls.
+      // space (no blit() needed), so it costs nothing extra in draw calls. The ground probe
+      // goes with it: the driveway FOLLOWS the ground the car drives on rather than spanning
+      // between its two ends in a straight line over whatever is in between.
       const spur = stationSpur(s);
-      const hRoad = height(spur.mouthX, spur.mouthZ);
-      buildAccessSpur(M, spur.mouthX, spur.mouthZ, hRoad, spur.apronX, spur.apronZ, y, s.width);
+      buildAccessSpur(M, spur.mouthX, spur.mouthZ, pad.hRoad, spur.apronX, spur.apronZ, y, s.width, height);
     }
 
     /* A litter bin beside every fuel can — see buildLitterBin's own comment for what it is and
@@ -1818,7 +1955,9 @@ export class Props {
     }
 
     if (this.solids) {
-      const list = propSolids(props).concat(stationSolids(stations));
+      // With the tile's real ground probe, so the forecourt's own raised EDGE gets colliders
+      // as well as the buildings standing on it — see stationSolids' section comment.
+      const list = propSolids(props).concat(stationSolids(stations, height));
       if (list.length) this.solids.addChunk(`prop:${key}`, list);
     }
     for (const s of stations) {

@@ -40,7 +40,7 @@ const SWEEP = 60;
 const CSS = `
 #fuelGauge{
   position:absolute; right:18px; bottom:74px; width:104px; height:70px;
-  pointer-events:none; opacity:.82; transition:opacity .5s ease;
+  pointer-events:none; opacity:.9; transition:opacity .5s ease;
   font:500 11px/1.2 ui-rounded,-apple-system,Segoe UI,Roboto,sans-serif;
   color:#F6ECD8; text-shadow:0 1px 3px rgba(28,34,48,.55);
 }
@@ -48,9 +48,10 @@ const CSS = `
 #fuelGauge.filling{ opacity:1; }
 #fuelGauge .lbl{ position:absolute; left:0; right:0; bottom:-2px; text-align:center; letter-spacing:.08em; }
 #fuelGauge .mins{ position:absolute; left:0; right:0; bottom:10px; text-align:center; opacity:.72; font-size:10px; }
-#fuelGauge .station{ position:absolute; left:0; right:0; top:-2px; display:flex; align-items:center; justify-content:center; gap:4px; opacity:.85; }
-#fuelGauge .station .arrow{ width:0; height:0; border-left:4px solid transparent; border-right:4px solid transparent; border-bottom:6px solid #F6ECD8; transition:transform .5s ease; transform-origin:50% 65%; }
-#fuelGauge .station .dist{ font-size:10px; font-variant-numeric:tabular-nums; }
+#fuelGauge .station{ position:absolute; left:-8px; right:-8px; top:-6px; display:flex; align-items:center; justify-content:center; gap:4px; opacity:1; }
+#fuelGauge .station .arrow{ width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-bottom:8px solid #F6ECD8; transition:transform .5s ease; transform-origin:50% 65%; }
+#fuelGauge .station .dist{ font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; text-shadow:0 1px 4px rgba(28,34,48,.85); }
+#fuelGauge .station .pump{ flex:0 0 auto; opacity:.95; }
 @keyframes fuelBreathe{ 0%,100%{opacity:.72} 50%{opacity:1} }
 @media (max-width:640px){ #fuelGauge{ width:78px; height:54px; right:10px; bottom:60px; } }
 `;
@@ -146,6 +147,46 @@ export class FuelGauge {
      * to move to make room. */
     this.station = document.createElement('div');
     this.station.className = 'station';
+    /* A PUMP, drawn rather than borrowed, so the number beside it says what it is a number OF.
+     *
+     * Operator on this readout: "no". It was on the screen the whole time — a bare 10 px
+     * figure at 0.70 effective opacity with a triangle next to it and nothing to say it meant
+     * "the next petrol station is this far away". A distance with no subject is not a readout,
+     * it is a decoration, and the person it is for is very close to legally blind. So: a real
+     * silhouette (13 px, the same cream as the needle), the figure up from 10 to 13 px and
+     * semibold with its own shadow, and the block's own opacity off .85. Nothing here blinks,
+     * moves or changes colour — the cozy rule is that it never SHOUTS, not that it hides.
+     *
+     * Drawn in SVG for the same reason the hundred roadside props are modelled in code and the
+     * arrow is a CSS triangle: no icon font, no glyph, nothing downloaded. */
+    const pump = document.createElementNS(NS, 'svg');
+    pump.setAttribute('class', 'pump');
+    pump.setAttribute('viewBox', '0 0 12 14');
+    pump.setAttribute('width', '11');
+    pump.setAttribute('height', '13');
+    const body = document.createElementNS(NS, 'path');
+    // the pump body: a squat box with a rounded top and a window, standing on a base line
+    body.setAttribute('d', 'M1.2 3.2 A1.6 1.6 0 0 1 2.8 1.6 H6.4 A1.6 1.6 0 0 1 8 3.2 V13 H1.2 Z');
+    body.setAttribute('fill', '#F6ECD8');
+    pump.appendChild(body);
+    const win = document.createElementNS(NS, 'rect');
+    win.setAttribute('x', '2.6');
+    win.setAttribute('y', '3.4');
+    win.setAttribute('width', '4');
+    win.setAttribute('height', '2.6');
+    win.setAttribute('rx', '0.6');
+    win.setAttribute('fill', 'rgba(28,34,48,.75)');
+    pump.appendChild(win);
+    // the hose and nozzle, arcing off the side — the bit that makes the silhouette read
+    const hose = document.createElementNS(NS, 'path');
+    hose.setAttribute('d', 'M8 5.2 H9.6 A1.4 1.4 0 0 1 11 6.6 V9.4');
+    hose.setAttribute('fill', 'none');
+    hose.setAttribute('stroke', '#F6ECD8');
+    hose.setAttribute('stroke-width', '1.3');
+    hose.setAttribute('stroke-linecap', 'round');
+    pump.appendChild(hose);
+    this.pump = pump;
+    this.station.appendChild(pump);
     this.arrow = document.createElement('div');
     this.arrow.className = 'arrow';
     this.stationDist = document.createElement('span');

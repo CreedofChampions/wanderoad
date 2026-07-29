@@ -20,7 +20,7 @@
 import { Terrain, findSpawn } from '../src/world/terrain.js';
 import { edgesInBox, TIERS, nodePos } from '../src/world/roads.js';
 
-const SEED = 20260726;
+const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
 
 /** browser-test.mjs R5, verbatim in shape: turn per metre over the whole edge list. */
 function curvature(edges) {

@@ -111,6 +111,38 @@ const CENTRES = [
   [0.13, 0.12, 0.52, 2.6, 2.6, 1.0, 1.5], // 4 WETLAND   — low and soaked
 ];
 
+/* WHY THE WEIGHTS THEMSELVES ARE NOT SHARPENED — measured, and it is the whole reason the
+ * "five biomes read as three" fix lives in the SHADER instead of here.
+ *
+ * The operator: "u just renamed them but they are similar 3 biomes sand, snow, hills". He is
+ * right, and the cause is measurable rather than aesthetic. Scanning a 44 km square of the
+ * shipped seed at 200 m (`node tools/diag-biomes.mjs`), the HIGHEST weight each biome ever
+ * reaches ANYWHERE is:
+ *
+ *     Meadow 0.509   Steppe 0.448   Highlands 0.876   Dunes 0.710   Wetland 0.906
+ *
+ * Meadow and steppe never once get above half. Every square metre of "meadow" is really
+ * ~0.5 meadow + ~0.3 steppe, and every square metre of "steppe" the same mix the other way
+ * up — so the shader averaged their two tints into ONE olive green and the player saw one
+ * grass biome, not two. Highland and wetland reach 0.88/0.91, which is exactly why they are
+ * the two he COULD tell apart. Three legible biomes out of five, precisely as reported.
+ *
+ * The obvious fix is to tighten the lobes here — `exp(-S·(de²+da²+dt²))`, which is just
+ * multiplying every k by sqrt(S). It was implemented and SWEPT, and it is a terrain disaster,
+ * because these same weights blend BIOME_TERRAIN's relief:
+ *
+ *     S       1      2.2      2.6      3.2      4.0
+ *     cliffs  0.008%  0.285%   0.625%   1.319%   2.145%     (node tools/diag-cliffs.mjs)
+ *
+ * A tighter lobe is a faster-changing weight, a faster-changing weight is a faster-changing
+ * blended relief, and that is gradient — the same mechanism the `W_CULL` hard-threshold note
+ * below records at 0.89%. 78x the standing cliff bar to make the ground a different colour is
+ * not a trade; the colour does not need the HEIGHT blend sharpened, only the PALETTE blend.
+ * So the sharpening is `GROUND_SHARPEN` in core/palette.js, applied in the terrain fragment
+ * shader after the weights are interpolated, and the land is left exactly as it was.
+ * Re-verified after: cliffs 0.008%, byte-identical to before this round.
+ */
+
 const _w = new Float32Array(BIOME_COUNT);
 
 /* A per-biome multiplier the preview presets set, so a gallery page can be "mostly dunes"
