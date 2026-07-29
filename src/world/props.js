@@ -1000,7 +1000,10 @@ const CAN_VERGE_SPREAD = 1.2;
  *  position, called every frame). "A giant hitbox", sized by the arithmetic above. */
 export const CAN_RADIUS = 14;
 /** Fraction of a full tank one can restores. */
-export const CAN_FRACTION = 0.22;
+/* Halved on the operator's instruction — "reduce gas can 50%", "yes but too much now". They
+ * were the answer to stations being unfindable; now they are common enough to remove the
+ * hunt entirely, which costs the fuel mechanic its point. */
+export const CAN_FRACTION = 0.11;
 /** Footprint radius for clearance and freeboard purposes — small; it is a jerry can. */
 export const CAN_FOOT = 0.5;
 /** As cos(angle) — a can does not need a level floor to hover over, but should not be planted

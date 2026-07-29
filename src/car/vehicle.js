@@ -122,9 +122,11 @@ const SAND = {
   duneWeight: 0.5, // biome blend before dune sand counts as THE sand, not a light dusting
   bogDist: 7, // metres of off-road travel through dune sand to reach full severity
   recoverPerSec: 1 / 1.6, // fraction of bogDist cleared per second once back on a made surface
-  crrBogged: 0.5, // rolling-resistance coefficient at full severity — deep loose sand
-  capBogged: 2.3, // m/s off-road speed ceiling at full severity (~8.3 km/h, a crawl, not a wall)
-  vDragBogged: 700, // N per m/s at full severity — bleeds off a fast ENTRY speed; see the rr comment
+  /* Halved, on the operator's own instruction — "37 done (too strong, reduce by 50%)". The
+   * dunes should be a place you regret leaving the road, not a tar pit. */
+  crrBogged: 0.25, // rolling-resistance coefficient at full severity — deep loose sand
+  capBogged: 4.6, // m/s off-road speed ceiling at full severity (~16.6 km/h, a slog, not a wall)
+  vDragBogged: 350, // N per m/s at full severity — bleeds off a fast ENTRY speed; see the rr comment
 };
 
 /** Lateral force factor for a slip angle, |f| = 1 at the peak slip angle. */
@@ -534,7 +536,12 @@ export class Vehicle {
      * diag/bench scripts) simply never gate this on, the same fallback the rest of this
      * terrain-optional file already uses for a missing field. */
     const duneW = surf && surf.w ? surf.w[BIOME.DUNES] : 0;
-    if (onRoadMin < OFF_ROAD_AT && duneW >= SAND.duneWeight) {
+    /* A STOPPED car always recovers, even out in the sand. Operator: "Car forever slow when
+     * touching sand". Bog is driven by distance travelled, so once it maxed out the 4.6 m/s
+     * ceiling left no way to build the speed that would carry you out — the car was slow
+     * because it was bogged and stayed bogged because it was slow. Below walking pace the
+     * accumulator drains instead, so digging yourself out always works. */
+    if (onRoadMin < OFF_ROAD_AT && duneW >= SAND.duneWeight && vMag > 1.5) {
       this._sandBogDist += vMag * dt;
     } else {
       this._sandBogDist = Math.max(0, this._sandBogDist - SAND.bogDist * SAND.recoverPerSec * dt);

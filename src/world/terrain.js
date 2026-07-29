@@ -566,7 +566,13 @@ export function findSpawn(seed, hintX = 0, hintZ = 0, opts = {}) {
       if (waterMargin(t, x, z, y) < DRY_MARGIN) continue;
       const dx = e.pts[k * 2 + 2] - e.pts[k * 2 - 2];
       const dz = e.pts[k * 2 + 3] - e.pts[k * 2 - 1];
-      best = { x, z, y, heading: Math.atan2(dx, dz), score };
+      /* Point the car the OTHER way down the road. Operator: "Start people going the OPPOSITE
+       * direction from the normal starting point from now on" — the forward tangent led into
+       * the stretch he has driven a hundred times, so spawning reversed opens onto road he has
+       * not seen without touching the spawn point, its water safety, or its grade gate. Adding
+       * pi rather than negating the tangent: the heading is an absolute bearing, and -atan2
+       * would mirror it across the axis instead of reversing it. */
+      best = { x, z, y, heading: Math.atan2(dx, dz) + Math.PI, score };
     }
   }
   // The old fallback returned the hint completely unvalidated. findDrySpot() never does.

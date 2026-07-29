@@ -124,9 +124,16 @@ export const TERRAINS = {
   alpine: {
     label: 'Alpine',
     blurb: 'Mountains close in. Switchbacks, cuttings and long climbs — the most dramatic and the least forgiving.',
-    amp: 1.12,
-    wave: 0.97,
-    peak: 1.7,
+    /* Alpine was a road-network disaster, measured: 38.8% of road segments over a 15% grade
+     * and a worst of 131% — a cliff with tarmac on it, not a mountain pass. The cause is the
+     * massifs, not the roads: peak 1.7 built domes the lattice then had to climb, and the road
+     * profile can only smooth what the land gives it. Peak down to 1.15 and amp to 1.0 keeps
+     * the mountains (spawnHigh still opens in the snow, and the landmark check still passes)
+     * while giving the network ground it can actually cross. Longer wavelength for the same
+     * reason: relief spread over more metres is the definition of a gentler grade. */
+    amp: 1.0,
+    wave: 1.1,
+    peak: 1.15,
     bias: [0.6, 0.5, 3.0, 0.2, 0.5],
     /* "alpine start should be in the mountains" (operator). Read by main.js and passed to
      * findSpawn() as its highBias — the spawn search then rewards altitude, so the game
