@@ -450,9 +450,25 @@ export class Hud {
     const nu = nextUnlock(best);
     this.bar.classList.toggle('live', live);
     if (nu) {
-      const target = nu.car.unlockAt;
-      const runP = clamp01(s.distance / target);
-      const bestP = clamp01(s.best / target);
+      /* ONE AXIS, ONE MEANING. Operator: "The bar at the bottom filled at 1 kilometre. For
+       * some reason, it's really confusing to me why it would fill at 1 kilometre. The whole
+       * bar from left to right, I don't really understand it."
+       *
+       * They were reading two different scales drawn on the same track. The DOTS sit on a log
+       * distance axis spanning 0.5 km to 390 km, so the 1 km dot is a tenth of the way along —
+       * but the FILL was `distance / nextUnlock.unlockAt`, i.e. 0..1 per car, and the first
+       * car unlocks at 1 km. So the bar filled completely while the dot marking that same
+       * kilometre sat at 10% of its width, and then the fill reset. Two contradictory readings
+       * of the same pixels; no amount of staring at it would have resolved that.
+       *
+       * The fill now rides the SAME log axis as the dots and the car badges. It passes under
+       * each dot exactly when you reach that distance, it arrives at a car's badge exactly
+       * when that car unlocks, and it never resets — it only ever grows, which is what a
+       * distance-travelled bar should do. `barNext` still says which car is next and how far,
+       * because "how far to go" is the thing you can act on. */
+      const axis = (m) => clamp01(milestoneX(Math.max(m, 1) / 1000) / 100);
+      const runP = axis(s.distance);
+      const bestP = axis(s.best);
       /* Floored, so the width written into the DOM is never literally 0%. The CSS min-width
        * already guarantees the box, but a rendering floor that only exists in the stylesheet
        * is a rendering floor an automated check has to take on trust. 0.4 % is 5 px on a
@@ -462,12 +478,15 @@ export class Hud {
       // the fill simply arrives at the notch and keeps going.
       this.barMark.style.left = `${(bestP * 100).toFixed(1)}%`;
       this.barMark.classList.toggle('on', live && bestP > 0.01 && bestP < 0.99 && s.distance < s.best);
-      // "how far away it is", not "where it is": a distance to go is the thing you can act on.
-      this.barNext.textContent = `${nu.car.label} · ${fmtUnlock(nu.remaining)} to go`;
+      /* Say what the bar IS, not just what is next. A progress bar with no label is a puzzle,
+       * and this one measures the least obvious thing in the game — distance in a single run
+       * without leaving the road. "to go" is the actionable half; the prefix is the half that
+       * makes the whole widget legible the first time anyone looks at it. */
+      this.barNext.textContent = `without leaving the road · next: ${nu.car.label} in ${fmtUnlock(nu.remaining)}`;
     } else {
-      this.barFill.style.width = '100%';
+      this.barFill.style.width = `${(clamp01(milestoneX(Math.max(s.distance, 1) / 1000) / 100) * 100).toFixed(1)}%`;
       this.barMark.classList.remove('on');
-      this.barNext.textContent = 'every car unlocked';
+      this.barNext.textContent = 'without leaving the road · every car unlocked';
     }
 
     /* ── milestone dots ──────────────────────────────────────────────

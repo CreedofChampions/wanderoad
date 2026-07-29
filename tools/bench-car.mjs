@@ -216,5 +216,96 @@ console.log('\n── steering lock taper ────────────�
   check(at(250, 20) >= 8, 'lock retained mid-slide at 250 km/h', `${at(250, 20).toFixed(1)}°`, '>= 8° (catch a slide)');
 }
 
+
+/* ── slower, not capped: the shape of the whole speed curve ──────────────────
+ * Operator: "The speed feels unnecessarily capped rather than percentage lower ... It should
+ * feel like all parts of the speed including acceleration is lowered to match the new current
+ * speed. It should feel more of an accomplishment."
+ *
+ * A top-speed number cannot tell you whether a car feels slower or merely limited. The number
+ * that can is how long it takes to GET there: the original 135 km/h grand tourer needed 12.1 s
+ * to reach 90% of its own top speed, and after the speeds were halved it needed 7.3 s — so the
+ * car arrived at its ceiling sooner and sat against it, which is the definition of a cap. The
+ * targets below are the ORIGINAL fleet's own times, measured at commit 478671c~1.
+ */
+console.log('\n── the whole curve is slower, not just the ceiling ────────────────────────');
+{
+  const WANT_T90 = { gt: 12.1, sports: 9.9, hyper: 10.6 };
+  for (const id of ['gt', 'sports', 'hyper']) {
+    const S = TIERS[id];
+    const car = new Vehicle({ tier: id, terrain: null, preset: 'cruise' });
+    let t = 0;
+    let t90 = null;
+    let top = 0;
+    for (let i = 0; i < 120 * 100; i++) {
+      car._step(PHYSICS_DT, { steer: 0, throttle: 1, brake: 0, handbrake: 0, analogue: true });
+      t += PHYSICS_DT;
+      top = Math.max(top, car.kph);
+      if (t90 === null && car.kph >= S.topSpeed * 0.9) t90 = t;
+    }
+    const want = WANT_T90[id];
+    console.log(`       ${id.padEnd(7)} 90% of ${S.topSpeed} km/h in ${t90 === null ? '--' : t90.toFixed(1) + ' s'}, settles ${car.kph.toFixed(0)} km/h in gear ${car.gear} at ${((car.rpm / S.redline) * 100).toFixed(0)}% of redline`);
+    check(t90 !== null && Math.abs(t90 - want) < want * 0.15, `${id}: time to 90% of top matches the original car`, t90 === null ? 'never' : `${t90.toFixed(1)}s`, `${want}s ±15%`);
+    /* AND THE GEARBOX IS USED. The final drives were still geared for 135/165 km/h after the
+     * speeds were halved, so top gear redlined at 113 km/h on a car that could only do 67: the
+     * car settled in FOURTH and the top two ratios were decoration. The operator heard it
+     * before anyone measured it — "the whole thing stops at like the low end of the sixth
+     * gear ... it would always be a high engine noise when you're maxing out a gear". */
+    check(car.gear === S.ratios.length, `${id}: flat out reaches TOP gear, not a middle one`, `gear ${car.gear}`, `gear ${S.ratios.length}`);
+    check(car.rpm / S.redline > 0.85, `${id}: and the engine is singing there, not loafing`, `${((car.rpm / S.redline) * 100).toFixed(0)}%`, '> 85% of redline');
+  }
+}
+
+/* ── a little bit tough at the ceiling ───────────────────────────────────────
+ * Operator: "we want a test drive like feel so when you're reaching the maximum speed of a car
+ * it should be a little bit tough to control. Not very just a little bit. It's a cozy driver."
+ *
+ * An A/B on the one constant, so anything that moves is this feature and nothing else: the same
+ * car, at the same speed, with the same steering, run once with TYRE.topFade* zeroed and once
+ * with them restored. The requirement has two halves and both are asserted — it must do
+ * something at the ceiling, and it must do NOTHING at half pace.
+ */
+console.log('\n── the last of a car own speed is a little bit tough ──────────────────────');
+{
+  const F0 = TYRE.topFadeFront;
+  const R0 = TYRE.topFadeRear;
+  const corner = (id, frac) => {
+    const S = TIERS[id];
+    const car = new Vehicle({ tier: id, terrain: null, preset: 'cruise' });
+    const v = (S.topSpeed * frac) / 3.6;
+    car.speed = v;
+    car.vx = Math.sin(car.yaw) * v;
+    car.vz = Math.cos(car.yaw) * v;
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < 120 * 3; i++) {
+      car._step(PHYSICS_DT, { steer: 0.8, throttle: 0.4, brake: 0, handbrake: 0, analogue: true, attack: 1 });
+      if (i > 120) {
+        sum += Math.abs(car.yawRate || 0);
+        n++;
+      }
+    }
+    return (sum / n) * Math.abs(car.speed);
+  };
+  for (const id of ['gt', 'sports']) {
+    const ab = (frac) => {
+      TYRE.topFadeFront = 0;
+      TYRE.topFadeRear = 0;
+      const off = corner(id, frac);
+      TYRE.topFadeFront = F0;
+      TYRE.topFadeRear = R0;
+      return { off, on: corner(id, frac) };
+    };
+    const half = ab(0.5);
+    const full = ab(1.0);
+    const loss = ((full.off - full.on) / full.off) * 100;
+    console.log(`       ${id.padEnd(7)} sustained cornering: at half pace ${half.off.toFixed(2)} -> ${half.on.toFixed(2)} m/s2, at the ceiling ${full.off.toFixed(2)} -> ${full.on.toFixed(2)} m/s2`);
+    check(Math.abs(half.on - half.off) < 0.01, `${id}: nothing changes at half pace`, `${(((half.on - half.off) / half.off) * 100).toFixed(1)}%`, '0%');
+    check(loss > 3 && loss < 20, `${id}: the ceiling is a little bit tough — not very`, `${loss.toFixed(1)}% less grip`, '3 .. 20%');
+  }
+  TYRE.topFadeFront = F0;
+  TYRE.topFadeRear = R0;
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exitCode = failures ? 1 : 0;

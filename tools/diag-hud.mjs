@@ -570,7 +570,13 @@ for (const best of probes) {
   hud.update(DT, { car, streak, surface: ON });
   const line = hud.barNext.textContent;
   const want = ladder.find((c) => best < c.unlockAt);
-  const expect = want ? `${want.label} · ${fmtUnlock(want.unlockAt - best)} to go` : 'every car unlocked';
+  /* The bar now says what it MEASURES before it says what is next — a progress bar with no
+   * label was the operator's own complaint ("the whole bar from left to right, I don't really
+   * understand it"). The substance this check owns is unchanged: the right car, and the right
+   * distance still to go. */
+  const expect = want
+    ? `without leaving the road · next: ${want.label} in ${fmtUnlock(want.unlockAt - best)}`
+    : 'without leaving the road · every car unlocked';
   const ok = line === expect;
   if (!ok) ladderOk = false;
   console.log(`   ${String(Math.round(best)).padStart(8)} m  ${(want ? want.label : '—').padEnd(9)}  ${line}${ok ? '' : `   WANT: ${expect}`}`);
@@ -750,7 +756,7 @@ for (const [vw, vh, label] of [
   const spTop = spBot + spH;
   const spLeft = vw - Math.min(Math.max(0.04 * vw, REM), 3 * REM) - spH * 3.3;
   // ~0.66 em per character at this letter-spacing; the longest line the bar can ever show.
-  const nextHalf = ('Patrol · 55 km to go'.length * nextF * 0.66) / 2;
+  const nextHalf = ('without leaving the road · next: Patrol in 55 km'.length * nextF * 0.66) / 2;
 
   const yOverlap = nextTop > spBot && nextBot < spTop;
   const xOverlap = vw / 2 + nextHalf > spLeft;

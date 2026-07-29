@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 
+import re
+
 import paramiko
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -40,6 +42,10 @@ REMOTE_DATA = "/home/admin/domains/crumbtown.org/wanderoad_data"
 # cozydriver.com's own docroot — the apex the competition entry points at. See the rsync in
 # deploy() for why it is a copy and not a symlink.
 REMOTE_APEX = "/home/admin/domains/cozydriver.com/public_html"
+# cozydriver.com/beta — its OWN directory, not a symlink. Operator: "all new changes to /beta".
+# The apex is the competition entry and has to stay still; /beta is where work lands. Pass
+# --beta to ship ONLY here and leave everything else exactly as it is.
+REMOTE_BETA = REMOTE_APEX + "/beta"
 PUBLIC_URL = "https://crumbtown.org/wanderoad/"
 
 TEXT_EXT = {".html", ".js", ".css", ".json", ".svg", ".php", ".txt", ".htaccess", ".map"}
@@ -65,6 +71,33 @@ def upload_tree(sftp, ssh, local_dir, remote_dir):
     return n
 
 
+def _push_beta(ssh, sftp):
+    """Ship dist/ to cozydriver.com/beta and PROVE the bundle hash landed.
+
+    Its own directory rather than a symlink to the apex, because the apex is the URL on the
+    competition entry and has to hold still while new work goes out. Operator: "all new changes
+    to /beta please".
+
+    The api/ folder is deliberately NOT copied: beta shares the live multiplayer/leaderboard
+    endpoints under /wanderoad/api, so there is one set of PHP and one database rather than two
+    that can disagree.
+    """
+    print(f"beta -> {REMOTE_BETA}")
+    run(ssh, f"rm -rf {REMOTE_BETA}/assets {REMOTE_BETA}/index.html")
+    run(ssh, f"mkdir -p {REMOTE_BETA}")
+    n = upload_tree(sftp, ssh, DIST, REMOTE_BETA)
+    run(ssh, f"chown -R admin:admin {REMOTE_BETA}; chmod -R 755 {REMOTE_BETA}")
+    code, out, err = run(ssh, f"grep -o 'assets/index-[A-Za-z0-9_-]*[.]js' {REMOTE_BETA}/index.html | head -1")
+    served = out.strip()
+    want = ""
+    with open(os.path.join(DIST, "index.html"), encoding="utf-8") as f:
+        m = re.search(r"assets/index-[A-Za-z0-9_-]+\.js", f.read())
+        want = m.group(0) if m else ""
+    print(f"  uploaded {n} files; beta bundle {served or '(none)'} vs built {want or '(none)'}")
+    if not served or (want and served != want):
+        sys.exit(f"/beta was NOT updated: it serves {served!r}, the build is {want!r}")
+
+
 def main():
     if "--skip-build" not in sys.argv:
         print("building…")
@@ -82,6 +115,21 @@ def main():
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(HOST, username="root", password=ROOT_PASS, timeout=30)
     sftp = ssh.open_sftp()
+
+    if "--beta" in sys.argv:
+        # Beta only. Nothing else on the box is touched — not /wanderoad, not the apex, not the
+        # api. This is the mode to use for work in progress.
+        _push_beta(ssh, sftp)
+        sftp.close()
+        ssh.close()
+        print("smoke test…")
+        time.sleep(1)
+        for url in ["https://cozydriver.com/beta/"]:
+            r = subprocess.run(["curl", "-s", "-o", os.devnull, "-w", "%{http_code}", f"{url}?cb={int(time.time())}"], capture_output=True, text=True)
+            print(f"  {r.stdout}  {url}")
+        print("")
+        print("live: https://cozydriver.com/beta/")
+        return
 
     print(f"clearing {REMOTE_BASE}")
     run(ssh, f"rm -rf {REMOTE_BASE}/assets {REMOTE_BASE}/index.html")
@@ -137,6 +185,10 @@ def main():
         f"cp -a .htaccess {REMOTE_APEX}/ 2>/dev/null; true",
     )
     run(ssh, f"chown -R admin:admin {REMOTE_APEX}; chmod -R 755 {REMOTE_APEX}")
+
+    # /beta is its own directory now (see REMOTE_BETA). A full deploy refreshes it too, so
+    # beta is never OLDER than the entry; a --beta deploy touches only beta.
+    _push_beta(ssh, sftp)
     # and PROVE it took, rather than trusting a 200 from a page that might be yesterday's
     code, out, err = run(ssh, f"grep -o 'assets/index-[A-Za-z0-9_-]*[.]js' {REMOTE_APEX}/index.html | head -1")
     apex_bundle = out.strip()
@@ -163,7 +215,7 @@ def main():
     print("smoke test…")
     time.sleep(1)
     for url in [PUBLIC_URL, PUBLIC_URL + "api/state.php?since=0", "https://crumbtown.org/cozydriver/", "https://crumbtown.org/cozydriver/social.jpg",
-                "https://cozydriver.com/", "https://www.cozydriver.com/"]:
+                "https://cozydriver.com/", "https://www.cozydriver.com/", "https://cozydriver.com/beta/"]:
         r = subprocess.run(
             ["curl", "-s", "-o", os.devnull, "-w", "%{http_code}", f"{url}{'&' if '?' in url else '?'}cb={int(time.time())}"],
             capture_output=True,

@@ -798,9 +798,18 @@ export class Vehicle {
     const hbMu = lerp(BRAKE.handbrakeRearMu, 1, this.handbrake > 0.01 ? 0 : hbEase);
 
     const speedFade = 1 - TYRE.speedFade * Math.min(vMag / TYRE.speedFadeAt, 1);
+    /* And the car's OWN ceiling — see TYRE.topFadeFrom. Smoothstepped rather than clamped so
+     * it eases in over the last quarter of the range instead of switching on at a threshold;
+     * a step here would read as a bug, and the whole point is that it should read as the car
+     * going light. `S.topSpeed` is km/h, hence the /3.6. */
+    const vTop = (this.spec.topSpeed || 200) / 3.6;
+    const tf = clamp01((vMag / vTop - TYRE.topFadeFrom) / (1 - TYRE.topFadeFrom));
+    const topEase = tf * tf * (3 - 2 * tf);
+    const topFadeF = 1 - TYRE.topFadeFront * topEase;
+    const topFadeR = 1 - TYRE.topFadeRear * topEase;
     const cap = this.muCapAwd ? TYRE.awdCap : 1e9;
-    const muF = Math.min(TYRE.muLatFront, cap) * this.gripScale * speedFade;
-    const muR = Math.min(TYRE.muLatRear, cap) * this.gripScale * speedFade * (1 - this._liftoff) * hbMu;
+    const muF = Math.min(TYRE.muLatFront, cap) * this.gripScale * speedFade * topFadeF;
+    const muR = Math.min(TYRE.muLatRear, cap) * this.gripScale * speedFade * topFadeR * (1 - this._liftoff) * hbMu;
 
     let fyFront = -lateralCurve(aFront, TYRE.peakSlipFront) * muF * loadFront * contact;
     let fyRear = -lateralCurve(aRear, TYRE.peakSlipRear) * muR * loadRear * contact;

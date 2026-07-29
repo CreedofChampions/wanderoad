@@ -40,6 +40,39 @@ export const MAX_SUBSTEPS = 5; // clamp at 41 ms; below that we accept slow moti
  * looking at is worth more here than 300 km/h you are surviving.
  */
 
+/* ── HOW THE FLEET WAS SLOWED, AND WHY IT IS NOT A SPEED LIMITER ──────────────
+ * Operator: "The speed feels unnecessarily capped rather than percentage lower ... It should
+ * feel like all parts of the speed including acceleration is lowered to match the new current
+ * speed. It should feel more of an accomplishment", and separately: "the whole thing stops at
+ * like the low end of the sixth gear ... it would always be a high engine noise when you're
+ * maxing out a gear".
+ *
+ * Both were true and both were measurable. Halving the top speeds had left the TIME to reach
+ * them almost unchanged, so the car arrived at its ceiling and sat there — the definition of a
+ * cap. Measured, time to 90% of each car's own top speed:
+ *
+ *              original      after the halving      now
+ *   gt          12.1 s            7.3 s            12.1 s
+ *   sports       9.9 s            6.2 s            10.0 s
+ *   hyper       10.6 s           10.6 s            10.6 s
+ *
+ * And two of six gears were unreachable: the final drives were still geared for 135/165 km/h,
+ * so top gear redlined at 113 km/h on a car that could only do 67. The car settled in FOURTH
+ * and the box's top two ratios were decoration. The final drives below are now set so top gear
+ * redlines just above each car's own top speed, which is what makes the engine sing at the
+ * ceiling instead of loafing:
+ *
+ *   gt      settles in gear 6 at 89% of redline   (was gear 4, top gear redlined at 113 km/h)
+ *   sports  settles in gear 6 at 99% of redline   (was gear 4, 137 km/h)
+ *   hyper   settles in gear 6 at 99% of redline   (was gear 4, 295 km/h)
+ *
+ * Shorter gearing multiplies wheel torque, so peak torque comes down to keep the acceleration
+ * curve where it belongs, and cdA comes down with it so the same engine still reaches the same
+ * top speed. The three move together: gearing sets WHERE the ceiling is, torque sets HOW LONG
+ * it takes to get there, drag balances the two. Solved numerically rather than guessed — the
+ * sweep is in the commit message.
+ */
+
 /* ── chassis ──────────────────────────────────────────────────────────────
  * edited by AI from here — UNITS, because one of these was silently read in the wrong ones.
  * `rollPerG` is DEGREES of body roll per g of cornering (3.4 / 2.5 / 1.7 are textbook roll
@@ -69,16 +102,20 @@ export const TIERS = {
      * back — 0-60 went 6.82 s -> 5.13 s without anyone asking for it. The operator asked for the
      * acceleration to come down WITH the top speed, so the torque comes down to match: 6.17 s
      * measured, against 3.78 s before any of this. */
-    peakTorque: 108, // N.m at the crank (gt; was 235 originally, 130 before the gearing change) // N·m at the crank
+    peakTorque: 63,
     redline: 6800,
-    cdA: 1.9,
+    cdA: 1.00,
     rollPerG: 3.4,
     /* Halved on the operator's instruction -- "Make the cars 1/2 slower -- too fast again".
      * The GT and the sports car are what most people drive most of the time, so they carry the
      * change; the hyper keeps its speed because the same message says "Keep high-tier cars
      * fast", and a fleet where the top car is not noticeably quicker has no ladder left. */
     topSpeed: 70, // km/h, the acceptance target
-    zeroTo60: 6.8, // 0-60, not 0-100: the touring car's top speed is 70 km/h
+    /* 60 km/h is 86% of THIS car's 70 km/h top, so this is close to a 0-to-flat-out figure and
+     * reads slower than the old one for that reason alone. The number that says whether the
+     * car feels capped is time to 90% of its own top speed, and that is 12.0 s — the original
+     * 135 km/h car's own 12.1 s. See the gearing note above. */
+    zeroTo60: 9.7,
     ratios: [4.1, 2.62, 1.9, 1.47, 1.15, 0.98],
     /* SHORTENED WITH THE TOP SPEED. Halving topSpeed without touching the gearing left the
      * car's whole usable range inside FIRST GEAR — the browser suite caught it: "the gearbox
@@ -86,7 +123,7 @@ export const TIERS = {
      * not a gearbox, and an engine stuck at part-rpm sounds wrong the entire drive.
      * Scaled by the speed cut itself (135/70 = 1.93), so the gears fall in the same places
      * relative to the car's own top speed as they did before. */
-    finalDrive: 7.9, // was 4.1, when this car did 135 km/h
+    finalDrive: 12.0,
     wheelRadius: 0.34,
     drive: 'rwd',
   },
@@ -99,14 +136,14 @@ export const TIERS = {
     cgHeight: 0.42,
     weightRear: 0.53,
     power: 300,
-    peakTorque: 172, // sports; was 370 originally, 205 before the gearing change
+    peakTorque: 100,
     redline: 7200,
-    cdA: 1.62,
+    cdA: 1.00,
     rollPerG: 2.5,
     topSpeed: 90,
-    zeroTo60: 4.2,
+    zeroTo60: 5.4,
     ratios: [3.9, 2.5, 1.81, 1.4, 1.1, 0.93],
-    finalDrive: 7.25, // was 3.95, when this car did 165 km/h — see the GT's note above
+    finalDrive: 11.4,
     wheelRadius: 0.34,
     drive: 'rwd',
   },
@@ -119,14 +156,14 @@ export const TIERS = {
     cgHeight: 0.38,
     weightRear: 0.56,
     power: 380,
-    peakTorque: 405,
+    peakTorque: 356,
     redline: 8200,
-    cdA: 1.48,
+    cdA: 1.00,
     rollPerG: 1.7,
     topSpeed: 190,
-    zeroTo60: 2.3,
+    zeroTo60: 1.9, // quicker off the line than before: shorter gearing. Its curve to 90% is unchanged at 10.6 s
     ratios: [3.7, 2.38, 1.77, 1.4, 1.12, 0.94],
-    finalDrive: 3.9,
+    finalDrive: 6.25,
     wheelRadius: 0.35,
     drive: 'awd',
   },
@@ -160,6 +197,25 @@ export const TYRE = {
   // 1260 km/h. What makes a car feel planted at speed is downforce, not grip fade.
   speedFadeAt: 110, // m/s for the full (small) fade
   speedFade: 0.1,
+  /* ── the last tenth of a car's own top speed ──────────────────────────────
+   * Operator: "we want a test drive like feel so when you're reaching the maximum speed of a
+   * car it should be a little bit tough to control. Not very just a little bit. It's a cozy
+   * driver after all."
+   *
+   * The fade above is ABSOLUTE — half grip at 1260 km/h, TDU's own number — which means that
+   * on a fleet whose fastest car does 183 km/h it never does anything at all. Every car
+   * therefore handled exactly the same at its ceiling as at half pace, and reaching the top
+   * of a car felt like nothing.
+   *
+   * So this fade is RELATIVE to the car's own top speed: nothing at all below topFadeFrom,
+   * easing in to a small loss at the ceiling, and slightly more at the rear than the front so
+   * the car goes light rather than heavy — a float you correct with the wheel, not a spin.
+   * 8%/13% is deliberately gentle: at the limit it is about a 3% wider line, which is a
+   * feeling, not a punishment. Every car gets this, so every car's ceiling feels earned, and
+   * the hypercar's ceiling — twice as fast — is where it bites in absolute terms. */
+  topFadeFrom: 0.72, // fraction of the car's own top speed where the fade begins
+  topFadeFront: 0.08,
+  topFadeRear: 0.13,
   downforce: 0.22, // N per (m/s)²
   // Combined slip uses a deliberately generous exponent: 1.85 instead of 2.0 leaves ~6% more
   // simultaneous capacity, which is what lets trail-braking rotate the car instead of
