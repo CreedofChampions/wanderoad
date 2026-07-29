@@ -12,3 +12,6 @@ wanderoad-extension-*.zip
 .cp1prof/
 .chrome-*/
 *-prof/
+
+# VPS credential for deploy.py - never commit
+deploy/secrets.local.json

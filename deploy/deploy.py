@@ -19,7 +19,19 @@ import paramiko
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 HOST = "155.254.30.48"
-ROOT_PASS = "pL3xNQ0B6v9E5egRz2"  # same source of truth as crumbtown-site/deploy/deploy.py
+# The root password is NOT in this file (this repo has a public mirror). It comes from the
+# CRUMBTOWN_ROOT_PASS env var, or from deploy/secrets.local.json ({"root_pass": "..."}),
+# which is gitignored - same box as crumbtown-site/deploy/deploy.py.
+def _root_pass():
+    v = os.environ.get("CRUMBTOWN_ROOT_PASS")
+    if v:
+        return v
+    f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets.local.json")
+    if os.path.exists(f):
+        import json
+        return json.load(open(f))["root_pass"]
+    sys.exit("no VPS credential: set CRUMBTOWN_ROOT_PASS or create deploy/secrets.local.json")
+ROOT_PASS = _root_pass()
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
 SERVER = os.path.join(ROOT, "server")
