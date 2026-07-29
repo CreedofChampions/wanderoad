@@ -39,6 +39,45 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
+- [ ] **BLOCKING — arterial-vs-arterial crossings are never levelled, and it is holding back the
+      operator's #1 request.** He asked to spawn people facing the OPPOSITE way down the road.
+      That change is one line (`+ Math.PI` in findSpawn, already written and commented in
+      src/world/terrain.js with its restore condition). It is HELD because driving out that way
+      routes the car through a crossing **3.63 m out of level** — browser R2, 1 of 9, reproduced
+      twice — and shipping it would aim every new player at exactly the fall-through this project
+      spent days eliminating.
+
+      **The mechanism, measured, not guessed.** `levelCrossings()` pulls LANES to the arterial
+      they cross; two arterials crossing each other are never touched. Scanning a 6 km box around
+      the default spawn (tools scratch, easy to rebuild — the R2 arithmetic in
+      tools/browser-test.mjs verbatim against `t.roads.edges`):
+
+      ```
+      BAD  2.21 m at (-3156,-1959)  A=0:-2,-2,0 tier0  B=0:-2,-2,1 tier0   <- arterial x arterial
+      BAD  1.55 m at ( 2479,-2544)  A=0:1,-2,0  tier0  B=0:1,-2,1  tier0   <- arterial x arterial
+      BAD  9.06 m at (-2259,-2333)  A=0:-2,-2,0 tier0  B=1:-4,-4,0 tier1
+      BAD 12.40 m at ( 1448,-1951)  A=0:0,-2,1  tier0  B=1:2,-4,1  tier1
+      BAD 11.29 m at ( 3843,-399)   A=0:1,-1,0  tier0  B=1:5,-1,0  tier1
+      ```
+
+      The tier0×tier1 entries are a DIFFERENT and much less alarming thing: `levelCrossings`
+      levels a lane against whatever edges are in the CALLER'S box, so a wide diagnostic box
+      re-levels edges against a partner set the game never uses. The ±420 m box the car actually
+      samples reads **0 bad crossings at spawn** — verified. The tier0×tier0 pair is the real,
+      box-independent defect.
+
+      **Why this is not a quick fix, from this project's own history.** Arterial-vs-arterial
+      levelling was attempted in an earlier round and REVERTED: it fires at SHARED NODES, where
+      it moved 17 of 17 arterials in a 4 km square by up to 36 m and put a 134% gradient on the
+      trunk network. The safe shape is almost certainly to level only at TRUE MID-EDGE crossings
+      (never where the two edges already share a node) and to feather the correction along the
+      lower-priority arterial the way the lane path already does — but that needs its own
+      before/after against diag-cliffs, diag-relief, diag-curve R1/R2 and diag-seam, which is a
+      session, not a budgeted pass.
+
+      **Restore condition, written at the code site:** put the `+ Math.PI` back the moment R2
+      reads 0/9.
+
 - [ ] **BLOCKING-ish — downhill bounce: fix found and REVERTED, cause of the revert recorded.**
       The bounce itself is understood and was measurably fixed (14% wavy descent at 92 km/h:
       max visual gap **26 cm -> 4 cm**). What defeated it is a WATER interaction, found only by
