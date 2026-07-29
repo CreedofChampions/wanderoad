@@ -73,34 +73,48 @@ for (const tier of ['gt', 'sports', 'hyper']) {
   const spec = TIERS[tier];
   const car = fresh(tier, 'sport');
   let t = 0;
-  let to100 = null;
+  let to60 = null;
   const FULL = { ...NEUTRAL, throttle: 1 };
   for (let i = 0; i < 120 * 60; i++) {
     car._step(PHYSICS_DT, FULL);
     t += PHYSICS_DT;
-    if (to100 === null && car.kph >= 100) to100 = t;
+    /* 0-60, not 0-100. The fleet was halved on the operator's instruction and the touring car
+     * now tops out at 70 km/h, so 0-100 is a time it can NEVER post -- the old check sat
+     * waiting for a speed that does not exist. A benchmark whose target is outside the car's
+     * range measures nothing at all. */
+    if (to60 === null && car.kph >= 60) to60 = t;
   }
   const top = car.kph;
   check(
-    Math.abs(to100 - spec.zeroTo100) < spec.zeroTo100 * 0.35,
-    `${tier} 0-100 km/h`,
-    `${to100 ? to100.toFixed(2) : '—'}s`,
-    `${spec.zeroTo100}s ±35%`
+    to60 !== null && Math.abs(to60 - spec.zeroTo60) < spec.zeroTo60 * 0.35,
+    `${tier} 0-60 km/h`,
+    `${to60 ? to60.toFixed(2) : 'never reached'}s`,
+    `${spec.zeroTo60}s ±35%`
   );
   check(Math.abs(top - spec.topSpeed) < spec.topSpeed * 0.12, `${tier} top speed`, `${top.toFixed(0)} km/h`, `${spec.topSpeed} ±12%`);
 }
 
 console.log('\n── braking ───────────────────────────────────────────────────────');
 {
+  /* BRAKE FROM 80, NOT 100. The fleet was halved on the operator's instruction and the sports
+   * car now tops out at 88 km/h, so `while (car.kph < 100)` was a loop waiting for a speed the
+   * car can never reach -- it hung the whole bench with no output after the speed section.
+   * Guarded as well as retargeted: a spin-up loop with no bound is a hang waiting for the next
+   * tuning change, whatever the number is. */
   const car = fresh('sports', 'sport');
+  const FROM = 80;
   const FULL = { ...NEUTRAL, throttle: 1 };
-  while (car.kph < 100) car._step(PHYSICS_DT, FULL);
+  let spin = 0;
+  while (car.kph < FROM && spin++ < 120 * 60) car._step(PHYSICS_DT, FULL);
   const x0 = car.z;
   const BRK = { ...NEUTRAL, brake: 1 };
   let guard = 0;
   while (car.kph > 1 && guard++ < 120 * 20) car._step(PHYSICS_DT, BRK);
   const dist = Math.hypot(car.z - x0, car.x);
-  check(dist > 24 && dist < 52, '100-0 km/h with ABS', `${dist.toFixed(1)} m`, '24–52 m (target ~34)');
+  /* Scaled to the old 100-0 figure by v², so the bar means the same thing it always did:
+   * a 34 m stop from 100 is a 21.8 m stop from 80. */
+  const scaled = dist * (100 / FROM) ** 2;
+  check(scaled > 24 && scaled < 52, '100-0 km/h with ABS (scaled from 80)', `${scaled.toFixed(1)} m`, '24–52 m (target ~34)');
 }
 
 console.log('\n── peak lateral grip ─────────────────────────────────────────────');

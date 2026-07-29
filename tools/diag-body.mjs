@@ -226,7 +226,11 @@ console.log('\n── 3. pitch on a climb ────────────�
   // and the springs on top: flat road, brake hard, the nose must go DOWN
   const car = new Vehicle({ tier: 'sports', terrain: ramp(0), preset: 'sport' });
   car.placeAt(0, 0, 0);
-  while (car.kph < 90) car._step(PHYSICS_DT, { ...NEUTRAL, throttle: 1 });
+  /* Guarded, and targeted at a speed the car can actually reach. The fleet was halved on the
+   * operator's instruction, so the sports car tops out at 88 km/h -- an unbounded
+   * `while (car.kph < N)` for any N above that is not a slow test, it is a hang. */
+  let spin = 0;
+  while (car.kph < 80 && spin++ < 120 * 60) car._step(PHYSICS_DT, { ...NEUTRAL, throttle: 1 });
   const cruise = -car.pitch * DEG;
   for (let i = 0; i < 40; i++) car._step(PHYSICS_DT, { ...NEUTRAL, brake: 1 });
   console.log(`        flat road: nose-up ${f(cruise, 6, 2)}° at 90 km/h, ${f(-car.pitch * DEG, 6, 2)}° a third of a second into full braking (dive still works)`);

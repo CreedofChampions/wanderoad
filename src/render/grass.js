@@ -1218,10 +1218,16 @@ export class Grass {
           let dry = 0;
           let snow = 0;
           let wet = 0;
+          let sand = 0; // dunes weight — see the suppression note in the loop below
           for (let b = 0; b < BIOME_COUNT; b++) {
             const wb = w[b];
             if (wb < 0.002) continue;
             g += wb * SCAT_GRASS[b];
+            // Dunes' own grass is 0, but this is a WEIGHTED BLEND: at 70% dunes / 30% meadow
+            // the meadow share still grows a third of a lawn, which is why the operator still
+            // sees "grass on dunes" after that table was zeroed. Sand has to SUPPRESS, not
+            // merely abstain -- tracked here and applied to the total below.
+            if (b === BIOME.DUNES) sand += wb;
             dry += wb * TINT_DRY[b];
             snow += wb * TINT_SNOW[b];
             wet += wb * TINT_WET[b];
@@ -1229,6 +1235,18 @@ export class Grass {
           // The carriageway is bald. 'edge' is the tarmac mask, so the verge — where the
           // carve mask is high but the edge mask is falling — keeps its grass, which is
           // what makes a road read as cut into the land rather than mown around.
+          /* SAND SUPPRESSES GRASS, it does not merely abstain. Zeroing the dunes row in
+           * BIOME_SCATTER was necessary and not sufficient: the loop above is a weighted
+           * blend, so a point that is 70% dunes and 30% meadow still grew 30% of a meadow's
+           * lawn, and the operator kept seeing "grass on dunes" after that table read 0.
+           * THRESHOLDED TO THE REAL WEIGHT RANGE, not squared. Biome weights in this world
+           * never approach 1: measured over a 6 km disc on the shipped seed, the duniest point
+           * anywhere is 0.696, so squaring left HALF a lawn (0.516) standing on the deepest
+           * sand in the map. The same trap GROUND_SHARPEN documents for colour — a blend whose
+           * dominant weight peaks near 0.5 needs a threshold, not a curve. Grass thins from a
+           * quarter dunes and is gone by 0.55, which is a real sand sea. */
+          g *= 1 - smoothstep(0.25, 0.55, sand);
+
           const rc = T.roads.carve(x, z);
           let edge = rc.edge;
           // Widen the carriageway suppression past roads.js's own shoulder fade reach, far

@@ -33,11 +33,16 @@ import { STATION_RADIUS } from '../world/props.js';
 export const TANK_SECONDS = 360;
 
 /* The cruise the tank is measured against, taken from the car itself rather than guessed:
- * a `cruise`-preset Vehicle holding 95 km/h on flat tarmac settles at a mean throttle of
- * 0.288 and 26.4 m/s (tools/bench-fuel.mjs re-measures this every run and fails if the car
- * changes underneath it). */
-export const CRUISE_V = 26.4;
-export const CRUISE_THROTTLE = 0.288;
+ * a `cruise`-preset Vehicle holding 55 km/h on flat tarmac settles at a mean throttle of
+ * 0.159 and 15.28 m/s (tools/bench-fuel.mjs re-measures this every run and fails if the car
+ * changes underneath it).
+ *
+ * RE-MEASURED after the fleet was halved -- "Make the cars 1/2 slower". The reference used to
+ * be 95 km/h, which is now ABOVE the touring car's 70 km/h top speed, so the bench was holding
+ * the throttle pinned and calling it a cruise. A reference speed the car cannot reach measures
+ * nothing, and it silently made a tank read 2.9 minutes instead of six. */
+export const CRUISE_V = 15.28;
+export const CRUISE_THROTTLE = 0.159;
 
 /* Burn rate, normalised so that rate === 1 at exactly that cruise:
  *

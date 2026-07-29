@@ -1141,7 +1141,10 @@ export const CAN_RADIUS = 14;
 /* Halved on the operator's instruction — "reduce gas can 50%", "yes but too much now". They
  * were the answer to stations being unfindable; now they are common enough to remove the
  * hunt entirely, which costs the fuel mechanic its point. */
-export const CAN_FRACTION = 0.11;
+/* Halved again -- "Getting fuel still too easy (too many cans)". 0.22 -> 0.11 -> 0.055.
+ * Stations remain the intended refuel; cans exist so running dry is a bad decision rather
+ * than a coin flip about where the road went. */
+export const CAN_FRACTION = 0.055;
 /** Footprint radius for clearance and freeboard purposes — small; it is a jerry can. */
 export const CAN_FOOT = 0.5;
 /** As cos(angle) — a can does not need a level floor to hover over, but should not be planted

@@ -56,7 +56,7 @@ function cruiseController(targetKph) {
 console.log('\n── the cruise the tank is measured against ───────────────────────────────');
 {
   const car = fresh();
-  const ctl = cruiseController(95);
+  const ctl = cruiseController(55);
   let thr = 0;
   let v = 0;
   let n = 0;
@@ -71,14 +71,14 @@ console.log('\n── the cruise the tank is measured against ──────
   }
   thr /= n;
   v /= n;
-  console.log(`       a 'cruise'-preset touring car holding 95 km/h settles at throttle ${thr.toFixed(3)}, ${v.toFixed(2)} m/s`);
+  console.log(`       a 'cruise'-preset touring car holding 55 km/h settles at throttle ${thr.toFixed(3)}, ${v.toFixed(2)} m/s`);
   check(Math.abs(thr - CRUISE_THROTTLE) < 0.05, 'fuel.js CRUISE_THROTTLE still matches the car', thr.toFixed(3), `${CRUISE_THROTTLE} +- 0.05`);
   check(Math.abs(v - CRUISE_V) < 1.0, 'fuel.js CRUISE_V still matches the car', v.toFixed(2), `${CRUISE_V} +- 1.0`);
 }
 
 console.log('\n── minutes per tank ──────────────────────────────────────────────────────');
 const results = {};
-for (const [label, kph] of [['dawdling  60 km/h', 60], ['cruising  95 km/h', 95], ['pressing 125 km/h', 125], ['flat out (throttle pinned)', -1]]) {
+for (const [label, kph] of [['dawdling  35 km/h', 35], ['cruising  55 km/h', 55], ['pressing  68 km/h', 68], ['flat out (throttle pinned)', -1]]) {
   const car = fresh();
   const fuel = new Fuel({ start: 1 });
   const ctl = kph > 0 ? cruiseController(kph) : null;
@@ -103,11 +103,11 @@ for (const [label, kph] of [['dawdling  60 km/h', 60], ['cruising  95 km/h', 95]
   console.log(`       ${label.padEnd(28)} ${(t / 60).toFixed(2)} min   ${(dist / 1000).toFixed(1)} km   mean ${((dist / t) * 3.6).toFixed(0)} km/h`);
 }
 {
-  const m = results['cruising  95 km/h'].mins;
+  const m = results['cruising  55 km/h'].mins;
   check(m > 5.4 && m < 6.6, 'MINUTES OF CRUISING PER TANK', m.toFixed(2), '6.0 +- 0.6 (the brief: "roughly six")');
   check(results['dawdling  60 km/h'].mins > m, 'a gentle drive goes further in time', results['dawdling  60 km/h'].mins.toFixed(2), `> ${m.toFixed(2)}`);
   check(results['flat out (throttle pinned)'].mins < m, 'hurrying costs more', results['flat out (throttle pinned)'].mins.toFixed(2), `< ${m.toFixed(2)}`);
-  check(results['cruising  95 km/h'].km > 7 && results['cruising  95 km/h'].km < 11, 'kilometres per tank at cruise', results['cruising  95 km/h'].km.toFixed(1), '7 .. 11 (stations are ~2.9 km apart)');
+  check(results['cruising  55 km/h'].km > 7 && results['cruising  55 km/h'].km < 11, 'kilometres per tank at cruise', results['cruising  55 km/h'].km.toFixed(1), '7 .. 11 (stations are ~2.9 km apart)');
 }
 
 console.log('\n── the limit actually reaches the solver ─────────────────────────────────');

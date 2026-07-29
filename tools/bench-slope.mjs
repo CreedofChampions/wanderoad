@@ -22,11 +22,15 @@ for (const deg of [0, 5, 10, 20, 30, 40, 55, 70]) {
   console.log(`  ${String(deg).padStart(2)}°  ${car.kph.toFixed(0).padStart(4)} km/h   climbed ${climbed.toFixed(0).padStart(5)} m`);
 }
 
-console.log('\ncoast test — reach 130 km/h on the flat, then lift off');
+console.log('\ncoast test — reach 80 km/h on the flat, then lift off');
 {
   const car = new Vehicle({ tier: 'sports', terrain: ramp(0), preset: 'sport' });
   car.placeAt(0, 0, 0);
-  while (car.kph < 130) car._step(PHYSICS_DT, { ...NEUTRAL, throttle: 1 });
+  /* Guarded, and targeted at a speed the car can actually reach. The fleet was halved on the
+   * operator's instruction, so the sports car tops out at 88 km/h -- an unbounded
+   * `while (car.kph < N)` for any N above that is not a slow test, it is a hang. */
+  let spin = 0;
+  while (car.kph < 80 && spin++ < 120 * 60) car._step(PHYSICS_DT, { ...NEUTRAL, throttle: 1 });
   const z0 = car.z;
   let t = 0;
   const marks = [];

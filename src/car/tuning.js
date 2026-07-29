@@ -63,8 +63,12 @@ export const TIERS = {
     redline: 6800,
     cdA: 1.9,
     rollPerG: 3.4,
-    topSpeed: 135, // km/h, the acceptance target
-    zeroTo100: 9.5,
+    /* Halved on the operator's instruction -- "Make the cars 1/2 slower -- too fast again".
+     * The GT and the sports car are what most people drive most of the time, so they carry the
+     * change; the hyper keeps its speed because the same message says "Keep high-tier cars
+     * fast", and a fleet where the top car is not noticeably quicker has no ladder left. */
+    topSpeed: 70, // km/h, the acceptance target
+    zeroTo60: 3.8, // 0-60, not 0-100: the touring car's top speed is 70 km/h
     ratios: [4.1, 2.62, 1.9, 1.47, 1.15, 0.98],
     finalDrive: 4.1,
     wheelRadius: 0.34,
@@ -83,8 +87,8 @@ export const TIERS = {
     redline: 7200,
     cdA: 1.62,
     rollPerG: 2.5,
-    topSpeed: 165,
-    zeroTo100: 7.0,
+    topSpeed: 90,
+    zeroTo60: 2.5,
     ratios: [3.9, 2.5, 1.81, 1.4, 1.1, 0.93],
     finalDrive: 3.95,
     wheelRadius: 0.34,
@@ -104,7 +108,7 @@ export const TIERS = {
     cdA: 1.48,
     rollPerG: 1.7,
     topSpeed: 190,
-    zeroTo100: 5.6,
+    zeroTo60: 2.3,
     ratios: [3.7, 2.38, 1.77, 1.4, 1.12, 0.94],
     finalDrive: 3.9,
     wheelRadius: 0.35,
