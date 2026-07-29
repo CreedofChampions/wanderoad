@@ -39,6 +39,39 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
+- [ ] **90-degree junctions: FIVE hypotheses falsified with numbers. Read this before trying a
+      sixth.** The operator: "When 2 roads get close they need to start to connect via a 90
+      degree junction not like part into each other -- that way its 1 template that just works
+      for all intersections."
+
+      Baseline, `node tools/diag-crossing-angle.mjs`, 12 km box: **175 crossings, mean deviation
+      16.48 degrees from square, worst 82.6.** Every measured crossing in this world is
+      arterial x lane; same-tier crossings essentially do not occur.
+
+      | # | Hypothesis | Change | Result |
+      |---|---|---|---|
+      | 1 | The lattices are incommensurate (1800 vs 620) so crossings cannot be square | lane cell 620 -> 600, exactly 1800/3 | mean **16.48 -> 15.84**. Negligible. |
+      | 2 | Node jitter (+-42% of a cell = +-252 m) swamps the grid | jitter 0.42 -> 0.14 | mean **-> 15.31**. Negligible. |
+      | 3 | R5's winding bends edges away from their node-to-node direction | swing 0.10/0.11 -> 0 | mean **-> 13.93**. Small, and it would cost every curve in the game. |
+      | 4 | The squaring bend is radius-limited | CROSS_SQUARE_RADIUS 90 -> 74 | **exactly no change**, to three decimals. |
+      | 5 | It is window-limited (the file's own comment says so) | window 320/420 -> 520/700 | mean **-> 16.22**. Negligible. |
+
+      All five reverted. Together they say the residual is NOT any single geometric knob.
+
+      **The hypothesis that survives, and where a sixth attempt should start:** `squareCrossings`
+      contains `if (kc <= cursor) continue` — a crossing whose correction window would overlap
+      the previous one is SKIPPED ENTIRELY. That explains #5 exactly: widening the window buys a
+      better correction on the crossings that still fit and silently drops more of the ones that
+      no longer do, so the mean barely moves. It also explains why the worst case (82.6 deg) is
+      untouched by every knob — the worst crossings are precisely the ones in busy areas whose
+      windows collide.
+
+      So the fix is not a constant. It is either processing crossings in order of severity
+      rather than in polyline order, or merging overlapping windows into one correction that
+      squares both crossings at once. That is a real piece of work in the most load-bearing
+      function in the file, and it needs the full road gate (seam, water, R1/R2/R5, cliffs,
+      density, deadends) behind it.
+
 - [x] **THE REVERSED SPAWN IS RESTORED — crossings are levelled and the hold is lifted.**
       `+ Math.PI` is back in `findSpawn`. The gate it was waiting on, measured by the new
       `node tools/diag-crosslevel.mjs`: **0 crossings over 1.0 m within 2600 m of the default
