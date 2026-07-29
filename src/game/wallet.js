@@ -25,6 +25,28 @@ export const BOAT_UNLOCK_COINS = 50;
 /** How rarely a dirty wallet is actually written to localStorage, seconds — see update(). */
 const SAVE_INTERVAL = 2;
 
+/* ── COINS ARE THE WHOLE ECONOMY ─────────────────────────────────────────────
+ * Operator: "make the whole new reward system run via coins. Streaks = coins. Gas bonus = buy
+ * it for coins. New cars = coins."
+ *
+ * So driving well is the only income and everything is bought with the same money. Three
+ * consequences, all of them in this file because this is where the money lives:
+ *
+ *   1. A streak MINTS coins as it runs — see mintStreak(). Coins picked up off the verge stay,
+ *      but they are pocket change next to a long run, which is the right way round: the reward
+ *      should come from the thing the game is about.
+ *   2. Coins can be SPENT. That breaks the old `boatUnlocked` shortcut, which read "do you hold
+ *      50 coins right now" — spending would have un-earned the boat. The latched `boat` flag was
+ *      always the real source of truth (see its own comment); now it is the only one.
+ *   3. Owning a car is a thing you buy, not a distance you pass. `owned` is persisted here
+ *      rather than in garage.js because it is a purchase, and purchases live with the money.
+ */
+
+/** Metres of unbroken streak per coin minted. 250 m at 60 km/h is a coin every 15 seconds — a
+ *  drip you notice, and about 4 coins a kilometre against the roughly 1 a kilometre the verge
+ *  pickups give, so a good run out-earns scavenging without making the pickups pointless. */
+export const STREAK_METRES_PER_COIN = 250;
+
 export class Wallet {
   constructor({ storageKey = 'wanderoad.loot.v1' } = {}) {
     this.storageKey = storageKey;
@@ -34,6 +56,15 @@ export class Wallet {
      *  boat stays unlocked even if coins were somehow spent (there is no spending yet, but the
      *  flag, not the running total, is the source of truth for "have I earned this"). */
     this.boat = false;
+    /** Car ids bought outright, ever. A Set in memory, an array on disk. The starting car is
+     *  not in here — see `owns()`, which always says yes to it: a game that opens with no car
+     *  is not a game. */
+    this.owned = new Set();
+    /** Fuel-capacity upgrades bought, PER CAR: { [carId]: levels }. Per car because capacity
+     *  belongs to the car (see game/fuel.js's own note) and so does the money spent on it. */
+    this.tanks = {};
+    /** Streak metres already paid out, so a run that is re-read every frame mints once. */
+    this._paidM = 0;
 
     this._events = []; // drained by main.js, same shape as streak.js's own queue
     this._dirty = false;
@@ -49,6 +80,8 @@ export class Wallet {
       this.coins = Math.max(0, +d.coins || 0);
       this.gems = Math.max(0, +d.gems || 0);
       this.boat = !!d.boat;
+      if (Array.isArray(d.owned)) this.owned = new Set(d.owned);
+      if (d.tanks && typeof d.tanks === 'object') this.tanks = { ...d.tanks };
     } catch {
       // A corrupt or unavailable store is not worth a crash on a cozy driving game — same
       // stance streak.js's own load() takes.
@@ -57,7 +90,10 @@ export class Wallet {
 
   save() {
     try {
-      localStorage.setItem(this.storageKey, JSON.stringify({ coins: this.coins, gems: this.gems, boat: this.boat }));
+      localStorage.setItem(
+        this.storageKey,
+        JSON.stringify({ coins: this.coins, gems: this.gems, boat: this.boat, owned: [...this.owned], tanks: this.tanks })
+      );
       this._dirty = false;
       this._sinceSave = 0;
     } catch {
@@ -68,7 +104,74 @@ export class Wallet {
   /** Unlocked by having earned it, by having enough coins right now, or by cheat mode — see
    *  the file header for why only the FIRST of those is an event. */
   get boatUnlocked() {
-    return this.boat || this.coins >= BOAT_UNLOCK_COINS || cheatOn();
+    /* `coins >= BOAT_UNLOCK_COINS` used to be part of this and is deliberately gone: now that
+     * coins can be spent, holding fewer than 50 would have taken the boat back off you. The
+     * latch below is set the moment you first reach 50 (see addCoins), which is the event that
+     * actually earns it. */
+    return this.boat || cheatOn();
+  }
+
+  /** Does the player own this car? The first car in the fleet is always owned — see `owned`. */
+  owns(carId, freeId = 'estate') {
+    return carId === freeId || this.owned.has(carId) || cheatOn();
+  }
+
+  /**
+   * Spend, if there is enough. Returns true only when the money actually moved, so a caller
+   * can use it as the gate itself rather than checking the balance and then spending — two
+   * steps that can disagree if anything happens between them.
+   * @param {number} n coins
+   */
+  spend(n) {
+    if (!(n > 0) || this.coins < n) return false;
+    this.coins -= n;
+    this._dirty = true;
+    this.save(); // a purchase is not left to the debounce; losing one is worse than a write
+    return true;
+  }
+
+  /** Buy a car. Idempotent: buying one you already own costs nothing and returns false. */
+  buyCar(carId, price) {
+    if (this.owns(carId)) return false;
+    if (!this.spend(price)) return false;
+    this.owned.add(carId);
+    this._events.push({ kind: 'car-bought', carId, price });
+    this.save();
+    return true;
+  }
+
+  /** Fuel-capacity upgrades bought for one car. */
+  tankLevel(carId) {
+    return Math.max(0, +this.tanks[carId] || 0);
+  }
+
+  /** Buy one more capacity upgrade for a car. */
+  buyTank(carId, price) {
+    if (!this.spend(price)) return false;
+    this.tanks[carId] = this.tankLevel(carId) + 1;
+    this._events.push({ kind: 'tank-bought', carId, level: this.tanks[carId], price });
+    this.save();
+    return true;
+  }
+
+  /**
+   * Pay out a running streak. Called every frame with the streak's CURRENT distance in metres;
+   * mints one coin per STREAK_METRES_PER_COIN of new ground and remembers what it has already
+   * paid for, so this is safe to call at 120 Hz. A streak that BREAKS resets to zero, which is
+   * less than `_paidM`, so the counter follows it down and the next run starts paying again
+   * from its own first metre — you are never paid twice for the same tarmac, and never charged
+   * for a run you lost.
+   * @param {number} distanceM the streak's current distance
+   * @returns {number} coins minted this call
+   */
+  mintStreak(distanceM) {
+    const m = Math.max(0, distanceM || 0);
+    if (m < this._paidM) this._paidM = m; // the streak broke, or a new run began
+    const owed = Math.floor((m - this._paidM) / STREAK_METRES_PER_COIN);
+    if (owed <= 0) return 0;
+    this._paidM += owed * STREAK_METRES_PER_COIN;
+    this.addCoins(owed);
+    return owed;
   }
 
   /** @param {number} n coins gained this call (0 is a no-op, never a write). */

@@ -143,6 +143,78 @@ console.log(`dead end found: edge ${edge.key}, dir ${dir}, edge length ${path.to
   check('dead end: stops and hands back control AT the road, not off it', stoppedReason === 'the road ends here', `reason was "${stoppedReason}"`);
 }
 
+/* ── dead end WITH an R key wired up: it turns round and keeps driving ────────
+ * Operator: "must click r when end of road on auto drive mode". The run above proves the
+ * fallback — no recover() hook, so it stops and hands back, which is what it always did. This
+ * one proves the behaviour the game actually ships: main.js hands the autopilot the same
+ * backToRoad() the R key calls, so reaching a dead end must press it and carry on rather than
+ * park in a field and hand the wheel back to somebody who is not there.
+ *
+ * Same fixture, same latched edge, same direction. The only difference is the hook.
+ */
+{
+  const runway = Math.min(260, path.total);
+  const s0 = dir > 0 ? path.total - runway : runway;
+  const start = xzAt(edge, path, s0);
+  const heading = dir > 0 ? headingAt(path, s0) : headingAt(path, s0) + Math.PI;
+  const car = new Vehicle({ tier: 'sports', terrain: terr, preset: 'cruise' });
+  car.placeAt(start.x, start.z, heading);
+
+  let recovered = 0;
+  const said = [];
+  const auto = new Autopilot({
+    cruise: 22,
+    say: (t) => said.push(t),
+    /* main.js's backToRoad(), reduced to what this test needs to see: put the car on the
+     * nearest centreline pointing whichever way has more road left. The real one also resets
+     * the chase camera and the streak's grace; neither is visible from here. */
+    recover: () => {
+      recovered++;
+      const q = terr.roads.query(car.x, car.z);
+      if (!isFinite(q.d)) return;
+      let h = Math.atan2(q.tx, q.tz);
+      // point back down the road rather than off the end of it
+      const fwd = Math.sin(car.yaw) * q.tx + Math.cos(car.yaw) * q.tz;
+      if (fwd > 0) h += Math.PI;
+      car.placeAt(q.qx, q.qz, h);
+    },
+  });
+  auto.on = true;
+  auto._field = field;
+  auto._edge = edge;
+  auto._key = edge.key;
+  auto._dir = dir;
+
+  let stillOn = true;
+  let maxOff = 0;
+  let metresAfter = 0;
+  let lastX = car.x;
+  let lastZ = car.z;
+  const SECS = 60;
+  for (let i = 0; i < SECS / PHYSICS_DT; i++) {
+    if (!auto.on) {
+      stillOn = false;
+      break;
+    }
+    const cmd = auto.update(car, NOTHING, PHYSICS_DT) || NOTHING;
+    car._step(PHYSICS_DT, cmd);
+    const q = car.terrain.roads.query(car.x, car.z);
+    const d = isFinite(q.d) ? q.d : 999;
+    maxOff = Math.max(maxOff, d);
+    if (recovered > 0) metresAfter += Math.hypot(car.x - lastX, car.z - lastZ);
+    lastX = car.x;
+    lastZ = car.z;
+  }
+  console.log(`  pressed R ${recovered} time(s); drove ${metresAfter.toFixed(0)} m afterwards; worst distance from a centreline ${maxOff.toFixed(1)} m; still driving itself: ${stillOn}`);
+  console.log(`  said: ${said.map((t) => `"${t}"`).join(', ') || '(nothing)'}`);
+  check('dead end + R wired: it presses R instead of parking', recovered >= 1, `${recovered} press(es)`, '>= 1');
+  check('dead end + R wired: it is still driving itself a minute later', stillOn, String(stillOn), 'true');
+  check('dead end + R wired: and it carried on down the road, not into a field', metresAfter > 100, `${metresAfter.toFixed(0)} m after the reset`, '> 100 m');
+  check('dead end + R wired: never leaves the carriageway doing it', maxOff < 12, `${maxOff.toFixed(1)} m`, '< 12 m');
+  check('dead end + R wired: and it says so', said.some((t) => /ends here/.test(t)), said.join(' | ') || '(nothing)', 'mentions the road ending');
+}
+
+
 /* ── check 2: wedged somewhere, must reset to the road within a bounded time ── */
 {
   // Off the network entirely: scan a grid across the SAME window this bench already built and

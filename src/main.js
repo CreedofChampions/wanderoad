@@ -345,6 +345,12 @@ async function boot() {
    * re-deriving the road network — the pure lookups in world/props.js cost tens of
    * milliseconds. props.update() below is called with the car's own x/z every frame, so it
    * already knows when the car is near a can; drainCollectedFuel() just asks what it found. */
+  /* The money, built before anything that spends it. Coins are the whole economy now — a
+   * streak mints them, a dealership takes them for a car, a pump takes them for a bigger tank
+   * — so the wallet has to exist before the fuel system and the garage, both of which read it.
+   * See src/game/wallet.js's own header. */
+  const wallet = new Wallet();
+
   /* The off-road dust cue. Owns one InstancedMesh and nothing else; see src/game/spray.js. */
   const spray = new Spray({ scene });
   const fuel = new Fuel({
@@ -370,12 +376,22 @@ async function boot() {
      * does not transfer from car to car. Reason to restart capacity". CAR.id is the fleet id
      * chosen in the garage, so swapping cars really does hand you a small tank again. */
     carId: CAR.id,
+    /* With a wallet in hand, tank capacity is BOUGHT rather than collected — see
+     * game/fuel.js's capacityLevel. */
+    wallet,
   });
   /* "Am I on a forecourt?" — the one question streak.js asks about petrol stations, answered
    * from the scan the fuel system already runs (see Fuel's `nearest`) rather than by probing
    * the world a second time every frame. Operator: "massive forgiveness area around gas
    * station". See STATION_FORGIVE_R in game/streak.js for the radius and the reasoning. */
   const nearPump = () => !!fuel.nearest && fuel.nearest.dist <= STATION_FORGIVE_R;
+  /* Standing at a DEALERSHIP — close enough to do business, which is the forecourt itself and
+   * not the whole forgiveness radius. `fuel.nearest` is the station scan that already runs
+   * twice a second (see game/fuel.js's findStation), and a dealership IS a station with the
+   * `deal` flag (world/props.js), so this costs nothing new. */
+  const DEAL_RADIUS = 34;
+  let dealerWas = false; // latch for the arrival line — see the frame loop
+  const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
   const fuelGauge = new FuelGauge(hud.root);
 
   /* Coins along the road, gems on open water — src/render/loot.js. `wallet`
@@ -383,7 +399,6 @@ async function boot() {
    * BOAT_UNLOCK_COINS; `lootCounter` (src/ui/lootCounter.js) is fuelGauge's own pattern,
    * docked in the one HUD corner not already claimed — see that file's own comment. */
   const loot = new Loot({ seed: SEED, scene });
-  const wallet = new Wallet();
   const lootCounter = new LootCounter(hud.root);
 
   /* Boat mode — the last unlock, src/game/boat.js. `terrain` is a zero-arg forward reference
@@ -405,7 +420,7 @@ async function boot() {
   async function swapCar(key) {
     if (!CARS[key] || key === carKeyLive) return;
     const spec = FLEET_BY_ID[key];
-    if (spec && !isUnlocked(spec, Math.max(bestStreak(), streak.state.best))) {
+    if (spec && !isUnlocked(spec, Math.max(bestStreak(), streak.state.best), wallet)) {
       hud.say(`${spec.label} unlocks at ${(spec.unlockAt / 1000).toFixed(1)} km`, 3);
       return;
     }
@@ -439,6 +454,13 @@ async function boot() {
     isAuto: () => auto.on,
     onCar: swapCar,
     bestStreak: () => Math.max(bestStreak(), streak.state.best),
+    /* The shop. The garage panel is where you pick a car you own; at a dealership it is also
+     * where you buy one, and where a bigger tank is fitted — see ui/menu.js's `tank` group and
+     * game/wallet.js's buyCar/buyTank. */
+    wallet: () => wallet,
+    fuel: () => fuel,
+    canBuy: () => atDealer(),
+    say: (t, secs) => hud.say(t, secs),
     onCheat: (on) => {
       setCheat(on);
       hud.say(on ? 'every car unlocked' : 'unlocks restored', 2.4);
@@ -729,7 +751,7 @@ async function boot() {
       /* Cycle to the next car you can actually drive. Stepping onto a locked one and being
        * told no is not a control, it is a wall you have to press through. */
       const best = Math.max(bestStreak(), streak.state.best);
-      const open = FLEET.filter((c) => isUnlocked(c, best)).map((c) => c.id);
+      const open = FLEET.filter((c) => isUnlocked(c, best, wallet)).map((c) => c.id);
       if (open.length < 2) {
         hud.say('one car so far — drive further to unlock more', 2.6);
       } else {
@@ -810,6 +832,23 @@ async function boot() {
      * game/streak.js's update() for why a chauffeured kilometre must not count AND must not
      * cost you the eighty you already have. */
     streak.update(dt, car, surf, { paused: auto.on, forgive: nearPump() });
+    /* THE STREAK IS THE INCOME. Operator: "Streaks = coins." One coin per 250 m of unbroken
+     * run — mintStreak() is safe to call every frame and remembers what it has already paid
+     * for, and it follows the distance back DOWN when a streak breaks, so a lost run is never
+     * charged for and the next one starts paying from its own first metre. Verse pickups still
+     * work; they are pocket change beside this, which is the right way round for a game about
+     * driving. */
+    const minted = wallet.mintStreak(streak.state.distance);
+    if (minted > 0) audio.pickup();
+
+    /* Arriving at a dealership says so, once. A shop you can walk into and not notice is not a
+     * shop — and ESC is the only way in, which is not something a player would guess. Latched
+     * on the transition rather than the state so it cannot repeat while you are parked. */
+    const dealerNow = atDealer();
+    if (dealerNow !== dealerWas) {
+      dealerWas = dealerNow;
+      if (dealerNow) hud.say(`dealership — ESC to spend your ${wallet.coins} coins`, 3.6);
+    }
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
      * this frame's real speed and slip, and after the collision resolve so a car that has just
@@ -971,6 +1010,11 @@ async function boot() {
   // for the console, and for tools/shoot.mjs
   window.THREE = THREE_NS; // debug/telemetry only — the game never reads it
   window.WANDEROAD = {
+    /* The seed this world was grown from. Exposed because several diagnostics have to ask the
+     * PURE world functions about the same plane the page is showing — the renderer only knows
+     * the tiles it has streamed, so its answer to "is there a dealership near me" is about
+     * loading, not about the world. See tools/diag-coins.mjs. */
+    seed: SEED,
     renderer,
     scene,
     camera,
@@ -987,6 +1031,10 @@ async function boot() {
      * playing, and how loud" can only be answered honestly by reading the gain node that is
      * actually in the graph, not by trusting a flag. See tools/diag-radio.mjs. */
     audio,
+    /* The money, for the same reason `audio` is here: "did that streak pay" can only be
+     * answered by reading the wallet that the game is actually spending from. See
+     * tools/diag-coins.mjs. */
+    wallet,
     solids,
     // `flora` is here so a test can reconcile the colliders against the trees the renderer
     // ACTUALLY DREW rather than against a second opinion about what should be there.

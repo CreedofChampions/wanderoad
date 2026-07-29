@@ -27,6 +27,7 @@ export const FLEET = [
     label: 'Estate',
     blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
     unlockAt: 0,
+    price: 0, // the car you start in
     tier: 'gt',
     length: 4.6,
     feel: { comfortG: 7.0, assist: 'cruise', rearGrip: 1.06, buildRate: 2.6, brakeMul: 1.15 },
@@ -37,6 +38,7 @@ export const FLEET = [
     label: 'Hatch',
     blurb: 'Light and eager. Turns in more sharply than it has any right to.',
     unlockAt: 1000,
+    price: 20,
     tier: 'gt',
     length: 4.0,
     feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
@@ -47,6 +49,7 @@ export const FLEET = [
     label: 'Coupe',
     blurb: 'The road car. Quick enough to be interesting, calm enough to cruise.',
     unlockAt: 3000,
+    price: 45,
     tier: 'sports',
     length: 4.3,
     feel: { comfortG: 9.2, assist: 'sport', rearGrip: 1.0, buildRate: 2.8, brakeMul: 1.0 },
@@ -57,6 +60,7 @@ export const FLEET = [
     label: 'Sedan',
     blurb: 'Long wheelbase, loose rear. It will hold a slide if you ask nicely.',
     unlockAt: 8000,
+    price: 90,
     tier: 'sports',
     length: 4.5,
     feel: { comfortG: 10.4, assist: 'sport', rearGrip: 0.9, buildRate: 3.2, brakeMul: 1.0 },
@@ -67,6 +71,7 @@ export const FLEET = [
     label: 'Rally',
     blurb: 'Made for the gravel. The only one that is genuinely happy off the tarmac.',
     unlockAt: 20000,
+    price: 180,
     tier: 'sports',
     length: 4.2,
     feel: { comfortG: 11.6, assist: 'sport', rearGrip: 0.94, buildRate: 3.6, brakeMul: 1.05, offRoad: 1.35 },
@@ -77,6 +82,7 @@ export const FLEET = [
     label: 'Taxi',
     blurb: 'Somebody has to. Slow, indestructible, oddly relaxing.',
     unlockAt: 45000,
+    price: 320,
     tier: 'gt',
     length: 4.5,
     feel: { comfortG: 7.6, assist: 'cruise', rearGrip: 1.04, buildRate: 2.4, brakeMul: 1.2 },
@@ -87,6 +93,7 @@ export const FLEET = [
     label: 'Patrol',
     blurb: 'All-wheel drive and the strongest brakes in the fleet. The long-distance one.',
     unlockAt: 100000,
+    price: 600,
     tier: 'hyper',
     length: 4.6,
     feel: { comfortG: 9.8, assist: 'sport', rearGrip: 1.02, buildRate: 2.8, brakeMul: 1.3 },
@@ -125,8 +132,27 @@ export function bestStreak() {
   }
 }
 
-export function isUnlocked(car, best = bestStreak()) {
-  return cheatOn() || best >= car.unlockAt;
+/* ── CARS ARE BOUGHT, NOT PASSED ──────────────────────────────────────────────
+ * Operator: "add dealerships where you can buy cars with coins ... New cars = coins."
+ *
+ * `unlockAt` is kept — it still places each car's badge along the unlock bar, and it is still
+ * what `nextUnlock` reports, so the bar continues to answer "what is coming next". But it no
+ * longer GRANTS anything: a car is yours when you have paid for it at a dealership.
+ *
+ * The wallet is passed in rather than imported, for the same reason `best` is: this module is
+ * pure and testable, and a hard dependency on localStorage-backed state would end that. A
+ * caller with no wallet to hand gets the old distance rule, which is what keeps every existing
+ * tool and fixture in this repo working unchanged.
+ */
+export function isUnlocked(car, best = bestStreak(), wallet = null) {
+  if (cheatOn()) return true;
+  if (wallet) return wallet.owns(car.id, FLEET[0].id);
+  return best >= car.unlockAt;
+}
+
+/** What this car costs at a dealership, in coins. */
+export function priceOf(car) {
+  return Math.max(0, +car.price || 0);
 }
 
 /** The next car you have not yet earned, and how far away it is. */

@@ -89,6 +89,9 @@ const ZETA = 1.15;
 /** The most lateral acceleration the CORRECTION may ask for, m/s². The car has 8.4 available;
  *  spending half of it to fix a wandering line would be felt as a swerve. */
 const LAT_BUDGET = 4.2;
+/** Seconds the dead-end recover is held off after firing — long enough for the car to be
+ *  moving again down the road it was just turned onto. */
+const DEAD_END_RECOVER_COOLDOWN = 3.0;
 /** Lateral acceleration the autopilot PLANS corners at, m/s². 0.3 g — brisk, not sporty. */
 const CORNER_G = 2.9;
 /** Virtual-wheel units per second. Full lock in a third of a second is quick for a road car
@@ -334,6 +337,9 @@ export class Autopilot {
     this._key = ''; // ...by name, because the field is rebuilt as you drive
     this._dir = 1; // which way along that edge we are driving, with hysteresis
     this._deadEnd = false; // does the latched chain end in a confirmed dead end this frame?
+    /** Seconds left before the dead-end R press may fire again. See the dead-end block in
+     *  update(): without it the reset would re-fire every frame the car is still slow. */
+    this._deadFired = 0;
     this._deadAhead = Infinity; // metres to it, if so — see _horizon()
     /* The road ahead, as up to three edges chained end to end. Preallocated and refilled in
      * place: this runs inside the physics loop and the vehicle next door counts its garbage. */
@@ -495,6 +501,10 @@ export class Autopilot {
      * anywhere, on the network or off it, so it cannot live inside a branch that only runs for
      * one of those. See STUCK_SPEED/STUCK_TIMEOUT above for why the threshold is safe against
      * ordinary driving and why the timeout beats the lost-road brake to the punch. */
+    // Decay the dead-end R cooldown wherever the clock is already being read, so it cannot
+    // drift out of step with the rest of update()'s timers.
+    if (this._deadFired > 0) this._deadFired = Math.max(0, this._deadFired - step);
+
     if (Math.abs(car.speed) < STUCK_SPEED) {
       this._stuckFor += step;
       if (this._stuckFor > STUCK_TIMEOUT) {
@@ -613,13 +623,35 @@ export class Autopilot {
       const remain = Math.max(0, this._deadAhead - DEAD_END_MARGIN);
       target = Math.min(target, Math.sqrt(2 * DEAD_END_DECEL * remain));
       if (this._deadAhead < DEAD_END_MARGIN + 2 && v < 1) {
-        // Stopped, on the tarmac, short of the last vertex. Hand back the same way running out
-        // of road already does when the reactive check catches it — a calm toast via
-        // `lastReason`, no fail state, no restart — except this time it never left the road to
-        // get there.
+        /* Stopped, on the tarmac, short of the last vertex. IT PRESSES R AND CARRIES ON.
+         *
+         * Operator: "must click r when end of road on auto drive mode". This used to switch
+         * itself off here and hand the wheel back with a toast, which is a reasonable thing for
+         * a chauffeur to do and a terrible thing to come back to: you left the car driving
+         * itself and returned to find it parked in a field at the end of a lane. R is what a
+         * player presses in exactly this situation, so this presses it — the same recover()
+         * the R key and the water rescue call (see the constructor's own note), which puts the
+         * car on the nearest centreline pointing down whichever direction has more road left.
+         * At a dead end that is back the way it came, which is precisely the right answer.
+         *
+         * Latches are cleared so the horizon is re-planned from the new pose rather than
+         * against the chain that just ended, and _deadFired stops this firing every frame while
+         * the car is still slow after the reset. Without a recover() to call it still hands
+         * back, exactly as before — that is the honest fallback, not a silent no-op. */
         this._steer += clamp(-this._steer, -SLEW * step, SLEW * step);
-        this.off('the road ends here');
-        return { steer: this._steer, throttle: 0, brake: 0.4, handbrake: 0, analogue: true, auto: true };
+        if (this.recover && this._deadFired <= 0) {
+          this._deadFired = DEAD_END_RECOVER_COOLDOWN;
+          this.recover();
+          this._chain = null;
+          this._deadEnd = false;
+          this._deadAhead = Infinity;
+          if (this.say) this.say('the road ends here — turning around', 2.6);
+          return { steer: 0, throttle: 0, brake: 0, handbrake: 0, analogue: true, auto: true };
+        }
+        if (!this.recover) {
+          this.off('the road ends here');
+          return { steer: this._steer, throttle: 0, brake: 0.4, handbrake: 0, analogue: true, auto: true };
+        }
       }
     }
 

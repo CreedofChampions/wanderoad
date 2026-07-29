@@ -217,6 +217,9 @@ function mercyScarcityMul(distM) {
  * `stats.cansCollected` rather than separate tracked state, so there is exactly one number
  * this rule can ever disagree with itself about. */
 export const CAPACITY_UPGRADE_EVERY = 5;
+/** Coins for the first capacity upgrade, and how much dearer each one after it is. */
+export const TANK_PRICE_BASE = 15;
+export const TANK_PRICE_STEP = 10;
 export const CAPACITY_UPGRADE_STEP = 0.10;
 const CAPACITY_UPGRADE_MAX = 0.50;
 export const CAPACITY_UPGRADE_LEVELS = Math.round(CAPACITY_UPGRADE_MAX / CAPACITY_UPGRADE_STEP);
@@ -272,6 +275,8 @@ export class Fuel {
     incomingShares = null,
     say = null,
     resetToSpawn = null,
+    /** game/wallet.js's Wallet, or null. With one, capacity is BOUGHT (see capacityLevel). */
+    wallet = null,
     /* 200% more fuel to start, on instruction ("Gas now runs out too quick -- 200% more total
      * fuel to start please"). 0.72 of a tank became 3x that, which is more than one tank holds,
      * so the surplus is carried as a bigger STARTING TANK rather than a fill above full: see
@@ -284,6 +289,7 @@ export class Fuel {
     this.collectCans = collectCans;
     this.incomingShares = incomingShares;
     this.resetToSpawn = resetToSpawn;
+    this.wallet = wallet;
     this.say = say || (() => {});
     /* Car identity FIRST: capacity is a getter off this car's own can count, and the starting
      * tank is a fraction OF that capacity, so both must exist before seconds is set. */
@@ -366,24 +372,50 @@ export class Fuel {
     return TANK_SECONDS * START_CAPACITY_MUL * (1 + this.capacityLevel * CAPACITY_UPGRADE_STEP);
   }
 
+  /* What one more capacity upgrade costs this car, in coins. Rises with the level so the
+   * later ones are a real decision rather than a formality — 15, 25, 35, 45, 55. */
+  get tankPrice() {
+    return TANK_PRICE_BASE + this.capacityLevel * TANK_PRICE_STEP;
+  }
+
+  /** Can this car take another upgrade at all? */
+  get tankUpgradable() {
+    return this.capacityLevel < CAPACITY_UPGRADE_LEVELS;
+  }
+
   /* How many upgrades THIS CAR has earned. Operator: "each car unlock = capacity does not
    * transfer from car to car. Reason to restart capacity". So the cans are counted per car and
    * persisted per car — swapping to a freshly unlocked car really does hand you a small tank
    * again, which is the point: the new car is faster and thirstier and has to earn its range,
    * so unlocking one is a decision rather than a strict upgrade. */
   get capacityLevel() {
+    /* BOUGHT, NOT EARNED BY PICKUPS. Operator: "Gas bonus = buy it for coins."
+     *
+     * The cans still refuel you — that is what they are for — but the tank itself is now a
+     * purchase at a dealership, so the one currency buys everything. `wallet` is optional and
+     * the can-count rule is the fallback, which is what keeps every existing bench and fixture
+     * in this repo working without a wallet in hand. */
+    if (this.wallet) return Math.min(this.wallet.tankLevel(this._carId), CAPACITY_UPGRADE_LEVELS);
     return Math.min(Math.floor(this.carCans / CAPACITY_UPGRADE_EVERY), CAPACITY_UPGRADE_LEVELS);
   }
 
   /** 0..1 across this car's own upgrade ladder — what the HUD meter draws. */
   get capacityProgress() {
     if (this.capacityLevel >= CAPACITY_UPGRADE_LEVELS) return 1;
+    /* With a wallet the meter shows how close the money is, not how close the cans are —
+     * the pips are a shop window now, not a collection. */
+    if (this.wallet) return clamp01(this.wallet.coins / Math.max(1, this.tankPrice));
     return (this.carCans % CAPACITY_UPGRADE_EVERY) / CAPACITY_UPGRADE_EVERY;
   }
 
   /** Cans this car has collected, ever. Per car, persisted. */
   get carCans() {
     return this._carCans;
+  }
+
+  /** The car this tank belongs to — the id the wallet keys its purchases on. */
+  get carId() {
+    return this._carId;
   }
 
   _capKey() {

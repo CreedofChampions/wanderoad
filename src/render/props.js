@@ -130,6 +130,9 @@ const THATCH = LC('thatch');
 const MOSS = LC('moss');
 const LICHEN = LC('lichen');
 const GLOW = LC('windowGlow');
+/* The dealership's own fascia and pennant colour, so a showroom is not mistaken for a pump at
+ * a distance. Deliberately from the same painted palette as everything else here. */
+
 const GLASSC = LC('glass');
 const CHROME = LC('chrome');
 const TYRE = LC('tyre');
@@ -142,6 +145,10 @@ const AMBER = LC('paintB');
 const BLUE = LC('paintC');
 const CREAM = LC('paintD');
 const TEAL = LC('paintE');
+/* The dealership's own fascia and pennant colour — TEAL against the pumps' VERMILION, so a
+ * showroom is not mistaken for a petrol station at a distance. Same painted palette as every
+ * other prop in this file; nothing new is loaded for it. */
+const SIGN_DEAL = TEAL;
 const INK = LC('paintF');
 const GRAVEL = LC('gravelLit');
 const GRAVEL_D = LC('gravelShade');
@@ -1126,7 +1133,7 @@ const BUILDERS = {
  * level with the ROAD (a real one is), so on anything but dead-flat ground one edge would
  * otherwise show daylight underneath.
  */
-export function buildStation(M, r, skirt) {
+export function buildStation(M, r, skirt, deal = false) {
   // Single source of truth in src/world/props.js — the access spur, the collision hitboxes
   // and the station's own placement code all read the same two numbers.
   const AW = STATION_APRON_HALF_WIDTH; // apron half-width, along the road
@@ -1147,7 +1154,31 @@ export function buildStation(M, r, skirt) {
     pcyl(M, [sx * CW, 0, sz * CD + 1.0], [sx * CW, CH, sz * CD + 1.0], 0.16, 0.15, 8, CREAM, MAT.MATTE, false, false);
   }
   pbox(M, 0, CH + 0.22, 1.0, CW + 0.9, 0.22, CD + 0.9, 0, CREAM, MAT.MATTE);
-  pbox(M, 0, CH + 0.5, 1.0, CW + 0.95, 0.14, CD + 0.95, 0, VERMILION, MAT.MATTE);
+  pbox(M, 0, CH + 0.5, 1.0, CW + 0.95, 0.14, CD + 0.95, 0, deal ? SIGN_DEAL : VERMILION, MAT.MATTE);
+
+  /* ── A DEALERSHIP READS AS A DEALERSHIP ──────────────────────────────────────
+   * Operator: "add dealerships where you can buy cars with coins". Same apron, same canopy,
+   * same spur — a dealership is a station with the `deal` flag (see world/props.js) so all of
+   * that placement work is shared. What has to differ is what you SEE from the road, or the
+   * two are the same building and the player cannot tell which one sells cars.
+   *
+   * So: a glass showroom box under the canopy with a car-shaped silhouette inside it, and the
+   * fascia in a different colour. Drawn in code like every other prop here; no new material,
+   * no texture, nothing downloaded. */
+  if (deal) {
+    // the showroom: a glazed box, lit, so it glows at dusk from a long way off
+    pbox(M, 0, 1.55, 1.0, CW - 0.5, 1.55, CD - 0.4, 0, GLASSC, MAT.GLASS);
+    pbox(M, 0, 0.06, 1.0, CW - 0.45, 0.06, CD - 0.35, 0, CREAM, MAT.MATTE);
+    // a car on the stand — body, roof, four wheels. Small and rough on purpose: it is a
+    // silhouette behind glass, not a model anyone gets close to.
+    pbox(M, 0, 0.55, 1.0, 1.7, 0.32, 0.78, 0, VERMILION, MAT.MATTE);
+    pbox(M, -0.1, 0.95, 1.0, 0.95, 0.28, 0.68, 0, VERMILION, MAT.MATTE);
+    for (const wx of [-1.15, 1.15]) for (const wz of [-0.62, 0.62]) {
+      pcyl(M, [wx, 0.28, 1.0 + wz], [wx, 0.28, 1.0 + wz + 0.14], 0.26, 0.26, 8, TYRE, MAT.MATTE, false, false);
+    }
+    // and a price-flag pennant on the corner post, which is what a real forecourt would do
+    pbox(M, CW - 0.2, CH - 0.9, CD + 1.0, 0.9, 0.42, 0.03, 0, SIGN_DEAL, MAT.MATTE);
+  }
   /* THE BEACON. The operator asked for "a minecraft becon style light people can drive to,
    * seen from distance above gas station" -- a station you can only find by driving past it is
    * not findable, and the fuel gauge's arrow tells you the direction but not that you have
@@ -1909,7 +1940,7 @@ export class Props {
       const pad = stationPad(s, height);
       const y = pad.y;
       const L = PB();
-      buildStation(L, rng(hash3i(Math.round(s.x), Math.round(s.z), 0x5747, this.seed)), y - pad.lo + 0.4);
+      buildStation(L, rng(hash3i(Math.round(s.x), Math.round(s.z), 0x5747, this.seed)), y - pad.lo + 0.4, !!s.deal);
       blit(M, L, s.x, y, s.z, s.yaw, 1);
       s.padY = y;
       s.padLo = pad.lo;

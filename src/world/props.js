@@ -54,6 +54,9 @@ const SLOT_P = [0.17, 0.24];
 /** Salts. One per decision stream, so a prop's kind and its offset are independent draws. */
 const SALT_PROP = 0x50524f50; // 'PROP'
 const SALT_ACCEPT = 0x504f4931; // 'POI1'
+/** Share of stations that are car dealerships rather than pumps — see the `deal` flag. */
+export const DEAL_SHARE = 0.34;
+
 const SALT_STATION = 0x46554c31; // 'FUL1'
 
 /** uint32 -> [0,1). Same constant roads.js uses. */
@@ -810,6 +813,20 @@ function stationForEdge(e, seed, stats = null) {
 
   return {
     key: `st:${e.key}`,
+    /* ── DEALERSHIP OR PETROL STATION ─────────────────────────────────────────
+     * Operator: "add dealerships where you can buy cars with coins".
+     *
+     * A dealership needs exactly what a station needs — a graded pad beside the road, an access
+     * spur onto it, flat ground, a hitbox and something visible from a distance — and all of
+     * that already exists here and has been measured (diag-stations, bench-props,
+     * diag-junction-cover). So a dealership IS a station, with a flag: a deterministic share of
+     * them sell cars instead of fuel. Building a second, parallel placement system would have
+     * meant a second set of the same bugs.
+     *
+     * DEAL_SHARE of them, off the station's own hash so it is a pure function of the edge and
+     * every client agrees. Not a half: petrol is the thing you NEED and a dealership is the
+     * thing you save up for, so pumps stay the common case. */
+    deal: rnd() < DEAL_SHARE,
     x,
     z,
     // The forecourt is GRADED, exactly like the road it serves: it takes the road's own
