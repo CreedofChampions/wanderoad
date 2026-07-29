@@ -200,34 +200,34 @@ every node-side check that was run against it.
       posts are in the world, at the right place, at a size that reads at 120 m. Whether it is
       pretty is a screenshot question.
 
-- [ ] **BLOCKING-ish — downhill bounce: fix found and REVERTED, cause of the revert recorded.**
-      The bounce itself is understood and was measurably fixed (14% wavy descent at 92 km/h:
-      max visual gap **26 cm -> 4 cm**). What defeated it is a WATER interaction, found only by
-      running the full suite at HEAD in a clean worktree:
+- [x] **Downhill bounce — FIXED and verified in the live game.** Measured on the real alpine
+      descent at https://crumbtown.org/cozydriver/, auto-drive, sampled every 10 s over 251 m of
+      descent at 38-46 km/h: **airborne 4 of 12 samples (33%) -> 0 of 12 (0%)**. The synthetic
+      14% wavy descent at 93 km/h reads **0% of frames airborne, 0 air/land cycles, max visual
+      gap 0 cm** (was 58.9%, 158 cycles, 26 cm).
 
-      Any change that makes the car track receding ground harder ALSO makes it track a LAKE BED
-      harder. `bench-boat`'s barrier check went 0.97 m -> 1.12 m deep against a 1.0 m bar.
-      Three separate gates were tried and each failed for its own reason, isolated one at a
-      time:
-      1. **Widening the grounded band to the droop range** — the spring then chased the bed.
-      2. **A dry/wet gate reading the surface's biome weights** — bench-boat's fixture surface
-         does not supply that array, so the gate silently read "dry". This is the
-         "a stub probe does not fail, it lies" trap already recorded in this file.
-      3. **An airtime gate (suction only for hops under 0.35 s)** — a sinking car repeatedly
-         re-grounds, which RESETS the airtime, so the gate never closes.
+      **The fix that worked was the smallest one, and it was not the suction.** `AIR.extraDelay`
+      exists so a deliberate jump off a crest gets its moment of air before the settling assist
+      pulls the car down. A descent pogo is not a jump — it is a train of hops a few centimetres
+      high, each SHORTER than the delay, so the assist never armed once and the behaviour it was
+      written for never happened. Inside 0.2 m of the ground there is no jump to protect, so the
+      delay is skipped and the assist ramps from the first frame. Nothing new was added: the
+      ceiling is still `AIR.extraMax`, the ramp still `AIR.extraRamp`, and hardcore still turns
+      it all off through `A.airborne`.
 
-      **What would actually work:** ask the same question the boat system asks —
-      `waterDepth()` in `src/game/rescue.js`, which is water-aware and already used by
-      `boat.js` — and require the fixture/terrain to answer it, or pass the car an explicit
-      "this is water" flag from the same place the boat barrier gets it. That is a real piece
-      of plumbing across vehicle/rescue/boat, not a one-line gate, and it was not worth risking
-      a red build on competition day. Reverted to keep HEAD green and shippable.
-      alpine roads at speed. Stills look fine — it is temporal. Verify's alpine AUTODRIVE watch
-      saw none (35–38 km/h, 100% on carriageway), so it needs SPEED + descent: the ground falls
-      away faster than gravity + the extra-air-gravity assist can bring the car down, so it
-      cycles airborne/land. Candidate fix: a downforce/suction term while |vy| is small and the
-      ground is receding, inside SUSPENSION.travel. bench-car is the hard gate; vehicle.js was
-      heavily edited this round — rebase carefully.
+      **Why this succeeded where three gates failed.** The reverted attempt was a 3.2 g suction
+      toward whatever the probe called ground, and its problem was never the bounce — it was
+      that a lake bed is also ground, so the car got dragged into it (`bench-boat`'s barrier
+      0.97 m -> 1.12 m against a 1.0 m bar). The three gates tried against that each failed for
+      their own reason: widening the grounded band made the spring chase the bed; a biome-weight
+      dry/wet gate read "dry" because the boat fixture does not supply that array (the
+      "a stub probe does not fail, it lies" trap, recorded twice in this file now); and an
+      airtime gate never closed because a sinking car re-grounds and resets the airtime.
+      Removing a delay rather than adding a force sidesteps all of it — there is no new
+      downward force to leak into water at all. **bench-boat's barrier reads 0.25 m, unmoved.**
+
+      Gates: `npm test` fully green, `bench-car.mjs` all checks passed, `bench-boat.mjs` barrier
+      unmoved, live alpine autodrive 0% airborne.
 
 ### Playtest round 3 — from the operator's own screenshots, 27 July
 
