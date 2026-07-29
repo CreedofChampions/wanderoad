@@ -1752,6 +1752,23 @@ const _seg = { d: 0, t: 0, x: 0, z: 0 };
 
 /** Deepest fill or cutting a road is allowed to ask the land for, in metres. */
 const MAX_EARTHWORK = 18;
+/* THE SAME BUDGET, DOUBLED, BUT ONLY WHERE TWO ROADS ACTUALLY CROSS.
+ *
+ * Operator, with a repro: "terrain deformation issues around junctions: alpine seed 4189486",
+ * and before that a screenshot of roads stepping through each other.
+ *
+ * The clamp in levelAgainst caps a levelling target to the LAND plus/minus MAX_EARTHWORK, and
+ * that is right for open road: a lane crossing an arterial that runs 40 m lower in a valley
+ * must not be dragged the whole way down and left needing a 30 m embankment. But applied AT a
+ * crossing it produces the worse thing: the two roads simply do not meet, and the census in
+ * tools/diag-crosslevel.mjs showed exactly that — 27 of 926 crossings more than a metre out,
+ * the worst 24.33 m at (-2389,886) on seed 7, which on screen is a wall with tarmac on top.
+ *
+ * A 24 m wall across a road you are driving on is worse than a 24 m embankment beside it. So
+ * the budget doubles inside the capture radius, which is where a crossing actually is, and
+ * stays exactly as it was everywhere else. Doubling rather than removing: it has to remain
+ * bounded, or a crossing in a ravine asks the carve for an unbuildable tower. */
+const CROSS_EARTHWORK = MAX_EARTHWORK * 2;
 
 /**
  * One [w, 1-2w, w] pass over an elevation profile, repeated. Ends are clamped, not wrapped.
@@ -2275,11 +2292,18 @@ function canonicalProfile(e, tag, seed, land, waterAt) {
    * priority order or it is not; this is what makes it so. */
   const held = new Float32Array(work.y.length);
   levelAgainst(work, arts, arts.length, { record: held });
+  /* Where the ARTERIAL pass actually took hold, remember it — the final earthwork clamp below
+   * has to know the difference between "this lane wandered 20 m off the ground on its own" and
+   * "this lane was pulled 20 m to meet an arterial it crosses". Clamping both the same way was
+   * cutting the correction straight back off and leaving the step. */
+  const pulled = Float32Array.from(held);
   cacheSet(LVL1, k, Float32Array.from(work.y));
   // Each outranking lane at ITS OWN level-1 height. One hop, and no further: that bound is
   // the difference between an answer and the unbounded chain the old code had.
   for (const o of lanes) o.y.set(level1(o, tag, seed, land, waterAt));
-  levelAgainst(work, lanes, lanes.length, { respect: held });
+  const heldLanes = new Float32Array(work.y.length);
+  levelAgainst(work, lanes, lanes.length, { respect: held, record: heldLanes });
+  for (let i = 0; i < pulled.length; i++) if (heldLanes[i] > pulled[i]) pulled[i] = heldLanes[i];
 
   /* Floors last, and both of them. levelCrossings runs after profileEdge's earthwork clamp,
    * so a correction that meets a road in a valley can leave the lane far outside the 18 m
@@ -2290,9 +2314,15 @@ function canonicalProfile(e, tag, seed, land, waterAt) {
   const wl = raw.water;
   const ld = raw.land;
   for (let i = 0; i < y.length; i++) {
+    /* The budget is bigger exactly where a crossing was levelled, and eases back to the open-road
+     * figure over the same feather the correction itself used (`pulled` is the weight that pass
+     * recorded, so this cannot put a step anywhere the correction did not). Without it this loop
+     * was undoing the levelling it runs after: 12.91 m of step survived at (1448,-1952) between
+     * an arterial and a lane that had been correctly pulled onto it and then clamped back off. */
+    const budget = lerp(MAX_EARTHWORK, CROSS_EARTHWORK, clamp01(pulled[i]));
     const d = y[i] - ld[i];
-    if (d > MAX_EARTHWORK) y[i] = ld[i] + MAX_EARTHWORK;
-    else if (d < -MAX_EARTHWORK) y[i] = ld[i] - MAX_EARTHWORK;
+    if (d > budget) y[i] = ld[i] + budget;
+    else if (d < -budget) y[i] = ld[i] - budget;
     if (y[i] < wl[i]) y[i] = wl[i];
   }
   return cacheSet(LVL2, k, { y, water: wl });
@@ -2692,7 +2722,9 @@ function levelAgainst(lane, others, count, opts = null) {
        * afterwards matters: a clamp applied after the feather puts a step in the profile
        * between one sample and the next, which is a wall, not a road. */
       const ld = lane.land ? lane.land[k] : lane.y[k];
-      const tgt = clamp(bestY, ld - MAX_EARTHWORK, ld + MAX_EARTHWORK);
+      // CROSS_EARTHWORK, not MAX_EARTHWORK — see its own comment. This branch only runs within
+      // 18 m of another carriageway, i.e. only at a crossing.
+      const tgt = clamp(bestY, ld - CROSS_EARTHWORK, ld + CROSS_EARTHWORK);
       fix[k] = tgt - lane.y[k];
       weight[k] = w * allow;
     }
