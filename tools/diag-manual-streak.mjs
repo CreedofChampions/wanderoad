@@ -87,6 +87,33 @@ const fieldFor = (x, z) => new Terrain(SEED, x - 420, z - 420, x + 420, z + 420)
  *
  * So the spiral now WALKS until it finds tarmac instead of pretending the first point had
  * some. Same five distinct roads, none of them invented. */
+/** Does the carriageway under `q` carry on for `metres`, or does it stop? Walks the centreline
+ *  in 20 m steps; a terminus shows up as a query point that stops advancing. */
+function roadRunsOn(q0, metres) {
+  let x = q0.qx,
+    z = q0.qz,
+    tx = q0.tx,
+    tz = q0.tz;
+  for (let d = 0; d < metres; d += 20) {
+    const nx = x + tx * 20,
+      nz = z + tz * 20;
+    const q = fieldFor(nx, nz).roads.query(nx, nz);
+    if (!isFinite(q.d) || q.d > q.width * 0.5) return false;
+    if (Math.hypot(q.qx - x, q.qz - z) < 4) return false; // the query froze: a terminus
+    // keep the same sense of direction along the road
+    if (q.tx * tx + q.tz * tz < 0) {
+      tx = -q.tx;
+      tz = -q.tz;
+    } else {
+      tx = q.tx;
+      tz = q.tz;
+    }
+    x = q.qx;
+    z = q.qz;
+  }
+  return true;
+}
+
 function putOnRoad(car, r) {
   for (let i = 0; i < 48; i++) {
     const ang = r * 2.4 + i * 0.37;
@@ -96,6 +123,14 @@ function putOnRoad(car, r) {
     const terr = fieldFor(x, z);
     const q = terr.roads.query(x, z);
     if (!isFinite(q.d)) continue;
+    /* AND THE ROAD HAS TO GO SOMEWHERE. Same lesson as the walk above, one step further on: a
+     * start is only a fair test of the driver if there is road left to drive. This seed has a
+     * signed arterial terminus at (773,-909) — two carriageways arrive and nothing continues —
+     * and a spiral start 250 m short of it spent seventeen seconds driving beautifully and the
+     * eighteenth arriving at the end of the world, which scored zero and said nothing at all
+     * about the keyboard. Walking the centreline forward first costs a few queries and makes
+     * every run a run the driver can actually be judged on. */
+    if (!roadRunsOn(q, 800)) continue;
     const field = fieldFor(q.qx, q.qz); // the 840 m field main.js actually drives in
     car.terrain = field;
     car.placeAt(q.qx, q.qz, Math.atan2(q.tx, q.tz));
@@ -153,6 +188,27 @@ function decide(car, keys, st) {
     keys.S = false;
     return { d: 999, want: 0 };
   }
+  /* A HUMAN DOES NOT SWAP ROADS BECAUSE THE MAP DID.
+   *
+   * `roads.query` answers "nearest centreline", and at a node where two edges leave within a
+   * few degrees of each other (measured: a third of all node departures in a 12 km box are
+   * within 26 deg, and this seed has a pair 5.4 deg apart at (773,-909)) the nearest one can
+   * flip from one carriageway to its neighbour between two frames. The old driver obeyed that
+   * instantly and steered 13 m sideways onto the other road, losing a 210 m streak in the last
+   * second of the run — which says nothing about the keyboard and everything about the query.
+   *
+   * A person keeps the tarmac they are on. So does this: if the target centreline jumps more
+   * than half a carriageway in one decision, hold the previous line for a moment and let the
+   * lateral term bring it back rather than lunging at the new one. */
+  if (st.lastQ) {
+    const jump = Math.hypot(q.qx - st.lastQ.qx, q.qz - st.lastQ.qz);
+    if (jump > q.width && st.holdFor > 0) {
+      st.holdFor -= st.step;
+      return { d: q.d, want: 0, held: true };
+    }
+    if (jump > q.width) st.holdFor = 0.4;
+  }
+  st.lastQ = { qx: q.qx, qz: q.qz };
   let tx = q.tx,
     tz = q.tz;
   const fx = Math.sin(car.yaw),
@@ -165,12 +221,23 @@ function decide(car, keys, st) {
   let head = Math.atan2(tx, tz) - car.yaw;
   while (head > Math.PI) head -= Math.PI * 2;
   while (head < -Math.PI) head += Math.PI * 2;
-  const want = -lateral * 0.3 + head * 2.4;
-  keys.A = want > 0.16;
-  keys.D = want < -0.16;
+  /* Lateral gain 0.3 -> 0.55 and the deadband 0.16 -> 0.10. Bang-bang steering only ever
+   * applies full lock or none, so a small deadband and a keen lateral term are what stop it
+   * drifting a metre at a time until the correction it finally makes is a swerve. Measured on
+   * the same five runs: worst-run off-road distance 33.2 m -> 13.4 m -> 0.9 m. */
+  const want = -lateral * 0.55 + head * 2.4;
+  keys.A = want > 0.1;
+  keys.D = want < -0.1;
   const cap = Math.abs(lateral) > 1.6 ? 36 : 45;
   keys.W = kph < cap;
-  keys.S = kph > cap + 15;
+  /* +5, not +15. This hand-driver is bang-bang: it holds W below its cap and only touches the
+   * brake above cap + slack, and it relied on engine braking to cover the band in between.
+   * Engine braking is now a fraction of each car's own peak torque rather than a flat 95 N.m
+   * (see car/vehicle.js), so a smaller engine coasts further, and the driver sat ABOVE its own
+   * cap for whole corners — measured at a 48.7 km/h mean against a 45 km/h cap, which is how
+   * it ran wide and binned a 210 m streak. Narrowing the slack makes it drive to the speed it
+   * already says it wants. The bar it is measured against is unchanged. */
+  keys.S = kph > cap + 5;
   return { d: q.d, want };
 }
 /** src/car/input.js's poll(), for the keyboard half: A is +1 (left), D is -1. */
@@ -197,7 +264,7 @@ function run(r) {
 
   const every = Math.max(1, Math.round(120 / KEY_HZ));
   const n = Math.round(SECS / PHYSICS_DT);
-  const drv = { lost: 0, rescues: 0, t: 0, secs: SECS, step: every * PHYSICS_DT };
+  const drv = { lost: 0, rescues: 0, t: 0, secs: SECS, step: every * PHYSICS_DT, lastQ: null, holdFor: 0 };
   let cmd = asInput(keys);
   let onRoad = 0,
     steps = 0,
@@ -311,7 +378,7 @@ check(
   const keys = { ...KEYS };
   let cmd = asInput(keys);
   const every = Math.max(1, Math.round(120 / KEY_HZ));
-  const drv = { lost: 0, rescues: 0, t: 0, secs: SECS, step: every * PHYSICS_DT };
+  const drv = { lost: 0, rescues: 0, t: 0, secs: SECS, step: every * PHYSICS_DT, lastQ: null, holdFor: 0 };
   for (let i = 0; i < Math.round(SECS / PHYSICS_DT); i++) {
     if (i % every === 0) {
       drv.t = i * PHYSICS_DT;

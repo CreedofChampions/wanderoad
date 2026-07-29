@@ -1050,18 +1050,20 @@ export class Vehicle {
      *
      * Swept on the same eight sites rather than guessed: 0.190/14.0 -> 36.4 km/h (2/8 pass),
      * 0.205/16.5 -> 32.5 (6/8), 0.220/17.5 -> 21.2 (8/8 but a crawl), 0.250/20.0 -> 14.2 (8/8,
-     * far too punishing to drive onto a verge at all). 0.215/17.2 -> 23.1 km/h, 8/8, is where
+     * far too punishing to drive onto a verge at all), 0.248/19.6 -> 12.0 (a cliff: a 7% change
+     * in the coefficients halved the terminal speed, because drive force and resistance meet on
+     * a steep part of the torque curve down there). 0.236/18.7 -> 19.4 km/h, 8/8, is where
      * the rule is met
      * on every site and the car can still be driven off the tarmac on purpose — which it has
      * to be, because petrol-station forecourts are off-road surfaces. */
-    let crr = lerp(0.215, 0.014, clamp01(onRoad));
+    let crr = lerp(0.236, 0.014, clamp01(onRoad));
     // Dunes: piled sand in front of the wheels, not just a looser surface. See SAND above.
     // Deliberately small next to vDrag below — a constant force alone cannot bleed off a fast
     // ENTRY speed within a few metres, it can only stop the car from creeping once it is
     // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
     // drive at speed" part.
     if (this.sandBog > 0) crr = lerp(crr, SAND.crrBogged, this.sandBog);
-    let vDrag = lerp(17.2, 1.4, clamp01(onRoad));
+    let vDrag = lerp(18.7, 1.4, clamp01(onRoad));
     /* The speed-proportional half of off-road resistance is what a car arriving off the
      * tarmac at speed actually decelerates against — the constant term above is too small at
      * 19 m/s to matter (a few tenths of a m/s²) and only bites once the car is already slow.

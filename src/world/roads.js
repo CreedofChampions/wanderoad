@@ -388,7 +388,15 @@ function drownsInWater(i, j, dir, tier, seed, tag) {
  */
 function linkLive(i, j, dir, tier, seed, tag) {
   if (!connects(i, j, dir, tier, seed)) return false;
-  return !drownsInWater(i, j, dir, tier, seed, tag);
+  if (drownsInWater(i, j, dir, tier, seed, tag)) return false;
+  /* The bad-crossing cull belongs HERE, not only at the enumeration loop, so that every other
+   * question about the network — is this node a leaf, is that a drowned stub, does this end
+   * need a turning head — is asked about the road network that actually exists. Culling an
+   * edge only where edges are listed left the dead-end machinery reasoning about a lane that
+   * had already been taken away, and tools/diag-manual-streak.mjs caught the consequence: a
+   * drive that followed a lane into a junction that was no longer there and put a wheel 33 m
+   * into the grass. See crossesArterialBadly. */
+  return !crossesArterialBadly(i, j, dir, tier, seed, tag);
 }
 
 /**
@@ -1030,6 +1038,81 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0, onlyTier) {
     }
   }
   return out;
+}
+
+/* ── NO ROAD MAY CROSS ANOTHER AT A BAD ANGLE ────────────────────────────────
+ *
+ * Operator, twice and unambiguously: "No 2 roads can ever overlap or cross", and the
+ * screenshot behind it — "lines intersecting lines blinking through each other".
+ *
+ * `squareCrossings` bends an edge's tangent towards square near a junction, and it fixes most
+ * of them: over a 12 km box, 175 crossings at a mean of 16.5 deg off square, with a healthy
+ * majority already inside 10 deg. What it cannot fix is the tail — a lane that meets an
+ * arterial at 8 deg is not a junction anyone would build, it is two roads sharing tarmac for
+ * a hundred metres, and no amount of tangent-bending inside a 420 m window turns that into a
+ * crossroads. Five separate attempts to widen, re-space or re-jitter it into submission were
+ * measured and reverted (see docs/BACKLOG.md).
+ *
+ * So the tail is removed instead of bent: a LANE that crosses an ARTERIAL further than
+ * CROSS_CULL_DEV degrees from square is not built at all. Arterials are never culled — they
+ * are the network you cruise, and they are the senior tier everywhere else in this file
+ * (`outranks`), so the junior tier is the one that yields here too, exactly as it already
+ * does when the two are squared up.
+ *
+ * Read on BASE geometry, never on the squared-up result, for the same reason
+ * `squareCrossings` reads its neighbours' base shapes: culling changes geometry, and a rule
+ * that read the post-cull world would decide differently depending on what it had already
+ * decided. Base shapes are a pure function of (i, j, dir, tier, seed), so this is too — and
+ * it is therefore cacheable and box-independent, which is what keeps two chunks that overlap
+ * from disagreeing about whether a lane exists.
+ */
+const CROSS_CULL_DEV = 32; // degrees off square; beyond this the lane yields rather than bends
+const _cullCache = new Map();
+function crossesArterialBadly(i, j, dir, tier, seed, tag) {
+  if (tier !== 1) return false; // arterials never yield
+  const key = `${i},${j},${dir},${seed}`;
+  const hit = _cullCache.get(key);
+  if (hit !== undefined) return hit;
+  const base = baseGeomFor(i, j, dir, tier, seed);
+  const arterials = geomsInBox(base.minX, base.minZ, base.maxX, base.maxZ, seed, CROSS_PAD, baseGeomFor, tag, 0);
+  let bad = false;
+  for (const c of findCrossings([base, ...arterials])) {
+    if (c.a !== base && c.b !== base) continue;
+    if (c.deviationDeg > CROSS_CULL_DEV) {
+      bad = true;
+      break;
+    }
+  }
+  /* NEVER STRAND A NODE. Operator, with a screenshot: "no road should fail to connect to other
+   * roads". A cull that takes the last live link at either end turns a junction into a stub
+   * pointing at nothing, and a driver following it arrives at speed with no road ahead — which
+   * is exactly what tools/diag-manual-streak.mjs caught, the car still doing 45 km/h as the
+   * nearest centreline froze at the terminus behind it. A crossing that is 40 deg off square
+   * is a worse-looking junction; a road that stops in a field is a broken one. The junction
+   * loses. `connects` + water only, deliberately: asking the neighbours whether THEY are culled
+   * would be circular, and the conservative answer (assume they live) is the safe direction —
+   * it keeps roads rather than removing them. */
+  if (bad) {
+    for (const [ni, nj] of [
+      [i, j],
+      [dir === 0 ? i + 1 : i, dir === 0 ? j : j + 1],
+    ]) {
+      let others = 0;
+      for (const [li, lj, ld] of LINKS_AT(ni, nj)) {
+        if (li === i && lj === j && ld === dir) continue;
+        if (!connects(li, lj, ld, tier, seed)) continue;
+        if (drownsInWater(li, lj, ld, tier, seed, tag)) continue;
+        others++;
+      }
+      if (others === 0) {
+        bad = false;
+        break;
+      }
+    }
+  }
+  if (_cullCache.size > 40000) _cullCache.clear();
+  _cullCache.set(key, bad);
+  return bad;
 }
 
 /** Every OTHER edge's BASE shape that could cross this one — `partnersOf`, one layer down,
