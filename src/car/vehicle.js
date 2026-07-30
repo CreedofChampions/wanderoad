@@ -69,6 +69,12 @@ function tyreCurve(u, floor) {
 
 /** A wheel counts as off the made surface below this much road coverage. */
 const OFF_ROAD_AT = 0.5;
+/** m/s below which a braked car is held still rather than allowed to creep — see the static-hold
+ *  block at the end of _step. About 4 km/h: fast enough to catch the end of a stop, slow enough that
+ *  it can never interfere with driving. */
+const STATIC_HOLD_SPEED = 1.1;
+/** 1/s at full brake. 9 kills a slow creep inside a couple of tenths without snapping the car. */
+const STATIC_HOLD_RATE = 9;
 
 /* Rollover. These live here rather than in tuning.js because every one of them is part of
  * the tip solver below and means nothing without it — the same reason the tyre-curve
@@ -1315,6 +1321,46 @@ export class Vehicle {
       vLong *= k;
       vLat *= k;
       this.yawRate *= k;
+    }
+
+    /* ── A BRAKED CAR STAYS PUT ─────────────────────────────────────────────
+     * Operator: "When you stop the car it should not slide sideways".
+     *
+     * The solver has rolling resistance and tyre forces but no STATIC friction, so at a standstill
+     * nothing holds the car against gravity — it just has very little moving it. On flat ground that
+     * is invisible (measured: 0.054 m of drift after stopping, and zero lateral velocity). On a
+     * slope it is not: parked on a real 26% grade with the FOOTBRAKE HELD, the car still travelled
+     * 0.72 m in six seconds, and 1.79 m with no input. A real brake holds a car on a 26% grade.
+     *
+     * So below STATIC_HOLD_SPEED, with the brake or handbrake applied and no throttle, both velocity
+     * components are pulled hard to zero. Deliberately NOT applied when coasting with no input —
+     * a car in neutral genuinely does roll down a hill, that behaviour is tested elsewhere
+     * (tools/bench-slope.mjs "rolls back on a 20° slope"), and the operator's complaint is about
+     * stopping, not about parking in neutral.
+     *
+     * Nor while REVERSING: holding the brake at a standstill is how this game reverses (see the
+     * reverse block above), so freezing a car that is trying to back out of somewhere would be a
+     * far worse bug than the one being fixed. */
+    {
+      const held = Math.max(this.brake || 0, this.handbrake || 0);
+      const wantsGo = (this.throttle || 0) > 0.02;
+      if (held > 0.3 && !wantsGo && Math.hypot(vLong, vLat) < STATIC_HOLD_SPEED) {
+        const k = Math.exp(-STATIC_HOLD_RATE * held * dt);
+        /* LATERAL ALWAYS, longitudinal only when not reversing — and the split is the whole point.
+         *
+         * Holding the brake at a standstill is how this game REVERSES (see the reverse block above),
+         * so `this.reverse` is true in exactly the situation the operator is complaining about, and a
+         * blanket guard on it disabled this fix entirely: the first version changed the measured
+         * slide by 0.00 m. But "slides sideways" is a LATERAL complaint, and a car never slides
+         * sideways under braking whichever way it is going. So the across-the-car component is always
+         * killed, and only the along-the-car one waits for the driver to stop asking for reverse. */
+        vLat *= k;
+        if (Math.abs(vLat) < 0.02) vLat = 0;
+        if (!this.reverse) {
+          vLong *= k;
+          if (Math.abs(vLong) < 0.02) vLong = 0;
+        }
+      }
     }
 
     this.yaw += this.yawRate * dt;

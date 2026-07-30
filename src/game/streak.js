@@ -80,6 +80,8 @@ export class Streak {
     /** True while inside STATION_FORGIVE_R of a pump — the HUD captions it so the forgiveness
      *  is visible rather than merely true. */
     this.nearStation = false;
+    /** Metres the worst wheel is beyond the carriageway edge — see `offBy` on `state`. */
+    this._offBy = 0;
 
     this._off = 0; // seconds spent off the carriageway
     this._announced = 0; // highest ladder index announced this streak
@@ -128,6 +130,10 @@ export class Streak {
       tier: this.tier,
       paused: this.paused,
       nearStation: !!this.nearStation,
+      /* How far past the verge the worst wheel is, in metres — 0 while any part of the car is still
+       * on the carriageway. The HUD's red warning reads this rather than the boolean, so a tyre
+       * kissing the painted edge does not flash the screen at you. See OFFROAD_WARN_M. */
+      offBy: this._offBy,
     };
   }
 
@@ -179,6 +185,21 @@ export class Streak {
      * exactly as before. */
     const on = (surf ? surf.onRoad : 0) >= ON_ROAD && (car.onRoadMin ?? 1) >= ON_ROAD && car.onGround !== false;
     this.onRoad = on;
+
+    /* HOW FAR OFF, not merely whether. Operator: "No red without streak end -- 2 foot forgiveness".
+     *
+     * The streak already forgives half a second off the carriageway, because a wide line through a
+     * switchback is good driving; but the HUD's red warning fired on the raw boolean, so a tyre that
+     * touched the painted edge for one frame flashed the whole screen. A warning that cries wolf is
+     * worse than none — you stop reading it.
+     *
+     * `roadDist` is the distance from the car's CENTRE to the centreline and `width` is the
+     * carriageway, so the overhang past the edge is roadDist - width/2. Clamped at 0, so this is
+     * exactly "how far out are you" and nothing else. Off the network entirely (roadDist infinite)
+     * it saturates, which is correct: you are well and truly off. */
+    const rd = surf && Number.isFinite(surf.roadDist) ? surf.roadDist : Infinity;
+    const halfW = surf && surf.roadWidth ? surf.roadWidth * 0.5 : 3.5;
+    this._offBy = on ? 0 : Number.isFinite(rd) ? Math.max(0, rd - halfW) : 99;
 
     if (!on) {
       if (this.nearStation) return; // forecourt: no accrual, no break, no timer

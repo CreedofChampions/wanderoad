@@ -147,3 +147,31 @@ console.log(
 
 console.log(`${FAILED === 0 ? 'loot: OK' : `loot: ${FAILED} FAILED`}`);
 process.exitCode = FAILED === 0 ? 0 : 1;
+
+/* ── A SUN MUST NOT DRAW THROUGH THE ROAD ────────────────────────────────────
+ * Operator: "make it so that suns are not glitching through the road, but are hovering slightly above
+ * the road."
+ *
+ * The clipping arrived with the rays. A sun was a flat disc of radius SUN_R, and SUN_HOVER was set to
+ * clear that; it is now a star whose spokes reach SUN_R + SUN_R*SUN_RAY_LEN from the centre, and the
+ * bob swings it further down again. Nobody re-derived the hover, so the lowest spoke ended up 0.59 m
+ * under the tarmac.
+ *
+ * This checks the RELATIONSHIP rather than the number, so making the sun bigger again cannot silently
+ * re-break it — that is exactly the failure mode this is here to catch.
+ */
+{
+  const { SUN_HOVER } = await import('../src/world/loot.js');
+  const { SUN_R, SUN_RAY_LEN, SUN_BOB_AMP } = await import('../src/render/loot.js');
+  const reach = SUN_R + SUN_R * SUN_RAY_LEN; // the tip of the longest spoke, from the centre
+  const lowest = SUN_HOVER - SUN_BOB_AMP - reach; // its lowest point over a whole bob cycle
+  console.log(
+    `\n-- a sun clears the road --\n       hover ${SUN_HOVER} m, spokes reach ${reach.toFixed(2)} m, bob ${SUN_BOB_AMP} m ` +
+      `-> lowest point ${lowest.toFixed(2)} m above the surface`
+  );
+  const ok1 = lowest > 0.05;
+  const ok2 = SUN_HOVER < 2.2;
+  console.log(`${ok1 ? ' PASS' : ' FAIL'}  the lowest spoke stays above the road                  ${lowest.toFixed(2)} m   want > 0.05 m`);
+  console.log(`${ok2 ? ' PASS' : ' FAIL'}  and it hovers, rather than floating out of reach       ${SUN_HOVER} m   want < 2.2 m`);
+  if (!ok1 || !ok2) process.exitCode = 1;
+}

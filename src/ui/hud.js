@@ -134,6 +134,10 @@ export const SUN_TICKS = 4;
  * toast happens to be up. Persisted the way the streak best is persisted: one small JSON
  * blob in localStorage, read once in the constructor and written the moment the count moves,
  * so a shown count survives a reload the same way the streak's best does. */
+/** Metres past the carriageway edge before the HUD goes red — the operator's "2 foot forgiveness".
+ *  0.61 m is two feet; the streak's own half-second grace is the other half of the same idea. */
+export const OFFROAD_WARN_M = 0.61;
+
 export const OFFROAD_HINT_KEY = 'wanderoad.hint.offroad.v1';
 export const OFFROAD_HINT_MAX = 10;
 export const OFFROAD_HINT_TEXT = 'off the road — press R to get back on';
@@ -223,6 +227,19 @@ export class Hud {
     this.root.appendChild(this.offroadEdge);
     /** Raw off-road state as last written to the DOM — see the note in update(). */
     this._offNow = false;
+
+    /* The mobile controls, drawn. See #touchGuide in ui/style.css for why they exist at all: the
+     * touch zones have always worked and have never been visible, so a phone player got a car that
+     * did nothing until they guessed. The labels below use the SAME fractions input.js splits on, so
+     * the picture cannot drift from the wiring. */
+    this.touchGuide = el('div', 'touchGuide');
+    this.touchGuide.innerHTML =
+      '<div class="hint">touch and hold — drag left or right to steer</div>' +
+      '<div class="zone steer"><span class="glyph">&#8592; &#8594;</span><span>steer</span></div>' +
+      '<div class="zone go"><span class="glyph">&#9650;</span><span>go</span></div>' +
+      '<div class="zone stop"><span class="glyph">&#9632;</span><span>stop</span></div>';
+    this.root.appendChild(this.touchGuide);
+    this._drivenFor = 0;
 
     this.sunTicker = el('div', 'sunTicker');
     this.sunTicker.innerHTML = '<i class="disc"></i><span class="n">0</span><span class="gain"></span>';
@@ -430,7 +447,21 @@ export class Hud {
        * rather than by a timer here, which is what lets it be immediate — see #streak.offroad and
        * #offroadEdge in ui/style.css. Not shown while auto-drive has the wheel: the streak is
        * frozen then, so there is nothing to warn about. */
-      const offNow = !s.onRoad && !s.paused;
+      /* TWO FEET OF FORGIVENESS before anything goes red. Operator: "No red without streak end -- 2
+       * foot forgiveness".
+       *
+       * This used to fire on the raw boolean, so a tyre kissing the painted edge for a single frame
+       * flashed the whole screen — and the streak itself forgives half a second out there anyway,
+       * because a wide line through a switchback is good driving. A warning that cries wolf stops
+       * being read. `offBy` is how far the worst wheel is PAST the carriageway edge in metres
+       * (game/streak.js), so this is the operator's two feet, exactly. */
+      /* The touch guide steps back once the player is clearly driving — three seconds of real
+       * movement — and never disappears entirely, because a control you cannot find again is the same
+       * bug in slow motion. */
+      if (Math.abs(car.kph) > 12) this._drivenFor += dt;
+      this.touchGuide.classList.toggle('driving', this._drivenFor > 3);
+
+      const offNow = !s.onRoad && !s.paused && (s.offBy ?? 99) > OFFROAD_WARN_M;
       if (offNow !== this._offNow) {
         this._offNow = offNow;
         this.streakEl.classList.toggle('offroad', offNow);

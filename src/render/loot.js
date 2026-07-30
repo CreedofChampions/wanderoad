@@ -53,7 +53,7 @@ export const GEM_RADIUS = 10;
  * this file's own call, pitched between the floating fuel can's lively 0.52 Hz (render/props.js
  * CAN_BOB_HZ) and the anchored ship's slow 0.11 Hz swell — a sun is smaller and livelier than
  * either, a gem a little more serene. */
-const SUN_BOB_AMP = 0.12;
+export const SUN_BOB_AMP = 0.12;
 const SUN_BOB_HZ = 0.6;
 const SUN_SPIN_RATE = 2.2; // rad/s
 const GEM_BOB_AMP = 0.2;
@@ -72,7 +72,7 @@ const GEM_PULSE_HZ = 0.5;
  * geometry never has to know where in the world it lives.
  */
 
-const SUN_R = 0.55;
+export const SUN_R = 0.55;
 const SUN_THICK = 0.12;
 /* A HOT CORE, not painted metal. Operator: "coin looks like the sun not coin -- i like that lets
  * make it collecting suns", then "make them shine :P".
@@ -84,7 +84,7 @@ const SUN_THICK = 0.12;
 const SUN_COL = mixc(LC('lineYellow'), LC('paintB'), 0.35);
 const SUN_HOT = mixc(SUN_COL, [1, 0.98, 0.9], 0.55);
 /** How far the rays reach past the body, as a fraction of SUN_R. */
-const SUN_RAY_LEN = 0.95;
+export const SUN_RAY_LEN = 0.95;
 const SUN_RAYS = 8;
 
 /** A little sun: a glowing disc with eight rays around it.

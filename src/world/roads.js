@@ -481,13 +481,91 @@ export function liveDegreeAt(i, j, tier, seed, tag = fieldTag(seed)) {
  * rather than carried on the edge so nothing has to be threaded through `edgeFrom` and the
  * chunk worker's separate module graph (gotcha 2).
  */
+/* MEMOISED, and it has to be. `continuesFrom` below builds the GEOMETRY of every neighbouring link to
+ * ask which way it leaves, and this is called for both ends of every edge in every baked tile — so
+ * uncached it dropped the game to 9.1 fps, which the browser suite caught immediately ("running at a
+ * playable rate once warm: 9.1 fps", and a car that would not pull away). The answer is a pure
+ * function of the edge, the seed and the height-field tag, so it is computed once and read thereafter.
+ * Same lesson, and the same fix, as the airfield and harbour cells. */
+const _deadEndCache = new Map();
 export function edgeDeadEnds(e, seed, tag = fieldTag(seed)) {
+  const ck = `${tag}:${e.key}`;
+  const hit = _deadEndCache.get(ck);
+  if (hit) return hit;
+  const out = _edgeDeadEnds(e, seed, tag);
+  if (_deadEndCache.size > 40000) _deadEndCache.clear();
+  _deadEndCache.set(ck, out);
+  return out;
+}
+
+function _edgeDeadEnds(e, seed, tag) {
   const [tierStr, rest] = e.key.split(':');
   const tier = Number(tierStr);
   const [i, j, dir] = rest.split(',').map(Number);
   const i1 = dir === 0 ? i + 1 : i;
   const j1 = dir === 0 ? j : j + 1;
-  return [liveDegreeAt(i, j, tier, seed, tag) <= 1, liveDegreeAt(i1, j1, tier, seed, tag) <= 1];
+  return [
+    liveDegreeAt(i, j, tier, seed, tag) <= 1 || !continuesFrom(e, i, j, tier, seed, tag),
+    liveDegreeAt(i1, j1, tier, seed, tag) <= 1 || !continuesFrom(e, i1, j1, tier, seed, tag),
+  ];
+}
+
+/* ── A DEAD END FOR A DRIVER IS NOT THE SAME AS A DEGREE-1 NODE ───────────────
+ *
+ * Operator, after the closures were already shipping: "Road still ends without" any warning.
+ *
+ * The turning heads, bollards and closing boards are placed where a node's live degree is 1 — one
+ * road in, nothing out — and that rule is right as far as it goes. What it misses is the node where
+ * two roads BOTH ARRIVE FROM THE SAME DIRECTION. Its degree is 2, so it gets no closure, and yet a
+ * driver coming up one of them finds the tarmac simply stops in front of them: the only other road
+ * there goes back the way they came.
+ *
+ * This is the same defect as the junction braiding (docs/BACKLOG.md, ~33% of node pairs leave within
+ * 26 degrees of each other) seen from the driver's seat, and it is why closures kept being reported
+ * as missing on roads that the dead-end count said were fine. A real example on the shipped seed:
+ * arterials 0:0,-2,1 and 0:-1,-1,0 both end at (773,-909) with their tangents 5.4 degrees apart.
+ *
+ * So an approach counts as continuing only if some OTHER live link at that node leaves within
+ * CONTINUE_MAX_TURN of straight ahead. Anything tighter than that is a hairpin, not a continuation,
+ * and the road needs to be closed off in front of you. Pure in the lattice, like everything else
+ * here, and it can only ever ADD closures — it never removes one the old rule asked for. */
+const CONTINUE_MAX_TURN = (118 * Math.PI) / 180;
+/** continuesFrom's own node-position scratch — declared here rather than reusing _p/_q, which belong
+ *  to nodeDir and are live while this runs. */
+const _cp = [0, 0];
+
+function continuesFrom(e, ni, nj, tier, seed, tag) {
+  // the direction this edge ARRIVES at the node, as a unit vector pointing along travel
+  nodePos(ni, nj, tier, seed, _cp);
+  const n = e.pts.length / 2;
+  const headFirst = Math.hypot(e.pts[0] - _cp[0], e.pts[1] - _cp[1]) < Math.hypot(e.pts[(n - 1) * 2] - _cp[0], e.pts[(n - 1) * 2 + 1] - _cp[1]);
+  const k = headFirst ? 0 : n - 1;
+  const k2 = headFirst ? 1 : n - 2;
+  // pointing INTO the node is the reverse of the away-tangent
+  let ax = e.pts[k * 2] - e.pts[k2 * 2];
+  let az = e.pts[k * 2 + 1] - e.pts[k2 * 2 + 1];
+  const al = Math.hypot(ax, az) || 1;
+  ax /= al;
+  az /= al;
+
+  for (const [li, lj, ld] of LINKS_AT(ni, nj)) {
+    if (!linkLive(li, lj, ld, tier, seed, tag)) continue;
+    if (isLeafLane(li, lj, ld, tier, seed)) continue;
+    const other = geomFor(li, lj, ld, tier, seed, tag);
+    if (!other || other.key === e.key) continue;
+    const m = other.pts.length / 2;
+    const oFirst = Math.hypot(other.pts[0] - _cp[0], other.pts[1] - _cp[1]) < Math.hypot(other.pts[(m - 1) * 2] - _cp[0], other.pts[(m - 1) * 2 + 1] - _cp[1]);
+    const o0 = oFirst ? 0 : m - 1;
+    const o1 = oFirst ? 1 : m - 2;
+    let bx = other.pts[o1 * 2] - other.pts[o0 * 2]; // AWAY from the node
+    let bz = other.pts[o1 * 2 + 1] - other.pts[o0 * 2 + 1];
+    const bl = Math.hypot(bx, bz) || 1;
+    bx /= bl;
+    bz /= bl;
+    const turn = Math.acos(clamp(ax * bx + az * bz, -1, 1));
+    if (turn <= CONTINUE_MAX_TURN) return true; // a road you can actually drive onto
+  }
+  return false;
 }
 
 /**

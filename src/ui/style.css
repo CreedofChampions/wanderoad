@@ -1282,3 +1282,84 @@ canvas {
     opacity: 0;
   }
 }
+
+/* ── MOBILE CONTROLS, MADE VISIBLE ───────────────────────────────────────────
+ * Operator: "We need to make clear the mobile controls for mobile people."
+ *
+ * The touch controls have always worked and have never been shown: src/car/input.js describes them
+ * as "two invisible halves", which is fine once you know and impossible to discover if you do not.
+ * A phone player got a car that did nothing until they happened to press the right part of a blank
+ * screen.
+ *
+ * So the zones are drawn — the real ones, straight off the same fractions input.js splits on (x < 0.5
+ * steers; on the right, y > 0.55 brakes and above it accelerates), so what is shown cannot drift from
+ * what is wired. Only on a COARSE pointer, so a desktop never sees them.
+ *
+ * They fade to almost nothing once the player is actually driving (`#touchGuide.driving`) rather than
+ * disappearing: a control you cannot find again is the same bug in slow motion. */
+#touchGuide {
+  position: absolute;
+  inset: 0;
+  display: none;
+  pointer-events: none;
+  z-index: 4;
+  transition: opacity 0.6s ease;
+  font: 600 0.78rem/1.2 ui-rounded, -apple-system, Segoe UI, Roboto, sans-serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cream);
+}
+@media (pointer: coarse) {
+  #touchGuide {
+    display: block;
+  }
+}
+#touchGuide.driving {
+  opacity: 0.22;
+}
+#touchGuide .zone {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  border: 2px dashed rgba(246, 236, 216, 0.34);
+  border-radius: 18px;
+  background: rgba(28, 34, 48, 0.16);
+  text-shadow: 0 1px 4px rgba(28, 34, 48, 0.8);
+}
+/* left half: steering. Matches input.js's `x < 0.5`. */
+#touchGuide .steer {
+  left: 2%;
+  width: 46%;
+  top: 46%;
+  height: 50%;
+}
+/* right half, above y = 0.55: throttle. Below it: brake. Same split as input.js. */
+#touchGuide .go {
+  right: 2%;
+  width: 46%;
+  top: 46%;
+  height: 24%;
+}
+#touchGuide .stop {
+  right: 2%;
+  width: 46%;
+  top: 72%;
+  height: 24%;
+}
+#touchGuide .glyph {
+  font-size: 1.9rem;
+  line-height: 1;
+  opacity: 0.9;
+}
+#touchGuide .hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 34%;
+  text-align: center;
+  font-size: 0.86rem;
+  opacity: 0.92;
+}

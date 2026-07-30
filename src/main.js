@@ -937,7 +937,23 @@ async function boot() {
     /* `paused: auto.on` — operator: auto-drive accrues "no streak". Frozen, not reset: see
      * game/streak.js's update() for why a chauffeured kilometre must not count AND must not
      * cost you the eighty you already have. */
-    streak.update(dt, car, surf, { paused: auto.on, forgive: nearPump() });
+    /* RUNNING OUT OF FUEL MUST NOT COST YOU THE RUN. Operator: "You still end your streaks when the
+     * fuel tank is empty and you need to go to the gas station, it ends your driving streak."
+     *
+     * Nothing in streak.js was breaking on an empty tank directly — a stopped car simply stops
+     * accruing. What ended the run was everything that HAPPENS when you run dry: the throttle fades
+     * out, the car coasts, and a coasting car drifts off the carriageway; then you crawl onto a
+     * forecourt at walking pace. Half a second off the tarmac at any point in that and eighty
+     * kilometres are gone, for the crime of needing petrol.
+     *
+     * So the streak is FROZEN while the tank is dry and while you are actually refuelling — the same
+     * freeze auto-drive uses, and for the same reason it uses it: this is not you leaving the road, so
+     * it must not read as you leaving the road. It does not accrue either, so nobody can farm a
+     * streak by sitting at a pump. */
+    streak.update(dt, car, surf, {
+      paused: auto.on || fuel.dry || fuel.refuelling,
+      forgive: nearPump(),
+    });
     /* THE STREAK IS THE INCOME. Operator: "Streaks = suns." One sun per 250 m of unbroken
      * run — mintStreak() is safe to call every frame and remembers what it has already paid
      * for, and it follows the distance back DOWN when a streak breaks, so a lost run is never

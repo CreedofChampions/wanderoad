@@ -333,6 +333,12 @@ export class Terrain {
     const c = this.roads.carve(x, z, this._carve);
     o.onRoad = c.edge;
     o.roadDist = c.d;
+    /* The carriageway's own width here. `carve` has always computed it (roads.js blends it across
+     * overlapping edges) and it was simply never put on the record, so every caller that wanted "how
+     * far past the EDGE am I" had to guess a half-width. game/streak.js needs exactly that for the
+     * HUD's red warning — see OFFROAD_WARN_M — and a guess there is a warning that fires at the wrong
+     * distance on half the network, since a lane is 6.2 m and an arterial 8.6 m. */
+    o.roadWidth = c.width;
     o.roadTier = c.tier;
     o.roadTx = c.tx;
     o.roadTz = c.tz;

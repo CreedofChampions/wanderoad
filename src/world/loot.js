@@ -107,7 +107,19 @@ export const SUN_SLOT_P = 0.62;
 /** Metres above the road surface a sun's origin sits at — render/loot.js blits the geometry
  *  at this height above the ground-contact point, the same "hover is a fixed constant, not
  *  part of placement" rule world/props.js's floating can uses. */
-export const SUN_HOVER = 0.6;
+/* 1.35, was 0.6. Operator: "suns are not glitching through the road, but are hovering slightly above
+ * the road".
+ *
+ * The clipping arrived with the rays. A sun used to be a flat disc of radius SUN_R (0.55), so 0.6 m of
+ * hover cleared the tarmac with room to spare. It is now a star whose spokes reach
+ * SUN_R + SUN_R*SUN_RAY_LEN = 1.07 m from its centre (render/loot.js), and the bob swings it another
+ * 0.12 m down — so the lowest spoke sat 0.59 m UNDER the road surface and drew through it.
+ *
+ * 1.07 ray + 0.12 bob + 0.16 clearance = 1.35. That is bonnet height on this car, which is where you
+ * want a pickup anyway: visible over the bonnet rather than lost under it. Derived from the geometry
+ * rather than nudged until it looked right, so growing the rays again cannot silently re-break it —
+ * tools/diag-loot.mjs asserts the relationship. */
+export const SUN_HOVER = 1.35;
 /** A cluster is this many suns, inclusive. */
 export const SUN_CLUSTER_MIN = 1;
 export const SUN_CLUSTER_MAX = 1;
