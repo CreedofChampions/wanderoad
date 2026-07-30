@@ -517,7 +517,21 @@ void main(){
   // frame q rather than a fresh domain so the drawings sit still relative to the water they
   // ride on instead of sliding independently across it.
   {
-    vec2 fq = q * 0.055; // ~18 m features: a hand-scribble scale, coarser than the ripple bands
+    /* ── SPREAD THE SCRIBBLES OUT ──────────────────────────────────────────
+     * Operator: "water does not look good once your like 15 m from shore -- try more spread out
+     * texture it looks like toothpaste -- too much white too little blue -- near shore often looks
+     * good".
+     *
+     * "Toothpaste" is the right word for what was happening and it is a density problem, not a colour
+     * one. The scribbles were drawn at ~18 m features, and at fifteen metres out you are looking
+     * ACROSS them rather than down at them, so a great many strokes pile into a few pixels of screen
+     * and the white fills in. Near the shore it looked fine precisely because the foam band there is
+     * a different, depth-keyed term with real gaps in it.
+     *
+     * So the strokes get roughly three times longer (0.055 -> 0.019, about 53 m features), which is
+     * fewer of them across the same water, and the two line widths below get thinner. Same drawing,
+     * more blue between the lines. */
+    vec2 fq = q * 0.019; // ~53 m features: long, loose strokes with water showing between them
     vec2 warp = vec2(pn2(fq*0.35 + 3.7), pn2(fq*0.35 + 9.2)) * 1.8;
     // Slow drift along the local current, plus a small fixed crawl of its own — the pen's
     // lines visibly creep even where the water beneath them barely flows at all.
@@ -528,13 +542,24 @@ void main(){
     // pair reads as loose hand-drawn strokes rather than one repeating contour.
     float l1 = pn2(fp);
     float l2 = pn2(fp*1.9 + 17.0);
-    float line1 = 1.0 - smoothstep(0.045, 0.13, abs(l1));
-    float line2 = 1.0 - smoothstep(0.040, 0.11, abs(l2));
-    float scrib = clamp(line1 + line2*0.6, 0.0, 1.0);
+    /* Thinner, and the second band weaker. A zero-crossing band of half-width 0.13 in a domain three
+     * times coarser would be three times WIDER on the water, which would have undone the respacing —
+     * these come down to keep the stroke about the same thickness it always was. */
+    float line1 = 1.0 - smoothstep(0.022, 0.065, abs(l1));
+    float line2 = 1.0 - smoothstep(0.020, 0.055, abs(l2));
+    float scrib = clamp(line1 + line2*0.45, 0.0, 1.0);
 
     // Open sea only, deep water only, and the same band-limit every other ripple term uses so
     // a stroke narrower than the pixel drawing it fades rather than aliases at distance.
-    float gate = calm * bandLimit(fw, vec2(0.055*2.0)) * smoothstep(0.9, 2.2, depth);
+    float gate = calm * bandLimit(fw, vec2(0.019*2.0)) * smoothstep(0.9, 2.2, depth);
+    /* AND FADE THEM OUT AT GRAZING ANGLES, which is the other half of the fix. At fifteen metres and
+     * beyond you see the surface almost edge-on, every stroke foreshortens into the same few pixels,
+     * and no amount of respacing stops them merging. V is the view vector; its y component is how
+     * much you are looking DOWN at the water. Looking down (near the car, or from a hill) the
+     * drawings are at full strength, which is where they look best and where the operator says they
+     * already do; looking flat across the water they thin out and the blue body carries it. */
+    float lookDown = clamp(abs(normalize(V).y), 0.0, 1.0);
+    gate *= mix(0.30, 1.0, smoothstep(0.06, 0.30, lookDown));
     // Sun-facing views wash to cream (playtest report): this gate and the sun-glitter term
     // below it both brighten hardest looking straight down the same sun-facing line of sight,
     // and stacked the two read as a bleached patch rather than two separate effects. Same dot
@@ -543,7 +568,9 @@ void main(){
     // rather than let both terms keep brightening the same pixels unchecked.
     float foamSunPath = smoothstep(0.55, 1.0, dot(normalize(vec2(V.x,V.z)), -normalize(uSunDir.xz)));
     gate *= (1.0 - 0.45*foamSunPath);
-    float wOpac = 0.42; // overall ceiling — the body plates underneath stay legible
+    // 0.30, was 0.42. "Too much white too little blue" — the ceiling itself was too high, and this is
+    // the one number that trades the two directly against each other.
+    float wOpac = 0.30; // overall ceiling — the body plates underneath stay legible
 
     // The Wind Waker double line: a darker under-copy of l1, offset a couple of centimetres
     // in the scribble domain so it never coincides with the white stroke, drawn UNDER it at
