@@ -39,6 +39,7 @@ import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_COINS, CAN_PRICE } from './game/wallet.js';
+import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
@@ -407,12 +408,23 @@ async function boot() {
    * browser suite caught it — "C4 lifting off slows you visibly: 22 -> 21 km/h"). render/props.js has
    * already done that work for every tile it baked, so asking it costs nothing. Same trade every
    * station makes: a harbour is findable once its tile has streamed in. */
+  /* THE PLANE. Flown from an airfield, unlocked with sea diamonds or the pass — see game/plane.js,
+   * which is a port of brihernandez/ArcadeJetFlightExample (MIT) with its licence search recorded.
+   * `terrain` is a zero-arg forward reference for the same reason boat.js takes one: main.js
+   * reassigns car.terrain every frame. */
+  const plane = new Plane({
+    wallet,
+    say: (t, secs) => hud.say(t, secs),
+    terrain: () => car.terrain || local,
+  });
+
   const HARBOUR_RADIUS = 46;
   const atHarbour = () => {
     const h = props.nearestHarbour(car.x, car.z);
     return !!h && h.dist <= HARBOUR_RADIUS;
   };
   let harbourWas = false;
+  let airfieldWas = false; // latch for the airfield line — see the frame loop
   const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
   const fuelGauge = new FuelGauge(hud.root);
 
@@ -790,6 +802,22 @@ async function boot() {
     /* F: pour a spare can in. A can is a tank you carry — bought at a pump, used anywhere, which is
      * the one thing coins could not buy before and exactly what you want when the needle is on the
      * pin and the nearest station is 3 km back. */
+    /* P: take off, or land. An airfield is where a plane starts from — that is what the 380 m strip
+     * and the windsock are for — but the check is deliberately soft: the plane only needs somewhere
+     * flat, so a long straight road works too, and refusing it there would be a rule with no reason
+     * behind it. What IS enforced is the unlock: sea diamonds, or the pass. */
+    if (input.tapped('fly')) {
+      if (plane.active) {
+        plane.stop();
+        car.placeAt(plane.x, plane.z, plane.yaw);
+        hud.say('back in the car', 2.4);
+      } else if (!plane.unlocked) {
+        hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} from the sea`, 3.4);
+      } else {
+        plane.start(car, false);
+      }
+    }
+
     if (input.tapped('useCan')) {
       if (wallet.cans <= 0) {
         hud.say('no spare cans — buy one at a petrol station', 2.8);
@@ -884,6 +912,38 @@ async function boot() {
     /* Arriving at a dealership says so, once. A shop you can walk into and not notice is not a
      * shop — and ESC is the only way in, which is not something a player would guess. Latched
      * on the transition rather than the state so it cannot repeat while you are parked. */
+    /* While the plane has it, the plane owns the pose and the car solver does not run — exactly the
+     * arrangement game/boat.js already has. The car is parked underneath it and only moves again at
+     * the handover above. */
+    if (plane.active) {
+      plane.update(dt, {
+        steer: cmd.steer,
+        pitch: cmd.pitchAxis ?? 0,
+        throttle: cmd.throttle,
+        brake: cmd.brake,
+      });
+      car.placeAt(plane.x, plane.z, plane.yaw);
+    }
+
+    /* ARRIVING AT AN AIRFIELD. Operator: "when people drive to them (no road there) say -- 'I wonder
+     * how you unlock planes'". Verbatim, because it is the whole hook: you find a runway in open
+     * country with no road to it, and the game tells you there is something here you have not got yet
+     * without telling you how — the answer is out at sea, which is what makes the boat worth having.
+     *
+     * Once you HAVE the plane it says something useful instead. Latched on the transition so it
+     * cannot repeat while you are parked on the strip. */
+    const airNow = props.nearestAirfield ? props.nearestAirfield(car.x, car.z) : null;
+    const onStrip = !!airNow && airNow.dist <= 190;
+    if (onStrip !== airfieldWas) {
+      airfieldWas = onStrip;
+      if (onStrip) {
+        hud.say(
+          plane.unlocked ? 'an airfield — P to take off' : 'I wonder how you unlock planes',
+          plane.unlocked ? 3.2 : 4.2
+        );
+      }
+    }
+
     const harbourNow = atHarbour();
     if (harbourNow !== harbourWas) {
       harbourWas = harbourNow;

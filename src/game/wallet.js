@@ -71,6 +71,8 @@ export class Wallet {
     this._paidM = 0;
     /** Spare fuel cans in the boot, bought at a pump — see buyCan. */
     this._cans = 0;
+    /** The plane, earned with sea diamonds or the pass — see planeUnlocked. */
+    this.plane = false;
     /** Have we already said "you can afford a boat"? Once is a nudge, twice is nagging. */
     this._toldAffordBoat = false;
 
@@ -91,6 +93,7 @@ export class Wallet {
       if (Array.isArray(d.owned)) this.owned = new Set(d.owned);
       if (d.tanks && typeof d.tanks === 'object') this.tanks = { ...d.tanks };
       this._cans = Math.max(0, Math.min(CAN_MAX, +d.cans || 0));
+      this.plane = !!d.plane;
     } catch {
       // A corrupt or unavailable store is not worth a crash on a cozy driving game — same
       // stance streak.js's own load() takes.
@@ -108,6 +111,7 @@ export class Wallet {
           owned: [...this.owned],
           tanks: this.tanks,
           cans: this._cans,
+          plane: this.plane,
         })
       );
       this._dirty = false;
@@ -206,6 +210,38 @@ export class Wallet {
       this._toldAffordBoat = true;
       this._events.push({ kind: 'boat-affordable' });
     }
+  }
+
+  /* ── THE PLANE ────────────────────────────────────────────────────────────────
+   * Operator: "make planes unlockable via diamonds in sea ... let me unlock via pass 123".
+   *
+   * Gems, not coins, and that is the point of it: coins come from the road and gems only exist out on
+   * open water, so the plane is the one thing you cannot buy by driving well. You have to have gone
+   * to sea for it, which is what makes the boat worth owning. The pass is the operator's own back
+   * door and it latches the same flag, so a passed unlock behaves identically to an earned one. */
+  get planeUnlocked() {
+    return this.plane || cheatOn();
+  }
+
+  /** Earn the plane with gems. Returns false if there are not enough. */
+  buyPlane(gemsNeeded) {
+    if (this.plane) return false;
+    if (this.gems < gemsNeeded) return false;
+    this.gems -= gemsNeeded;
+    this.plane = true;
+    this._events.push({ kind: 'plane-unlock' });
+    this.save();
+    return true;
+  }
+
+  /** The pass. Latches the same flag — see the note above. */
+  unlockPlaneWithPass(typed, pass) {
+    if (this.plane) return false;
+    if (String(typed).trim() !== String(pass)) return false;
+    this.plane = true;
+    this._events.push({ kind: 'plane-unlock', viaPass: true });
+    this.save();
+    return true;
   }
 
   /** Buy the boat. Only ever called when the car is actually at a harbour — main.js gates it. */

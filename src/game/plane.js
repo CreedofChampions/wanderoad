@@ -63,8 +63,11 @@ export const PLANE = {
   brakeDrag: 0.9,
   /** Neutral throttle: enough to hold level flight, so hands-off is a glide and not a stall. */
   throttleNeutral: 0.35,
-  /** Quadratic drag coefficient, 1/m. Sets the top speed with maxThrust. */
-  drag: 0.0016,
+  /* Quadratic drag, 1/m. Sets the top speed together with maxThrust: thrust = drag x v^2, so
+   * 14 / 0.0092 gives about 39 m/s, i.e. 140 km/h flat out. The first port had 0.0016 and therefore
+   * 336 km/h, which is a jet — in a game whose fastest CAR does 183 and whose grand tourer does 67,
+   * that is not a light aircraft over a cozy landscape, it is a missile. */
+  drag: 0.0092,
   /** Lift per (m/s)² per radian of angle of attack — how hard the wing pulls the nose's way. */
   lift: 0.055,
   /** m/s below which the wing stops flying and the nose drops. */
@@ -73,8 +76,14 @@ export const PLANE = {
   gravity: 9.81,
   /** Angular damping, 1/s: how quickly a rotation settles when the stick is released. */
   angularDamp: 2.4,
-  /** m/s the plane is doing when it is spawned in the air. */
-  spawnSpeed: 55,
+  /* Roll self-centring, 1/s^2 per radian of bank — a stand-in for the dihedral a real wing has.
+   * Without it a held roll input just keeps rolling: measured at 125 degrees after ten seconds, which
+   * is past inverted and not what anyone means by "bank into the turn". With it, full stick settles at
+   * a steep-but-sane angle and letting go brings the wings back level on its own, which is what makes
+   * the aeroplane feel friendly enough for this game. */
+  rollCentre: 2.2,
+  /** m/s the plane is doing when it is spawned in the air. About 130 km/h — cruising, not diving. */
+  spawnSpeed: 36,
   /** Metres above the ground a spawn-in-air drop starts at. */
   spawnHeight: 320,
 };
@@ -207,7 +216,7 @@ export class Plane {
     const stickYaw = clamp(i.yaw || 0, -1, 1);
 
     this.p += (stickPitch * PLANE.pitchTorque - this.p * PLANE.angularDamp) * dt;
-    this.r += (stickRoll * PLANE.rollTorque - this.r * PLANE.angularDamp) * dt;
+    this.r += (stickRoll * PLANE.rollTorque - this.r * PLANE.angularDamp - Math.sin(this.roll) * PLANE.rollCentre) * dt;
 
     /* THE BANK TRICK, and it is the reason this model feels like flying.
      *

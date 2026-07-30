@@ -1870,6 +1870,8 @@ export class Props {
     /** Harbours, per baked tile key — see nearestHarbour for why they are cached here and not
      *  queried live. */
     this._harbours = new Map();
+    /** Airfields, per baked tile key — see nearestAirfield. */
+    this._airfields = new Map();
     /** The probe warmOne() uses, kept from the most recent tile job — the placement tests need a
      *  real Terrain and a tile has already built one. Null until the first tile is built, which is
      *  fine: there is nothing to warm before then either. */
@@ -1903,6 +1905,22 @@ export class Props {
    * browser suite caught it: "C4 lifting off slows you visibly: 22 -> 21 km/h"). A tile has already
    * done that work; asking it again is free. The cost is that a harbour is only findable once its
    * tile has streamed in, which is exactly the same deal every station has. */
+  /** Nearest AIRFIELD out of the built tiles — same reasoning as nearestHarbour just below. */
+  nearestAirfield(x, z) {
+    let best = null;
+    let bd = Infinity;
+    for (const list of this._airfields.values()) {
+      for (const f of list) {
+        const d = Math.hypot(f.x - x, f.z - z);
+        if (d < bd) {
+          bd = d;
+          best = f;
+        }
+      }
+    }
+    return best ? { ...best, dist: bd } : null;
+  }
+
   nearestHarbour(x, z) {
     let best = null;
     let bd = Infinity;
@@ -2237,6 +2255,7 @@ export class Props {
       blit(M, L3, h.x, h.y, h.z, h.heading, 1);
     }
 
+    if (airfields && airfields.length) this._airfields.set(key, airfields);
     for (const f of airfields || []) {
       /* One geometry per airfield, blitted at the strip's own heading. The skirt depth is worked
        * out the same way a station's is: how far the ground falls away under the slab. */

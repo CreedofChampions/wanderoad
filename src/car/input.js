@@ -33,6 +33,13 @@ const KEYMAP = {
    * you can buy gas cans in the petrol stations"), carried in the boot, and used wherever you happen
    * to be, which is the whole point of carrying one. */
   useCan: ['KeyF'],
+  /* P for PLANE — take off from where you are, or land and get back in the car. See game/plane.js. */
+  fly: ['KeyP'],
+  /* The pitch axis, which only the plane reads. I/K rather than the arrows, because the arrows are
+   * already throttle and steering (see KEY_HELP) and the throttle has to keep meaning throttle in the
+   * air. K pulls the nose UP — back on the stick to climb, the one control every flight game shares. */
+  pitchUp: ['KeyK'],
+  pitchDown: ['KeyI'],
   fine: ['ShiftLeft'],
   attack: ['ControlLeft'],
 };
@@ -54,6 +61,8 @@ export class Input {
       analogue: false,
       fine: false,
       attack: false,
+      /** Plane only — see poll(). The car never reads it. */
+      pitchAxis: 0,
     };
 
     this._onDown = (e) => {
@@ -157,6 +166,10 @@ export class Input {
     }
     if (s.attack) s.steer = clamp(s.steer * 1.25, -1, 1);
 
+    /* The plane's pitch axis. Read here so there is ONE place that turns keys into intent — the
+     * same argument the file header makes for everything else — and simply ignored by the car. */
+    s.pitchAxis = (this.held('pitchUp') ? 1 : 0) - (this.held('pitchDown') ? 1 : 0);
+
     return s;
   }
 
@@ -217,6 +230,9 @@ export const KEY_HELP = [
   ['B', 'reverse (or just hold brake when stopped)'],
   ['N', 'radio'],
   ['G', 'auto-drive'],
+  ['P', 'fly (needs a plane — diamonds at sea)'],
+  ['I / K', 'nose down / up, in the air'],
+  ['F', 'pour in a spare fuel can'],
   ['Esc / M', 'garage'],
   ['H', 'horn'],
   ['1 2 3 4', 'assists: cruise / sport / off / hardcore'],
