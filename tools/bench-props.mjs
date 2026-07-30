@@ -19,7 +19,7 @@ import {
   nearestStation, stationSpur, stationPad, stationSits, STATION_MAX_STEP,
   STATION_MAX_ROUGH, STATION_MAX_DOOR, PAD_BURY_MAX,
 } from '../src/world/props.js';
-import { Props, missingGeometry, measureAll, CAN_BOB_AMP, stationSolids, buildStation } from '../src/render/props.js';
+import { Props, missingGeometry, measureAll, CAN_BOB_AMP, stationSolids, buildStation, SHOWROOM_CARS } from '../src/render/props.js';
 import { PB } from '../src/render/painted.js';
 import { Terrain } from '../src/world/terrain.js';
 import { waterLevelAt, BIOME_COUNT, BIOME_NAMES } from '../src/world/biomes.js';
@@ -980,6 +980,62 @@ console.log('\n── a real station hitbox actually stops the car ────�
     }
   }
   props.dispose();
+}
+
+/* ── the showroom line-up matches the fleet it claims to sell ─────────────── */
+console.log('\n── a dealership stocks the cars you cannot collect ────────────────────────');
+{
+  const { FLEET, unlockRule } = await import('../src/game/garage.js');
+  const { SHOWROOM_SLOTS, showroomSpots } = await import('../src/world/props.js');
+  const shouldStock = FLEET.filter((c) => unlockRule(c).how === 'buy').map((c) => c.id);
+
+  /* THE ONE THING THAT CAN DRIFT SILENTLY. render/props.js hard-codes its four display cars
+   * because it is loaded by the tile worker and must not pull the game's modules in behind it,
+   * while main.js derives the same four from `unlockRule`. If those lists ever disagree, the
+   * plaque you read and the car you buy are different cars — and nothing else would notice. */
+  check(
+    SHOWROOM_CARS.map((c) => c.id).join(',') === shouldStock.join(','),
+    'the drawn line-up IS the dealership fleet, in order',
+    SHOWROOM_CARS.map((c) => c.id).join(','),
+    shouldStock.join(',')
+  );
+  check(
+    SHOWROOM_SLOTS.length >= SHOWROOM_CARS.length,
+    'there is a slot for every car on show',
+    SHOWROOM_SLOTS.length,
+    `>= ${SHOWROOM_CARS.length}`
+  );
+  for (const c of SHOWROOM_CARS) {
+    const spec = FLEET.find((f) => f.id === c.id);
+    check(spec && Math.abs(spec.length - c.length) < 0.01, `${c.id} is drawn at its real length`, c.length, spec ? spec.length : 'missing');
+  }
+
+  /* Every slot must be inside the apron and clear of the canopy posts, the pump island and the
+   * kiosk, or a display car is standing in the wall. These are STATION_HITBOXES' own numbers. */
+  const FIXED = [
+    { dx: 0, dz: -4.8, r: 2.8 },
+    { dx: 0, dz: 1.0, r: 1.55 },
+    { dx: -5.2, dz: -2.4, r: 0.22 },
+    { dx: 5.2, dz: -2.4, r: 0.22 },
+    { dx: -5.2, dz: 4.4, r: 0.22 },
+    { dx: 5.2, dz: 4.4, r: 0.22 },
+  ];
+  let worstClear = Infinity;
+  let worstEdge = Infinity;
+  for (const s of SHOWROOM_SLOTS) {
+    for (const f of FIXED) worstClear = Math.min(worstClear, Math.hypot(s.dx - f.dx, s.dz - f.dz) - f.r - 1.35);
+    worstEdge = Math.min(worstEdge, 9.5 - Math.abs(s.dx), 7.0 - Math.abs(s.dz));
+  }
+  check(worstClear > 0, 'no display car overlaps a post, pump or kiosk', `${worstClear.toFixed(2)} m`, '> 0');
+  check(worstEdge > 0, 'and every one is inside the apron', `${worstEdge.toFixed(2)} m`, '> 0');
+
+  // The world-space mapping must be a rigid motion: spacing on the apron survives the rotation.
+  const st = { x: 1234, z: -567, yaw: 0.937, deal: true };
+  const spots = showroomSpots(st);
+  const d01 = Math.hypot(spots[0].x - spots[1].x, spots[0].z - spots[1].z);
+  const l01 = Math.hypot(SHOWROOM_SLOTS[0].dx - SHOWROOM_SLOTS[1].dx, SHOWROOM_SLOTS[0].dz - SHOWROOM_SLOTS[1].dz);
+  check(Math.abs(d01 - l01) < 1e-6, 'placing the row in the world does not stretch it', d01.toFixed(4), l01.toFixed(4));
+  check(showroomSpots({ x: 0, z: 0, yaw: 0 }).length === 0, 'a plain petrol station has no line-up', showroomSpots({ x: 0, z: 0, yaw: 0 }).length, '0');
 }
 
 console.log(`\n${failures ? `${failures} FAILURE(S)` : 'all props checks passed'}\n`);

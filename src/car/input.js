@@ -33,6 +33,11 @@ const KEYMAP = {
    * you can buy gas cans in the petrol stations"), carried in the boot, and used wherever you happen
    * to be, which is the whole point of carrying one. */
   useCan: ['KeyF'],
+  /* X (or Enter) BUYS THE CAR YOU ARE STANDING NEXT TO on a dealership forecourt. Operator: "show
+   * room type situation where they can see the different cars physically and choose them" — choosing
+   * one has to be an act you perform AT the car, not a menu row. E was the obvious letter and is
+   * already shiftUp; Enter is here because it is what anyone tries when a prompt says "confirm". */
+  buyHere: ['KeyX', 'Enter'],
   /* P for PLANE — take off from where you are, or land and get back in the car. See game/plane.js. */
   fly: ['KeyP'],
   /* The pitch axis, which only the plane reads. I/K rather than the arrows, because the arrows are

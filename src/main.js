@@ -27,7 +27,7 @@ import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
 import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
-import { nearestStation as nearestStationWorld } from './world/props.js';
+import { nearestStation as nearestStationWorld, showroomSpots, SHOWROOM_REACH } from './world/props.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
@@ -42,7 +42,7 @@ import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
 import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
-import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
+import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
 import { BoatMode } from './game/boat.js';
@@ -437,6 +437,13 @@ async function boot() {
   const EARNED_CARS = FLEET.filter((c) => Number.isFinite(c.earnAt) && c.id !== FLEET[0].id);
   const earnedTold = new Set();
   let earnedSeeded = false;
+  /* Which display car the forecourt prompt last named, so nosing along the row says each car once
+   * instead of every frame. Cleared the moment you are not beside one. */
+  let showroomTold = null;
+  /* The cars a dealership actually stocks, in the order the forecourt slots are laid out. Derived
+   * from `unlockRule` rather than listed here, so the line-up is exactly "the ones you cannot get by
+   * collecting" and stays that way if the ladder is ever retuned. */
+  const DEALER_CARS = FLEET.filter((c) => unlockRule(c).how === 'buy');
 
   /* AT A PUMP, close enough to do business — the same forecourt radius a dealership uses, and the
    * gate for buying a spare fuel can (operator: "make it so you can buy gas cans in the petrol
@@ -1041,7 +1048,59 @@ async function boot() {
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {
       dealerWas = dealerNow;
-      if (dealerNow) hud.say(`dealership — ESC to spend your ${wallet.suns} suns`, 3.6);
+      if (dealerNow) hud.say(`dealership — drive up to a car, or ESC for the garage`, 3.6);
+    }
+
+    /* ── THE SHOWROOM: BUY THE CAR YOU ARE STANDING NEXT TO ──────────────────
+     * Operator: "The dealership should have the other cars, you know, show room type situation where
+     * they can see the different cars physically and choose them."
+     *
+     * The four cars are drawn on the apron at full size (render/props.js) from slots that live in
+     * world/props.js, and this reads those SAME slots — so the plaque you are looking at and the car
+     * you buy cannot be different cars. Nose up to one and it names itself and its price; press X and
+     * it is yours and you are driving it.
+     *
+     * Only while stopped, deliberately: at speed the nearest slot changes every few frames and the
+     * prompt would flicker through four cars as you drove past the row. */
+    if (dealerNow && fuel.nearest && !plane.active && !boatMode.active) {
+      const spots = showroomSpots(fuel.nearest);
+      let near = null;
+      for (const sp of spots) {
+        const d = Math.hypot(car.x - sp.x, car.z - sp.z);
+        if (d <= SHOWROOM_REACH && (!near || d < near.d)) near = { d, spec: DEALER_CARS[sp.slot] };
+      }
+      const slow = Math.abs(car.speed || 0) < 6;
+      if (near && near.spec && slow) {
+        const spec = near.spec;
+        const mine = isUnlocked(spec, 0, wallet);
+        const price = priceOf(spec);
+        if (showroomTold !== spec.id) {
+          showroomTold = spec.id;
+          hud.say(
+            mine
+              ? `${spec.label} — yours already. X to drive it`
+              : `${spec.label} — ${price} suns. You have ${wallet.suns}. X to buy`,
+            4.0
+          );
+        }
+        if (input.tapped('buyHere')) {
+          if (mine) {
+            hud.say(`${spec.label} it is`, 2.4);
+            swapCar(spec.id);
+          } else if (wallet.buyCar(spec.id, price)) {
+            hud.say(`${spec.label} is yours — ${wallet.suns} suns left`, 3.4);
+            audio.pickup();
+            menu.setCurrent({ car: spec.id });
+            swapCar(spec.id);
+          } else {
+            hud.say(`${spec.label} costs ${price} suns — you have ${wallet.suns}`, 3.2);
+          }
+        }
+      } else if (!near) {
+        showroomTold = null;
+      }
+    } else if (showroomTold) {
+      showroomTold = null;
     }
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads

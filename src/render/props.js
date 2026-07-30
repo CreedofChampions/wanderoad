@@ -34,6 +34,7 @@ import {
   airfieldCellsWarm,
   warmOne,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
+  SHOWROOM_SLOTS,
 } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
 // The same freeboard the drawn road ribbon floats at, imported rather than copied: the access
@@ -1330,6 +1331,71 @@ export function buildAirfield(M, r, f, skirt) {
   }
 }
 
+
+/* ── the cars standing on a dealership's apron ───────────────────────────────
+ * The four that can only be bought at a dealership (game/garage.js's `unlockRule` calls them
+ * `buy`), hard-coded as a table rather than imported, for the reason every other table in this
+ * renderer is: render/props.js is loaded by the tile worker and must not pull the game's own
+ * modules in behind it. `tools/bench-props.mjs` asserts the two lists agree, so the duplication
+ * cannot drift silently.
+ *
+ * The colours are pulled apart deliberately — four cars in four shades of the same paint is the
+ * "similar 3 biomes" mistake again, on a smaller stage. */
+export const SHOWROOM_CARS = [
+  /* FOUR COLOURS THAT ARE ACTUALLY FOUR COLOURS. The first version put paintA on the Sedan and
+   * VERMILION on the Rally — and VERMILION is paintA mixed 18% towards amber, so photographed on the
+   * apron they were two reds side by side and the row read as three cars, not four. Blue, red,
+   * amber, teal: the four most separated hues the painted palette has. */
+  { id: 'sedan', length: 4.5, colour: LC('paintC') }, // slate blue
+  { id: 'rally', length: 4.2, colour: VERMILION }, // rally red
+  { id: 'taxi', length: 4.5, colour: AMBER }, // and a taxi is amber, obviously
+  { id: 'patrol', length: 4.6, colour: TEAL },
+];
+
+/**
+ * One car standing on the forecourt: plinth, body, cabin, four wheels, and a plaque facing out.
+ *
+ * Built from the same primitives as everything else here, at the car's REAL length, so a Patrol
+ * beside a Rally is visibly the longer car. Parked nose-out along local +z, which is the way the
+ * apron faces, so you drive up the aisle and see the fronts.
+ *
+ * @param {object} M painted-mesh builder
+ * @param {number} px local x of the slot
+ * @param {number} pz local z of the slot
+ * @param {number} len the car's real length in metres
+ * @param {number[]} colour linear paint colour
+ */
+function showroomCar(M, px, pz, len, colour) {
+  /* pbox TAKES HALF-EXTENTS, and getting that wrong is visible from space: the first version passed
+   * a full 1.82 m width into the half-width slot and produced four 3.6 m-wide slabs standing on the
+   * forecourt like shipping containers. Every number below is a HALF.
+   *
+   * The cars are parked nose-out along local +z (the way the apron faces), so LENGTH is the z
+   * half-extent and WIDTH is the x one — the reverse of the silhouette behind the glass above, which
+   * lies across the window. The slots are 4.2 m apart in x, which is why a 4.6 m Patrol has to run
+   * along z: broadside they would overlap. */
+  const hl = len * 0.5;
+  const HW = 0.9; // half of a 1.8 m body
+  // a low plinth, so a display car reads as parked ON something rather than dropped on tarmac
+  pbox(M, px, 0.07, pz, HW + 0.35, 0.07, hl + 0.3, 0, CREAM, MAT.MATTE);
+  // body and cabin. The cabin is shorter, narrower and set back, which is what makes a box a car.
+  pbox(M, px, 0.58, pz, HW, 0.26, hl, 0, colour, MAT.MATTE);
+  /* The cabin sits ON the body rather than overlapping it, and the glass band is BETWEEN the two —
+   * body, glass, roof. Drawn as one flat lozenge the first time, the row photographed as four trays
+   * on plinths; the horizontal break at window height is the whole of what makes a box a car. */
+  pbox(M, px, 0.94, pz - len * 0.06, HW - 0.07, 0.11, hl * 0.5, 0, GLASSC, MAT.GLASS);
+  pbox(M, px, 1.15, pz - len * 0.06, HW - 0.12, 0.11, hl * 0.46, 0, colour, MAT.MATTE);
+  for (const wx of [-1, 1])
+    for (const wz of [-1, 1]) {
+      const cx = px + wx * (HW - 0.06);
+      const cz = pz + wz * hl * 0.62;
+      pcyl(M, [cx - 0.1, 0.3, cz], [cx + 0.1, 0.3, cz], 0.3, 0.3, 8, TYRE, MAT.MATTE, false, false);
+    }
+  // the plaque, on a short post at the front bumper, in the dealership's own teal
+  pcyl(M, [px, 0, pz + hl + 0.5], [px, 0.72, pz + hl + 0.5], 0.05, 0.05, 6, INK, MAT.MATTE, false, false);
+  pbox(M, px, 0.86, pz + hl + 0.5, 0.34, 0.11, 0.03, 0, SIGN_DEAL, MAT.MATTE);
+}
+
 export function buildStation(M, r, skirt, deal = false) {
   // Single source of truth in src/world/props.js — the access spur, the collision hitboxes
   // and the station's own placement code all read the same two numbers.
@@ -1375,6 +1441,27 @@ export function buildStation(M, r, skirt, deal = false) {
     }
     // and a price-flag pennant on the corner post, which is what a real forecourt would do
     pbox(M, CW - 0.2, CH - 0.9, CD + 1.0, 0.9, 0.42, 0.03, 0, SIGN_DEAL, MAT.MATTE);
+
+    /* ── THE LINE-UP ─────────────────────────────────────────────────────────
+     * Operator: "The dealership should have the other cars, you know, show room type situation
+     * where they can see the different cars physically and choose them."
+     *
+     * The silhouette behind the glass above says "this place sells cars" from the road. It does
+     * not let anyone SEE the cars — it is one shape, always the same, and it is not any of them.
+     * So the four dealership cars stand out on the apron at full size, each at its own real
+     * length, each in its own colour, each on a low plinth with a plaque.
+     *
+     * Full size matters. A row of miniatures would read as decoration; a Patrol that is visibly
+     * longer than a Rally is the thing the operator asked for, and it is the only way "choose
+     * them" means anything before you have driven one.
+     *
+     * The slots come from world/props.js, NOT from numbers written here, because the collider and
+     * the game's "which car am I standing next to" test read the same list — see SHOWROOM_SLOTS. */
+    SHOWROOM_CARS.forEach((c, i) => {
+      const slot = SHOWROOM_SLOTS[i];
+      if (!slot) return;
+      showroomCar(M, slot.dx, slot.dz, c.length, c.colour);
+    });
   }
   /* THE BEACON. The operator asked for "a minecraft becon style light people can drive to,
    * seen from distance above gas station" -- a station you can only find by driving past it is
@@ -1653,7 +1740,14 @@ export function stationSolids(stations, height = null) {
     const ca = Math.cos(s.yaw);
     const sa = Math.sin(s.yaw);
     const baseY = s.padY ?? s.y;
-    for (const b of STATION_HITBOXES) {
+    /* A DISPLAY CAR IS A REAL OBJECT. Operator: "see the different cars physically". A row of
+     * cars you can drive straight through is scenery, not a showroom — and the collider is also
+     * what stops you parking inside one while reading its price. Dealerships only, since a plain
+     * petrol station has no line-up. Radius 1.35 encloses the 1.82 m body across its width. */
+    const boxes = s.deal
+      ? STATION_HITBOXES.concat(SHOWROOM_SLOTS.map((b) => ({ dx: b.dx, dz: b.dz, r: 1.35, h: 1.5 })))
+      : STATION_HITBOXES;
+    for (const b of boxes) {
       out.push({
         x: s.x + b.dx * ca - b.dz * sa,
         z: s.z + b.dx * sa + b.dz * ca,

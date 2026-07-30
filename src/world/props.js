@@ -650,6 +650,53 @@ export const STATION_RADIUS = 11;
  *  AW/AD) and for anything else that needs to know where its edge is — the access spur, the
  *  collision hitboxes on the kiosk/pumps/canopy, and the little town cluster all read these
  *  rather than each guessing the forecourt's own size a second way. */
+/* ── THE SHOWROOM LINE-UP ─────────────────────────────────────────────────────
+ *
+ * Operator: "The dealership should have the other cars, you know, show room type situation where
+ * they can see the different cars physically and choose them."
+ *
+ * Four slots on the open apron, BEHIND the canopy, in the station's own local frame — the same
+ * frame buildStation draws in and stationSolids collides in. It lives here, in the pure world
+ * module, precisely because three separate things have to agree about where a display car is:
+ * the renderer draws it, the collider makes it solid, and the game asks "which one am I standing
+ * next to". Three copies of these numbers would drift, and the failure would be silent — a price
+ * plaque on one car and the purchase of another.
+ *
+ * The geometry is dictated by what is already on the apron. The canopy posts stand at local
+ * z = +4.4 and x = ±5.2; the pumps are at z = +1.0; the kiosk is at z = -4.8 beside the driveway
+ * mouth (measured, `node tools/probe-station-frame.mjs`). So z = +5.9 is the one clear strip
+ * that is still inside the apron's 7.0 m half-depth, and ±6.4 / ±2.2 keeps every car clear of a
+ * post and leaves a 2 m aisle between neighbours to walk the car through.
+ */
+export const SHOWROOM_SLOTS = [
+  { dx: -6.4, dz: 5.9 },
+  { dx: -2.2, dz: 5.9 },
+  { dx: 2.2, dz: 5.9 },
+  { dx: 6.4, dz: 5.9 },
+];
+
+/** How close you have to be to a display car for it to be the one you are looking at, in metres. */
+export const SHOWROOM_REACH = 5.0;
+
+/**
+ * Where a dealership's display cars actually are, in world space.
+ *
+ * @param {object} st a station with `deal` set
+ * @returns {Array<{slot: number, x: number, z: number, yaw: number}>} empty for a plain petrol station
+ */
+export function showroomSpots(st) {
+  if (!st || !st.deal) return [];
+  const ca = Math.cos(st.yaw);
+  const sa = Math.sin(st.yaw);
+  return SHOWROOM_SLOTS.map((b, i) => ({
+    slot: i,
+    x: st.x + b.dx * ca - b.dz * sa,
+    z: st.z + b.dx * sa + b.dz * ca,
+    // Parked square to the building, nose out, the way a forecourt actually lines cars up.
+    yaw: st.yaw,
+  }));
+}
+
 export const STATION_APRON_HALF_WIDTH = 9.5;
 export const STATION_APRON_HALF_DEPTH = 7.0;
 

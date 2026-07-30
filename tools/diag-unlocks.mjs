@@ -14,6 +14,7 @@
  */
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { stationsInBox, showroomSpots } from '../src/world/props.js';
 
 const URL = process.argv[2] || 'https://cozydriver.com/beta/?debug';
 const CHROME = process.env.CHROME_PATH || String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
@@ -151,6 +152,75 @@ const shut = cars ? cars.filter((c) => c.locked) : [];
 const openNow = cars ? cars.filter((c) => !c.locked).map((c) => c.label) : [];
 check(shut.length === 4, '100000 collected leaves the four dealership cars shut', `${shut.length} shut`, '4');
 check(openNow.length === 3, 'exactly the first three are open', openNow.join(' '), '3 cars');
+
+/* ── THE SHOWROOM: BUYING A CAR OFF THE FORECOURT ───────────────────────────
+ * Operator: "The dealership should have the other cars ... show room type situation where they can
+ * see the different cars physically and choose them."
+ *
+ * The garage checks above prove the LADDER. This proves the ACT: stand beside a real display car at
+ * a real dealership in the live world and press the key. The same seed is used in node and in the
+ * page, so the coordinates computed here are the coordinates the game drew the cars at — if those
+ * two ever disagreed, the prompt would name a car that is not standing there.
+ */
+console.log('');
+const SEED = 20260726;
+const stations = stationsInBox(-6000, -6000, 6000, 6000, SEED) || [];
+const dealer = stations.filter((s) => s.deal).sort((a, b) => Math.hypot(a.x, a.z) - Math.hypot(b.x, b.z))[0];
+if (!dealer) {
+  check(false, 'a dealership exists within 6 km of the origin', 0, '>= 1');
+} else {
+  const spots = showroomSpots(dealer);
+  check(spots.length === 4, 'the dealership has a four-car line-up', spots.length, '4');
+
+  /* A CLEAN WALLET AGAIN. The section above deliberately banks 100000 suns to prove a fortune opens
+   * no dealership car, and localStorage survives a navigate on the same origin — so without this the
+   * balance check below reads 100320 and means nothing. */
+  await evalIn('localStorage.clear(); true');
+  await send('Page.navigate', { url: `https://cozydriver.com/beta/?debug&seed=${SEED}&fresh=2` }, S);
+  for (let i = 0; i < 90; i++) {
+    await sleep(500);
+    if (await evalIn('!!(window.WANDEROAD && window.WANDEROAD.wallet)')) break;
+  }
+  await sleep(2500);
+  const seedOk = await evalIn('window.WANDEROAD.seed');
+  check(seedOk === SEED, 'the page grew the same world these coordinates came from', seedOk, SEED);
+
+  // Money, and a car to spend it on: the SECOND slot, so a slot mapping that is wrong by one cannot
+  // pass by accident.
+  await evalIn('window.WANDEROAD.wallet.addSuns(500); true');
+
+  /* RECORD EVERY LINE THE HUD SAYS, rather than reading #toast at one instant. Parking on a
+   * forecourt also fills the tank, so "full tank" lands on top of the showroom prompt within a
+   * second or so — the first version of this check read the toast after the overwrite and reported
+   * a working prompt as missing. A MutationObserver installed BEFORE the car arrives cannot miss it. */
+  await evalIn(
+    "(() => { window.__says = []; const el = document.getElementById('toast'); if (!el) return false; new MutationObserver(() => { const t = (el.textContent || '').trim(); if (t && window.__says[window.__says.length - 1] !== t) window.__says.push(t); }).observe(el, { childList: true, characterData: true, subtree: true }); return true; })()"
+  );
+  const target = spots[1];
+  await evalIn(
+    `(() => { const c = window.WANDEROAD.car; c.placeAt(${target.x}, ${target.z}, ${dealer.yaw}); c.vx = 0; c.vz = 0; c.speed = 0; return true; })()`
+  );
+  await sleep(2800);
+
+  const says = (await evalIn('JSON.stringify(window.__says || [])')) || '[]';
+  const lines = JSON.parse(says);
+  const prompt = lines.find((l) => /Rally/.test(l)) || '';
+  check(!!prompt, 'standing at slot 2 names the RALLY, not a neighbour', `"${prompt.slice(0, 30) || lines.join('|').slice(0, 30)}"`, 'names Rally');
+  check(/\d+ suns/.test(prompt), 'and quotes a price', /\d+ suns/.exec(prompt)?.[0] || 'none', 'a price');
+
+  const before = await evalIn("window.WANDEROAD.wallet.owns('rally', 'estate')");
+  check(before === false, 'the Rally is not yours yet', before, 'false');
+
+  // Press X, exactly as the prompt tells the player to.
+  for (const type of ['keyDown', 'keyUp'])
+    await send('Input.dispatchKeyEvent', { type, windowsVirtualKeyCode: 88, key: 'x', code: 'KeyX' }, S);
+  await sleep(3000);
+  const after = await evalIn(
+    "(() => ({ owns: window.WANDEROAD.wallet.owns('rally', 'estate'), suns: window.WANDEROAD.wallet.suns }))()"
+  );
+  check(after && after.owns === true, 'pressing X on the forecourt BUYS it', after && after.owns, 'true');
+  check(after && after.suns === 320, 'and charges exactly its price out of 500', after && after.suns, '320');
+}
 
 console.log(`\n${pass}/${pass + fail} checks passed`);
 sock.close();
