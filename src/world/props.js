@@ -1123,7 +1123,7 @@ export const AIRFIELD_FLAT = 11; // metres along the strip, i.e. under 3% — se
  * fixed order and the FIRST that passes wins — so every client still agrees, which is the property
  * that mattered. It is a search over a fixed list, not a relocation that depends on what was tried
  * before it. */
-const AIRFIELD_TRIES = 8;
+const AIRFIELD_TRIES = 5;
 
 const SALT_AIRFIELD = 0x41f1;
 
@@ -1134,7 +1134,61 @@ const SALT_AIRFIELD = 0x41f1;
  *        and dryness tests are skipped and the candidate is returned unchecked, which is what lets
  *        a caller ask "where would they be" cheaply.
  */
+/* IS THIS POINT UNDER WATER, CHEAPLY.
+ *
+ * `isDryAt` is the obvious answer and it costs 0.76 ms a call — measured — because it rebuilds what
+ * it needs from the seed every time. The shoreline walk below wants up to 76 samples per candidate
+ * and there are 14 candidates a cell, so using it put 800 ms of work into a single streamed tile and
+ * the game ran at 11.8 fps with a car that would not pass 25 km/h. Both were caught by the browser
+ * suite rather than guessed at.
+ *
+ * A probe that already has a Terrain in hand can answer the same question with a water height and a
+ * ground height, which measured at 0.011 ms — seventy times cheaper. `isDryAt` stays as the fallback
+ * for a caller that has no probe, because then correctness matters more than speed. */
+const _wetCache = new Map();
+function wetAt(probe, x, z) {
+  /* Cached on a 12 m grid. The candidate loops walk overlapping lines out of the same cell, so the
+   * same points are asked about again and again — measured, this is most of what is left after
+   * dropping isDryAt. Keyed without the seed because a probe belongs to one world; cleared whenever
+   * it grows, which is cheap and cannot go stale within a session. */
+  const ck = `${Math.round(x / 12)},${Math.round(z / 12)}`;
+  const hit = _wetCache.get(ck);
+  if (hit !== undefined) return hit;
+  const out = _wetAt(probe, x, z);
+  if (_wetCache.size > 200000) _wetCache.clear();
+  _wetCache.set(ck, out);
+  return out;
+}
+function _wetAt(probe, x, z) {
+  if (probe && typeof probe.waterY === 'function' && typeof probe.height === 'function') {
+    const wy = probe.waterY(x, z);
+    if (wy === null || !Number.isFinite(wy)) return false;
+    return wy > probe.height(x, z);
+  }
+  if (probe && typeof probe.dry === 'function') return !probe.dry(x, z);
+  return false;
+}
+
+/* MEMOISED, and it is not an optimisation — it is the difference between a game and a slideshow.
+ *
+ * These are pure in (gi, gj, seed), and every streamed TILE asks about every cell it overlaps. Each
+ * unanswered ask runs up to AIRFIELD_TRIES candidates, and each candidate calls nearestRoadPoint,
+ * which builds the road network over a 5.2 km box. Uncached, the frame rate fell to 11.8 fps and the
+ * car would not accelerate past 25 km/h — the browser suite caught both. Cached, a cell is worked out
+ * once per session and every later tile reads the answer.
+ *
+ * Keyed on the PROBE'S PRESENCE too: a call without one skips the flat/dry tests and returns a
+ * different (unchecked) answer, and the two must never be confused for each other. */
+const _afCache = new Map();
 export function airfieldForCell(gi, gj, seed, probe = null) {
+  const ck = `${gi},${gj},${seed},${probe ? 1 : 0}`;
+  if (_afCache.has(ck)) return _afCache.get(ck);
+  const out = _airfieldForCell(gi, gj, seed, probe);
+  if (_afCache.size > 20000) _afCache.clear();
+  _afCache.set(ck, out);
+  return out;
+}
+function _airfieldForCell(gi, gj, seed, probe = null) {
   const rnd = rng(hash3i(gi, gj, 0x1d, seed ^ SALT_AIRFIELD));
   let first = null;
   for (let attempt = 0; attempt < AIRFIELD_TRIES; attempt++) {
@@ -1190,7 +1244,7 @@ export function airfieldForCell(gi, gj, seed, probe = null) {
         hi = Math.max(hi, h);
         sum += h;
         n++;
-        if (probe.dry && !probe.dry(px, pz)) bad = true; // over water
+        if (wetAt(probe, px, pz)) bad = true; // over water — see wetAt for why not isDryAt
       }
     }
     if (bad || hi - lo > AIRFIELD_FLAT) continue;
@@ -1241,8 +1295,25 @@ export function nearestAirfield(x, z, seed, radius = 12000, probe = null) {
 }
 
 /** The nearest point on the real road network to (x,z), with its tangent. Null if nothing is near. */
+/* nearestRoadPoint is where the money actually goes: it builds the road network over a 5.2 km box.
+ * Cached on a 250 m grid, which is far finer than the placement decisions it feeds and turns the
+ * repeated asks from the candidate loops above into one build per neighbourhood. */
+const _nrpCache = new Map();
 function nearestRoadPoint(x, z, seed) {
-  const R = 2600;
+  const ck = `${Math.round(x / 250)},${Math.round(z / 250)},${seed}`;
+  if (_nrpCache.has(ck)) return _nrpCache.get(ck);
+  const out = _nearestRoadPoint(x, z, seed);
+  if (_nrpCache.size > 30000) _nrpCache.clear();
+  _nrpCache.set(ck, out);
+  return out;
+}
+function _nearestRoadPoint(x, z, seed, R = 800) {
+  /* 800 m, not 2600. The box this builds is (2R)^2 of road network and it is by far the most
+   * expensive thing in the airfield and harbour placement — measured at 280 ms per tile-sized query
+   * even with every result memoised, which is a visible stall while streaming into new ground. And it
+   * was never needed: a harbour has to be within HARBOUR_MAX_ROAD (620 m) of a road and an airfield
+   * sits AIRFIELD_DIST (500 m) from one, so anything further away cannot produce either. A candidate
+   * with no road inside 800 m is correctly no candidate at all. */
   const edges = edgesInBox(x - R, z - R, x + R, z + R, seed, 0);
   let best = null;
   let bd = Infinity;
@@ -1269,6 +1340,237 @@ function nearestRoadPoint(x, z, seed) {
     }
   }
   return best;
+}
+
+/* ── HARBOURS: WHERE THE BOAT IS BOUGHT ──────────────────────────────────────
+ *
+ * Operator: "making buying a boat and unlock that. It isn't automatic, but something you get at the
+ * harbor. So you're going to have to build a harbor."
+ *
+ * The boat used to appear by itself the moment you held 50 coins, which is the one unlock in the
+ * game that happened TO you rather than because you went somewhere. Now it is a place: find a
+ * harbour, spend the coins, get the boat.
+ *
+ * A NOTE ON THE ASSETS. The operator pointed at the Synty POLYGON packs on the household share for
+ * this. They are a proprietary EULA and the `wanderoad` repo is public, so shipping their meshes
+ * would breach both their licence and this project's own MIT/Apache/BSD/CC0-only rule (docs/
+ * CREDITS.md). So the harbour is modelled in code in the same painted-solid style as the hundred
+ * roadside props, the petrol stations, the dealerships and the airfields — which is also why it can
+ * ship today rather than after a licence review.
+ *
+ * PLACEMENT is the interesting part, because a harbour is the one thing here that needs a COASTLINE:
+ * dry land on one side, water deep enough to float a boat on the other, and a road near enough to
+ * arrive on. All three are tested against the real world, and a candidate that misses any of them is
+ * simply not a harbour.
+ */
+/** One candidate harbour per this many metres of plane each way. */
+export const HARBOUR_CELL = 5000;
+/** How far out the quay reaches from the shore, metres. */
+export const HARBOUR_QUAY = 46;
+/** Half-width of the quay, metres. */
+export const HARBOUR_HALF_WID = 11;
+/** Metres of water depth wanted at the quay head — enough that a boat is plausibly afloat there. */
+export const HARBOUR_DEPTH = 1.6;
+/** A harbour has to be arrivable: no further than this from a road. */
+export const HARBOUR_MAX_ROAD = 620;
+/** How many spots in a cell are tried, in a fixed hashed order. Same reasoning as AIRFIELD_TRIES. */
+const HARBOUR_TRIES = 6;
+
+const SALT_HARBOUR = 0x48b0;
+
+/**
+ * The harbour for one HARBOUR_CELL cell, or null. Pure in (gi, gj, seed).
+ *
+ * `probe` needs `height(x,z)`, `dry(x,z)` and `waterY(x,z)` — the last one is what makes "deep
+ * enough" answerable. Without a probe the candidate is returned unchecked, which is what lets a
+ * caller ask cheaply where they would be.
+ */
+/** Memoised for the same reason airfieldForCell is — see its own note. A harbour candidate costs a
+ *  road-network build AND a shoreline walk, and every tile asks. */
+const _hbCache = new Map();
+export function harbourForCell(gi, gj, seed, probe = null) {
+  const ck = `${gi},${gj},${seed},${probe ? 1 : 0}`;
+  if (_hbCache.has(ck)) return _hbCache.get(ck);
+  const out = _harbourForCell(gi, gj, seed, probe);
+  if (_hbCache.size > 20000) _hbCache.clear();
+  _hbCache.set(ck, out);
+  return out;
+}
+function _harbourForCell(gi, gj, seed, probe = null) {
+  const rnd = rng(hash3i(gi, gj, 0x2b, seed ^ SALT_HARBOUR));
+  for (let attempt = 0; attempt < HARBOUR_TRIES; attempt++) {
+    const cx = (gi + 0.1 + rnd() * 0.8) * HARBOUR_CELL;
+    const cz = (gj + 0.1 + rnd() * 0.8) * HARBOUR_CELL;
+    const spin = rnd() * Math.PI * 2;
+
+    const road = nearestRoadPoint(cx, cz, seed);
+    if (!road || road.dist > HARBOUR_MAX_ROAD) continue;
+    if (!probe || typeof probe.height !== 'function') {
+      return { key: `hb:${gi},${gj}`, x: cx, z: cz, heading: spin, hx: Math.sin(spin), hz: Math.cos(spin), y: 0 };
+    }
+
+    /* WALK TO THE WATER. Step out from the candidate in a hashed direction until the ground goes
+     * wet; the last dry step is the shore and that is where the quay is rooted. A shoreline found by
+     * walking is the real one — testing a fixed point would only ever find a harbour on a seed that
+     * happened to put water exactly there. */
+    const dirX = Math.sin(spin);
+    const dirZ = Math.cos(spin);
+    let shoreX = null;
+    let shoreZ = null;
+    /* Coarse first, then refine. 24 m steps out to 900 m is 38 samples instead of 76, and the shore
+     * is then pinned to 12 m by stepping back once — the same answer for half the work, and this loop
+     * is the hot one (see wetAt). */
+    for (let d = 0; d <= 900; d += 24) {
+      const px = cx + dirX * d;
+      const pz = cz + dirZ * d;
+      if (wetAt(probe, px, pz)) {
+        if (d === 0) break; // started in the water: this candidate is not a shore
+        const back = wetAt(probe, cx + dirX * (d - 12), cz + dirZ * (d - 12)) ? 24 : 12;
+        shoreX = cx + dirX * (d - back);
+        shoreZ = cz + dirZ * (d - back);
+        break;
+      }
+    }
+    if (shoreX === null) continue;
+
+    /* DEEP ENOUGH AT THE HEAD, and level along the quay's own line, since the quay is a flat slab
+     * out over the water and a slab needs somewhere flat to start from. */
+    const headX = shoreX + dirX * HARBOUR_QUAY;
+    const headZ = shoreZ + dirZ * HARBOUR_QUAY;
+    const wy = probe.waterY ? probe.waterY(headX, headZ) : null;
+    const bed = probe.height(headX, headZ);
+    if (wy === null || !Number.isFinite(wy) || !Number.isFinite(bed)) continue;
+    if (wy - bed < HARBOUR_DEPTH) continue;
+
+    // and the land end has to be usable ground, not a cliff
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let t = -1; t <= 0.15; t += 0.15) {
+      const px = shoreX + dirX * HARBOUR_QUAY * t;
+      const pz = shoreZ + dirZ * HARBOUR_QUAY * t;
+      const h = probe.height(px, pz);
+      if (!Number.isFinite(h)) {
+        lo = Infinity;
+        break;
+      }
+      lo = Math.min(lo, h);
+      hi = Math.max(hi, h);
+    }
+    if (!Number.isFinite(lo) || hi - lo > 6) continue;
+
+    return {
+      key: `hb:${gi},${gj}`,
+      x: shoreX,
+      z: shoreZ,
+      heading: spin,
+      hx: dirX,
+      hz: dirZ,
+      /* The quay deck sits just clear of the water, so it reads as a dock rather than a causeway. */
+      y: wy + 1.1,
+      waterY: wy,
+      depth: wy - bed,
+      roadDist: road.dist,
+      quay: HARBOUR_QUAY,
+      halfWid: HARBOUR_HALF_WID,
+    };
+  }
+  return null;
+}
+
+/* ── WARMING, AND WHY THE TILE PIPELINE MUST NOT DO THIS WORK ────────────────
+ *
+ * A cold harbour or airfield cell costs 96-182 ms to resolve — measured — and a tile-sized query
+ * spans nine of them, so asking during a tile bake put over a second of work into one frame. The
+ * symptoms were unmistakable and the browser suite caught both: 11.8 fps, and a car that would not
+ * accelerate past 25 km/h because the physics was being starved.
+ *
+ * The answers memoise to 0 ms, so the cost is entirely first-contact. These two functions let the
+ * caller pay it deliberately, ONE CELL AT A TIME, off the critical path: `cellsWarm` asks whether a
+ * box can be answered for free, and `warmOne` resolves a single nearest unresolved cell. render/
+ * props.js calls warmOne once a frame and only builds harbours and airfields for boxes that are
+ * already warm — so a harbour appears a second or two after you first come near its cell rather than
+ * arriving with a stutter.
+ */
+export function harbourCellsWarm(x0, z0, x1, z1, seed) {
+  const gi0 = Math.floor((x0 - HARBOUR_CELL) / HARBOUR_CELL);
+  const gi1 = Math.floor((x1 + HARBOUR_CELL) / HARBOUR_CELL);
+  const gj0 = Math.floor((z0 - HARBOUR_CELL) / HARBOUR_CELL);
+  const gj1 = Math.floor((z1 + HARBOUR_CELL) / HARBOUR_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) if (!_hbCache.has(`${gi},${gj},${seed},1`)) return false;
+  }
+  return true;
+}
+
+export function airfieldCellsWarm(x0, z0, x1, z1, seed) {
+  const gi0 = Math.floor((x0 - AIRFIELD_CELL) / AIRFIELD_CELL);
+  const gi1 = Math.floor((x1 + AIRFIELD_CELL) / AIRFIELD_CELL);
+  const gj0 = Math.floor((z0 - AIRFIELD_CELL) / AIRFIELD_CELL);
+  const gj1 = Math.floor((z1 + AIRFIELD_CELL) / AIRFIELD_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) if (!_afCache.has(`${gi},${gj},${seed},1`)) return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve at most ONE unresolved cell near (x,z), nearest first. Returns true if it did any work, so
+ * a caller can stop after one per frame. Harbours before airfields: the boat is the earlier unlock.
+ */
+export function warmOne(x, z, seed, probe, radiusCells = 1) {
+  for (const [cell, cache, fn] of [
+    [HARBOUR_CELL, _hbCache, harbourForCell],
+    [AIRFIELD_CELL, _afCache, airfieldForCell],
+  ]) {
+    const ci = Math.floor(x / cell);
+    const cj = Math.floor(z / cell);
+    for (let ring = 0; ring <= radiusCells; ring++) {
+      for (let dj = -ring; dj <= ring; dj++) {
+        for (let di = -ring; di <= ring; di++) {
+          if (Math.max(Math.abs(di), Math.abs(dj)) !== ring) continue;
+          const gi = ci + di;
+          const gj = cj + dj;
+          if (cache.has(`${gi},${gj},${seed},1`)) continue;
+          fn(gi, gj, seed, probe);
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** Every harbour whose shore point falls in this box. Same shape as stationsInBox. */
+export function harboursInBox(x0, z0, x1, z1, seed, probe = null) {
+  const out = [];
+  const gi0 = Math.floor((x0 - HARBOUR_CELL) / HARBOUR_CELL);
+  const gi1 = Math.floor((x1 + HARBOUR_CELL) / HARBOUR_CELL);
+  const gj0 = Math.floor((z0 - HARBOUR_CELL) / HARBOUR_CELL);
+  const gj1 = Math.floor((z1 + HARBOUR_CELL) / HARBOUR_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) {
+      const h = harbourForCell(gi, gj, seed, probe);
+      if (!h) continue;
+      if (h.x < x0 || h.x >= x1 || h.z < z0 || h.z >= z1) continue;
+      out.push(h);
+    }
+  }
+  return out;
+}
+
+/** Nearest harbour to a point, or null. What main.js asks to know whether the boat can be bought. */
+export function nearestHarbour(x, z, seed, radius = 9000, probe = null) {
+  const list = harboursInBox(x - radius, z - radius, x + radius, z + radius, seed, probe);
+  let best = null;
+  let bd = Infinity;
+  for (const h of list) {
+    const d = Math.hypot(h.x - x, h.z - z);
+    if (d < bd) {
+      bd = d;
+      best = h;
+    }
+  }
+  return best ? { ...best, dist: bd } : null;
 }
 
 /** Mean metres of arterial between stations, for the acceptance harness. */

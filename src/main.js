@@ -38,7 +38,7 @@ import { Autopilot } from './car/autopilot.js';
 import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak, STATION_FORGIVE_R } from './game/streak.js';
-import { Wallet } from './game/wallet.js';
+import { Wallet, BOAT_UNLOCK_COINS, CAN_PRICE } from './game/wallet.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
@@ -391,6 +391,28 @@ async function boot() {
    * `deal` flag (world/props.js), so this costs nothing new. */
   const DEAL_RADIUS = 34;
   let dealerWas = false; // latch for the arrival line — see the frame loop
+
+  /* AT A PUMP, close enough to do business — the same forecourt radius a dealership uses, and the
+   * gate for buying a spare fuel can (operator: "make it so you can buy gas cans in the petrol
+   * stations"). A dealership is not a pump: they are the same structure with a flag, and each sells
+   * its own thing. */
+  const atPumpShop = () => !!fuel.nearest && fuel.nearest.deal !== true && fuel.nearest.dist <= DEAL_RADIUS;
+
+  /* AT A HARBOUR. The boat is bought here rather than granted at 50 coins — operator: "buying a boat
+   * ... isn't automatic, but something you get at the harbor".
+   *
+   * Asked of the RENDER layer, not of the pure world function. The first version called
+   * nearestHarbour() from world/props.js on a 1.5 s timer and it starved the frame: that walks a 5 km
+   * lattice and probes the sea bed at every candidate, and the car dropped to 9 km/h on a road (the
+   * browser suite caught it — "C4 lifting off slows you visibly: 22 -> 21 km/h"). render/props.js has
+   * already done that work for every tile it baked, so asking it costs nothing. Same trade every
+   * station makes: a harbour is findable once its tile has streamed in. */
+  const HARBOUR_RADIUS = 46;
+  const atHarbour = () => {
+    const h = props.nearestHarbour(car.x, car.z);
+    return !!h && h.dist <= HARBOUR_RADIUS;
+  };
+  let harbourWas = false;
   const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
   const fuelGauge = new FuelGauge(hud.root);
 
@@ -460,6 +482,8 @@ async function boot() {
     wallet: () => wallet,
     fuel: () => fuel,
     canBuy: () => atDealer(),
+    atPump: () => atPumpShop(),
+    atHarbour: () => atHarbour(),
     say: (t, secs) => hud.say(t, secs),
     onCheat: (on) => {
       setCheat(on);
@@ -763,6 +787,20 @@ async function boot() {
     }
     if (input.tapped('horn')) audio.horn();
     if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
+    /* F: pour a spare can in. A can is a tank you carry — bought at a pump, used anywhere, which is
+     * the one thing coins could not buy before and exactly what you want when the needle is on the
+     * pin and the nearest station is 3 km back. */
+    if (input.tapped('useCan')) {
+      if (wallet.cans <= 0) {
+        hud.say('no spare cans — buy one at a petrol station', 2.8);
+      } else if (fuel.fraction > 0.92) {
+        hud.say('the tank is already full', 2.2);
+      } else if (wallet.useCan()) {
+        fuel.fill(Math.min(1, fuel.fraction + 0.5));
+        audio.pickup();
+        hud.say(`can poured in — ${wallet.cans} left`, 2.8);
+      }
+    }
     if (input.tapped('autodrive')) hud.say(auto.toggle(car) ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
     if (input.tapped('reset')) backToRoad();
     // 'Give fuel' is not in car/input.js's KEYMAP (that file is out of scope this pass) — the
@@ -846,6 +884,19 @@ async function boot() {
     /* Arriving at a dealership says so, once. A shop you can walk into and not notice is not a
      * shop — and ESC is the only way in, which is not something a player would guess. Latched
      * on the transition rather than the state so it cannot repeat while you are parked. */
+    const harbourNow = atHarbour();
+    if (harbourNow !== harbourWas) {
+      harbourWas = harbourNow;
+      if (harbourNow) {
+        hud.say(
+          wallet.boat
+            ? 'the harbour — B to take the boat out'
+            : `harbour — ESC to buy the boat for ${BOAT_UNLOCK_COINS} coins (you have ${wallet.coins})`,
+          3.8
+        );
+      }
+    }
+
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {
       dealerWas = dealerNow;

@@ -29,6 +29,10 @@ const KEYMAP = {
   radio: ['KeyN'],
   autodrive: ['KeyG'],
   horn: ['KeyH'],
+  /* F for FUEL — pour a spare can into the tank. Bought at a petrol station (operator: "make it so
+   * you can buy gas cans in the petrol stations"), carried in the boot, and used wherever you happen
+   * to be, which is the whole point of carrying one. */
+  useCan: ['KeyF'],
   fine: ['ShiftLeft'],
   attack: ['ControlLeft'],
 };

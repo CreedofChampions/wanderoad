@@ -29,6 +29,10 @@ import { waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
 import {
   propsInBox, stationsInBox, fuelCansInBox, stationTownInBox, stationSpur, stationPad, PROP_BY_ID, PROP_IDS,
   airfieldsInBox,
+  harboursInBox,
+  harbourCellsWarm,
+  airfieldCellsWarm,
+  warmOne,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
 } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
@@ -1134,6 +1138,115 @@ const BUILDERS = {
  * level with the ROAD (a real one is), so on anything but dead-flat ground one edge would
  * otherwise show daylight underneath.
  */
+/* ── A HARBOUR ───────────────────────────────────────────────────────────────
+ * Operator: "buying a boat ... isn't automatic, but something you get at the harbor. So you're going
+ * to have to build a harbor."
+ *
+ * Modelled in code, like every other prop in this file. The Synty POLYGON packs on the household
+ * share were offered for this and cannot be used: proprietary EULA, and this repo is public (see the
+ * note by harbourForCell in world/props.js).
+ *
+ * What a harbour has to say from a distance is "boats are bought here", so: a stone quay out over
+ * the water with mooring bollards and a rope line, a crane on the quay head, stacked crates and
+ * barrels, a harbourmaster's hut, and a moored boat. Local axes: +Z runs out along the quay, away
+ * from the shore, and +X across it.
+ */
+export function buildHarbour(M, r, h, skirt) {
+  const Q = h.quay || 46;
+  const W = h.halfWid || 11;
+  const drop = Math.max(1.2, skirt);
+
+  /* The quay: a slab from the shore out over the water, on stone piers. The slab's top face is at
+   * y=0 in local space (blit puts it at h.y, just clear of the water) and the skirt reaches down
+   * past the sea bed so no edge floats. */
+  pbox(M, 0, -drop * 0.5, Q * 0.5, W, drop * 0.5, Q * 0.5, 0, STONE, MAT.MATTE);
+  pbox(M, 0, 0.01, Q * 0.5, W - 0.6, 0.02, Q * 0.5 - 0.6, 0, STONE_L, MAT.MATTE);
+  // piers under the outer half, so it reads as standing in water rather than as a wall of rock
+  for (let k = 0; k < 4; k++) {
+    const z = Q * 0.35 + (k / 3) * Q * 0.55;
+    for (const sx of [-1, 1]) {
+      pcyl(M, [sx * (W - 1.6), -drop, z], [sx * (W - 1.6), 0, z], 0.62, 0.7, 8, WOOD_D, MAT.MATTE, false, false);
+    }
+  }
+
+  /* MOORING BOLLARDS down both edges, with a rope slung between them. The rope is what makes it a
+   * working quay rather than a jetty. */
+  for (let k = 0; k <= 5; k++) {
+    const z = 3 + (k / 5) * (Q - 6);
+    for (const sx of [-1, 1]) {
+      pcyl(M, [sx * (W - 1.1), 0, z], [sx * (W - 1.1), 0.78, z], 0.24, 0.3, 8, INK, MAT.MATTE, false, false);
+      if (k < 5) {
+        const z2 = 3 + ((k + 1) / 5) * (Q - 6);
+        pbox(M, sx * (W - 1.1), 0.58, (z + z2) * 0.5, 0.05, 0.05, (z2 - z) * 0.5, 0, WOOD, MAT.MATTE);
+      }
+    }
+  }
+
+  /* THE CRANE on the quay head — the tallest thing here and the one that says "harbour" at range. */
+  {
+    const cz = Q - 7;
+    pbox(M, -W + 3.4, 0.5, cz, 1.6, 0.5, 1.6, 0, INK, MAT.MATTE);
+    pcyl(M, [-W + 3.4, 0.9, cz], [-W + 3.4, 9.4, cz], 0.42, 0.34, 8, VERMILION, MAT.MATTE, false, false);
+    // the jib, out over the water
+    pbox(M, -W + 3.4 + 3.2, 9.2, cz, 3.4, 0.22, 0.3, 0, VERMILION, MAT.MATTE);
+    pbox(M, -W + 3.4 - 1.2, 9.2, cz, 1.3, 0.2, 0.28, 0, VERMILION, MAT.MATTE); // counterjib
+    // and the hook line, hanging
+    pbox(M, -W + 3.4 + 6.2, 6.6, cz, 0.045, 2.6, 0.045, 0, INK, MAT.MATTE);
+    pbox(M, -W + 3.4 + 6.2, 4.1, cz, 0.3, 0.3, 0.3, 0, INK, MAT.MATTE);
+  }
+
+  /* THE HARBOURMASTER'S HUT, at the landward end, and the crates and barrels around it. */
+  {
+    const hz = 5.5;
+    pbox(M, W - 3.6, 1.5, hz, 2.3, 1.5, 2.1, 0, PLASTER, MAT.MATTE);
+    pbox(M, W - 3.6, 3.25, hz, 2.6, 0.3, 2.4, 0, ROOF_B, MAT.MATTE);
+    pbox(M, W - 3.6, 1.5, hz - 2.15, 0.7, 0.9, 0.06, 0, WOOD_D, MAT.MATTE); // door
+    pbox(M, W - 5.1, 1.9, hz, 0.05, 0.5, 0.6, 0, GLASSC, MAT.GLASS); // window
+  }
+  for (const [bx, bz, bh] of [
+    [-W + 2.6, 9.5, 0],
+    [-W + 2.6, 11.2, 0],
+    [-W + 2.6, 10.3, 1],
+    [W - 3.2, 13.5, 0],
+    [W - 4.6, 13.9, 0],
+  ]) {
+    pbox(M, bx, 0.55 + bh * 1.05, bz, 0.52, 0.52, 0.52, r() * 0.4, WOOD, MAT.MATTE);
+  }
+  for (const [bx, bz] of [
+    [W - 2.4, 17.5],
+    [W - 3.5, 18.4],
+    [-W + 2.4, 16.0],
+  ]) {
+    pcyl(M, [bx, 0, bz], [bx, 0.9, bz], 0.34, 0.34, 10, WOOD_D, MAT.MATTE, false, false);
+  }
+
+  /* A MOORED BOAT alongside — hull, cabin, mast — so what is sold here is obvious before anyone
+   * reads a word of HUD text. */
+  {
+    const bx = W + 3.2;
+    const bz = Q * 0.62;
+    pbox(M, bx, -0.5, bz, 1.5, 0.55, 4.2, 0, CREAM, MAT.MATTE); // hull
+    pbox(M, bx, 0.1, bz, 1.6, 0.14, 4.3, 0, WOOD, MAT.MATTE); // deck
+    pbox(M, bx, 0.7, bz - 0.9, 0.9, 0.62, 1.2, 0, PLASTER, MAT.MATTE); // cabin
+    pbox(M, bx, 0.95, bz - 0.9, 0.95, 0.08, 1.25, 0, ROOF_A, MAT.MATTE);
+    pcyl(M, [bx, 0.2, bz + 0.6], [bx, 4.4, bz + 0.6], 0.09, 0.07, 6, CREAM, MAT.MATTE, false, false); // mast
+  }
+
+  /* AND THE BEACON, the same device the stations and airfields use: an EMIT column, unlit by the
+   * sun, so a harbour can be seen from far enough away to be worth driving to. Blue-white here
+   * rather than warm — it is a light over water. */
+  {
+    const H = 70;
+    for (let i = 0; i < 3; i++) {
+      const y0 = 4 + (H * i) / 3;
+      const y1 = 4 + (H * (i + 1)) / 3;
+      const r0 = 0.62 * (1 - i / 3) + 0.1;
+      const r1 = 0.62 * (1 - (i + 1) / 3) + 0.1;
+      pcyl(M, [W - 3.6, y0, 5.5], [W - 3.6, y1, 5.5], r0, r1, 4, GLOW, MAT.EMIT, false, false);
+    }
+  }
+}
+
 /* ── AN AIRFIELD ─────────────────────────────────────────────────────────────
  * Operator: "place airports out 500m from roads randomly with a few things near by for people to
  * be able to see it".
@@ -1754,6 +1867,13 @@ export class Props {
      * nearest pump was for most of a tank. Capped, dropping the furthest, so a long drive
      * cannot grow it without bound. */
     this.known = new Map();
+    /** Harbours, per baked tile key — see nearestHarbour for why they are cached here and not
+     *  queried live. */
+    this._harbours = new Map();
+    /** The probe warmOne() uses, kept from the most recent tile job — the placement tests need a
+     *  real Terrain and a tile has already built one. Null until the first tile is built, which is
+     *  fine: there is nothing to warm before then either. */
+    this._warmProbe = null;
     /* Fuel cans, key -> { mesh, x, z, phase, tile }. Unlike props and stations these are
      * INDIVIDUAL meshes, never baked into a tile's shared geometry: a can has to disappear
      * the instant it is collected and has to bob every frame, and a static bake can do
@@ -1775,6 +1895,29 @@ export class Props {
   }
 
   /** Nearest station this session knows about, or null. Cheap: a scan of a short list. */
+  /* Nearest HARBOUR, out of the tiles that are already built.
+   *
+   * Same pattern as nearestStation below and for a much sharper reason: main.js first asked the pure
+   * world function directly, on a timer, and it starved the frame — harboursInBox walks a 5 km
+   * lattice and probes the sea bed at every candidate, and the car dropped to 9 km/h on a road (the
+   * browser suite caught it: "C4 lifting off slows you visibly: 22 -> 21 km/h"). A tile has already
+   * done that work; asking it again is free. The cost is that a harbour is only findable once its
+   * tile has streamed in, which is exactly the same deal every station has. */
+  nearestHarbour(x, z) {
+    let best = null;
+    let bd = Infinity;
+    for (const list of this._harbours.values()) {
+      for (const h of list) {
+        const d = Math.hypot(h.x - x, h.z - z);
+        if (d < bd) {
+          bd = d;
+          best = h;
+        }
+      }
+    }
+    return best ? { ...best, dist: bd } : null;
+  }
+
   nearestStation(x, z) {
     let best = null;
     let bd = Infinity;
@@ -1797,6 +1940,16 @@ export class Props {
       this._reshape(camX, camZ);
     }
     this._drain(dt);
+
+    /* ONE HARBOUR-OR-AIRFIELD CELL PER FRAME, and no more. See the warming note in world/props.js:
+     * resolving a cold 5 km cell costs 96-182 ms, and doing it inside a tile bake (nine cells at
+     * once) is what dropped the game to 11.8 fps with a car that could not pass 25 km/h. Paying for
+     * exactly one, deliberately, off the tile pipeline, spreads it over the seconds a player spends
+     * driving towards the ground it describes.
+     *
+     * Only while a tile job is NOT in flight, so this never lands in the same frame as a bake. */
+    if (!this._job && this._warmProbe) warmOne(camX, camZ, this.seed, this._warmProbe);
+
     // Every frame, tile change or not: the bob has to keep moving and a can has to be
     // collectible the instant the car is close enough, not just when a tile boundary crosses.
     this._updateCans(dt, camX, camZ);
@@ -1959,8 +2112,28 @@ export class Props {
             return { y, dominant, wy: waterLevelAt(w, -Infinity) };
           },
           height: (x, z) => job.terr.height(x, z),
+          /* `dry` and `waterY` are what the airfields and the harbours need over and above a
+           * height: an airstrip must not be under water, and a quay has to have something to
+           * float a boat in. Both go through waterLevelAt, the one water-height function this
+           * game has (see terrain.js's own note), rather than a second opinion about the sea. */
+          dry: (x, z) => {
+            const b = job.terr.weights(x, z);
+            w.set(b.w);
+            const y = job.terr.height(x, z);
+            const wl = waterLevelAt(w, -Infinity);
+            return !(wl !== null && Number.isFinite(wl) && wl > y);
+          },
+          waterY: (x, z) => {
+            const b = job.terr.weights(x, z);
+            w.set(b.w);
+            const wl = waterLevelAt(w, -Infinity);
+            return wl !== null && Number.isFinite(wl) ? wl : null;
+          },
         };
         job.phase = 1;
+        /* Keep this probe for warmOne() — see update(). It belongs to a Terrain covering this tile,
+         * which is exactly the neighbourhood the next cells to warm are in. */
+        this._warmProbe = job.probe;
         return;
       }
       case 1:
@@ -1989,6 +2162,15 @@ export class Props {
         job.phase = 4;
         return;
       case 4:
+        /* Airfields — but ONLY if their cells are already resolved. See the warming note in
+         * world/props.js: a cold cell is 96-182 ms and a tile spans nine of them, which is where the
+         * 11.8 fps came from. An unwarmed tile simply gets no airfield and picks one up when it is
+         * next rebuilt, which streaming does as you move. */
+        if (!airfieldCellsWarm(ox, oz, ox + size, oz + size, this.seed)) {
+          job.airfields = [];
+          job.phase = 5;
+          return;
+        }
         /* Airfields, with the tile's own probe — the flat-along-the-strip and dry tests in
          * world/props.js need real ground, exactly like a station's apron does. Its own phase so a
          * tile that happens to contain one does not pay for it in the same frame as the stations. */
@@ -1998,6 +2180,21 @@ export class Props {
         });
         job.phase = 5;
         return;
+      case 5:
+        if (!harbourCellsWarm(ox, oz, ox + size, oz + size, this.seed)) {
+          job.harbours = [];
+          job.phase = 6;
+          return;
+        }
+        /* Harbours, with the tile's own probe. `waterY` is the extra one they need over an
+         * airfield's: "deep enough to float a boat" cannot be answered from height alone. */
+        job.harbours = harboursInBox(ox, oz, ox + size, oz + size, this.seed, {
+          height: job.probe.height,
+          dry: job.probe.dry,
+          waterY: job.probe.waterY,
+        });
+        job.phase = 6;
+        return;
       default:
         this._bake(job);
         this._job = null;
@@ -2006,7 +2203,7 @@ export class Props {
 
   /** Turn one tile's queried props into one geometry, one mesh and one solids block. */
   _bake(job) {
-    const { key, props, stations, cans, airfields } = job;
+    const { key, props, stations, cans, airfields, harbours } = job;
     const height = job.probe.height;
     const M = PB();
     for (const p of props) {
@@ -2022,6 +2219,22 @@ export class Props {
       const r = rng(hash3i(Math.round(p.x * 4), Math.round(p.z * 4), 0x9e37, this.seed));
       build(L, r, p.hue);
       blit(M, L, p.x, p.y, p.z, p.yaw, p.scale);
+    }
+
+    if (harbours && harbours.length) this._harbours.set(key, harbours);
+    for (const h of harbours || []) {
+      /* One geometry per harbour, blitted along the quay's own heading. The skirt has to reach the
+       * SEA BED, not the shore: the outer half of the slab stands in water. */
+      const L3 = PB();
+      let bed = h.y;
+      for (let t = 0; t <= 1.0001; t += 0.2) {
+        const px = h.x + h.hx * (h.quay || 46) * t;
+        const pz = h.z + h.hz * (h.quay || 46) * t;
+        const g = height(px, pz);
+        if (Number.isFinite(g)) bed = Math.min(bed, g);
+      }
+      buildHarbour(L3, rng(hash3i(Math.round(h.x), Math.round(h.z), 0x48b0, this.seed)), h, h.y - bed + 0.8);
+      blit(M, L3, h.x, h.y, h.z, h.heading, 1);
     }
 
     for (const f of airfields || []) {

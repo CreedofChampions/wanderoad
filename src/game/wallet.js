@@ -47,6 +47,10 @@ const SAVE_INTERVAL = 2;
  *  pickups give, so a good run out-earns scavenging without making the pickups pointless. */
 export const STREAK_METRES_PER_COIN = 250;
 
+/** Coins for one spare fuel can at a pump, and the most you may carry. */
+export const CAN_PRICE = 8;
+export const CAN_MAX = 3;
+
 export class Wallet {
   constructor({ storageKey = 'wanderoad.loot.v1' } = {}) {
     this.storageKey = storageKey;
@@ -65,6 +69,10 @@ export class Wallet {
     this.tanks = {};
     /** Streak metres already paid out, so a run that is re-read every frame mints once. */
     this._paidM = 0;
+    /** Spare fuel cans in the boot, bought at a pump — see buyCan. */
+    this._cans = 0;
+    /** Have we already said "you can afford a boat"? Once is a nudge, twice is nagging. */
+    this._toldAffordBoat = false;
 
     this._events = []; // drained by main.js, same shape as streak.js's own queue
     this._dirty = false;
@@ -82,6 +90,7 @@ export class Wallet {
       this.boat = !!d.boat;
       if (Array.isArray(d.owned)) this.owned = new Set(d.owned);
       if (d.tanks && typeof d.tanks === 'object') this.tanks = { ...d.tanks };
+      this._cans = Math.max(0, Math.min(CAN_MAX, +d.cans || 0));
     } catch {
       // A corrupt or unavailable store is not worth a crash on a cozy driving game — same
       // stance streak.js's own load() takes.
@@ -92,7 +101,14 @@ export class Wallet {
     try {
       localStorage.setItem(
         this.storageKey,
-        JSON.stringify({ coins: this.coins, gems: this.gems, boat: this.boat, owned: [...this.owned], tanks: this.tanks })
+        JSON.stringify({
+          coins: this.coins,
+          gems: this.gems,
+          boat: this.boat,
+          owned: [...this.owned],
+          tanks: this.tanks,
+          cans: this._cans,
+        })
       );
       this._dirty = false;
       this._sinceSave = 0;
@@ -177,14 +193,59 @@ export class Wallet {
   /** @param {number} n coins gained this call (0 is a no-op, never a write). */
   addCoins(n) {
     if (!n) return;
-    const before = this.coins;
     this.coins += n;
     this._dirty = true;
-    if (before < BOAT_UNLOCK_COINS && this.coins >= BOAT_UNLOCK_COINS && !this.boat) {
-      this.boat = true;
-      this._events.push({ kind: 'boat-unlock' });
-      this.save(); // an event this important is not left to the debounce
+    /* THE BOAT IS NO LONGER GIVEN AWAY HERE. Operator: "making buying a boat and unlock that. It
+     * isn't automatic, but something you get at the harbor."
+     *
+     * Reaching BOAT_UNLOCK_COINS used to latch `boat` and fire a toast right here, which made it
+     * the one unlock in the game that happened TO you rather than because you went somewhere. It is
+     * bought at a harbour now — see buyBoat — and the only thing crossing the price does is tell
+     * you that you can afford it, once. */
+    if (!this.boat && this.coins >= BOAT_UNLOCK_COINS && !this._toldAffordBoat) {
+      this._toldAffordBoat = true;
+      this._events.push({ kind: 'boat-affordable' });
     }
+  }
+
+  /** Buy the boat. Only ever called when the car is actually at a harbour — main.js gates it. */
+  buyBoat() {
+    if (this.boat) return false;
+    if (!this.spend(BOAT_UNLOCK_COINS)) return false;
+    this.boat = true;
+    this._events.push({ kind: 'boat-unlock' });
+    this.save();
+    return true;
+  }
+
+  /* ── GAS CANS, BOUGHT AT A PUMP ──────────────────────────────────────────────
+   * Operator: "Make it so you can buy gas cans in the petrol stations."
+   *
+   * A can in the boot is a tank you carry: it refills you once, wherever you are, which is the one
+   * thing coins could not buy before and the thing you actually want when a station is 3 km away and
+   * the needle is on the pin. Held as a count rather than as fuel so it survives a car swap and a
+   * reload — you bought a can, you still have a can. */
+  get cans() {
+    return this._cans;
+  }
+
+  /** Buy one spare can. */
+  buyCan(price) {
+    if (this._cans >= CAN_MAX) return false;
+    if (!this.spend(price)) return false;
+    this._cans++;
+    this._events.push({ kind: 'can-bought', cans: this._cans, price });
+    this.save();
+    return true;
+  }
+
+  /** Use one. Returns true if there was one to use. */
+  useCan() {
+    if (this._cans <= 0) return false;
+    this._cans--;
+    this._dirty = true;
+    this.save();
+    return true;
   }
 
   /** @param {number} n gems gained this call. */

@@ -13,6 +13,7 @@
 import { CARS, CAR_KEYS } from '../car/loadedCar.js';
 import { TERRAINS } from '../game/presets.js';
 import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, cheatOn, fmtUnlock } from '../game/garage.js';
+import { BOAT_UNLOCK_COINS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
 
 const ESC = ['Escape', 'KeyM'];
@@ -166,6 +167,9 @@ export class Menu {
         <h3>Tank <small>a bigger tank for the car you are driving — bought at a dealership</small></h3>
         <div class="row" data-group="tank"></div>
 
+        <h3>Shop <small>a boat at a harbour, spare fuel cans at a petrol station</small></h3>
+        <div class="row" data-group="shop"></div>
+
         <h3>Land <small>reloads the world</small></h3>
         <div class="row" data-group="terrain"></div>
 
@@ -210,6 +214,7 @@ export class Menu {
 
     this._fillCars();
     this._fillTank();
+    this._fillShop();
     this._fill('terrain', Object.keys(TERRAINS).map((k) => [k, TERRAINS[k].label]));
 
     el.addEventListener('click', (e) => this._onClick(e));
@@ -274,6 +279,42 @@ export class Menu {
     row.innerHTML = `<button data-group="tank" data-key="buy"${
       canAfford ? '' : ` class="locked" data-unlock="you have ${wallet.coins}"`
     }>${label}</button>`;
+  }
+
+  /* The two purchases that belong to a PLACE rather than to the car: the boat at a harbour and a
+   * spare fuel can at a pump. Operator: "buying a boat ... isn't automatic, but something you get at
+   * the harbor", and "make it so you can buy gas cans in the petrol stations".
+   *
+   * Both buttons are always shown, and when you are not standing in the right place the button says
+   * where to go — which is the only useful thing to say at that point, and is what stops the shop
+   * from being a menu you have to already understand. */
+  _fillShop() {
+    const row = this.root.querySelector('[data-group="shop"]');
+    if (!row) return;
+    const wallet = this.hooks.wallet ? this.hooks.wallet() : null;
+    if (!wallet) {
+      row.innerHTML = '';
+      return;
+    }
+    const here = { pump: !!this.hooks.atPump?.(), harbour: !!this.hooks.atHarbour?.() };
+    const out = [];
+
+    if (wallet.boat) {
+      out.push('<button class="locked" data-unlock="yours — B to take it out">Boat owned</button>');
+    } else {
+      const price = BOAT_UNLOCK_COINS;
+      const why = !here.harbour ? 'at a harbour' : wallet.coins < price ? `you have ${wallet.coins}` : '';
+      out.push(
+        `<button data-group="shop" data-key="boat"${why ? ` class="locked" data-unlock="${why}"` : ''}>Boat · ${price} coins</button>`
+      );
+    }
+
+    const canFull = wallet.cans >= CAN_MAX;
+    const canWhy = canFull ? 'boot is full' : !here.pump ? 'at a petrol station' : wallet.coins < CAN_PRICE ? `you have ${wallet.coins}` : '';
+    out.push(
+      `<button data-group="shop" data-key="can"${canWhy ? ` class="locked" data-unlock="${canWhy}"` : ''}>Fuel can · ${CAN_PRICE} coins (${wallet.cans}/${CAN_MAX})</button>`
+    );
+    row.innerHTML = out.join('');
   }
 
   _fill(group, entries) {
@@ -376,6 +417,36 @@ export class Menu {
       }
       this.hooks.say?.(`bigger tank fitted — ${(fuel.capacity / 60).toFixed(0)} min now`, 3.0);
       this._fillTank();
+    } else if (group === 'shop') {
+      const wallet = this.hooks.wallet?.();
+      if (!wallet) return;
+      if (key === 'boat') {
+        if (wallet.boat) return;
+        if (!this.hooks.atHarbour?.()) {
+          this.hooks.say?.('boats are sold at a harbour — look for the light over the water', 3.4);
+          return;
+        }
+        if (!wallet.buyBoat()) {
+          this.hooks.say?.(`the boat costs ${BOAT_UNLOCK_COINS} coins — you have ${wallet.coins}`, 3.4);
+          return;
+        }
+        this.hooks.say?.('the boat is yours — B to take it out on the water', 4.0);
+      } else if (key === 'can') {
+        if (!this.hooks.atPump?.()) {
+          this.hooks.say?.('fuel cans are sold at a petrol station', 3.2);
+          return;
+        }
+        if (!wallet.buyCan(CAN_PRICE)) {
+          this.hooks.say?.(
+            wallet.cans >= CAN_MAX ? 'the boot is already full of cans' : `a can costs ${CAN_PRICE} coins — you have ${wallet.coins}`,
+            3.2
+          );
+          return;
+        }
+        this.hooks.say?.(`a spare can in the boot — ${wallet.cans} of ${CAN_MAX}. Press F to use one`, 4.0);
+      }
+      this._fillShop();
+      this._mark();
     } else if (group === 'feel') {
       this.current.feel = key;
       this._mark();

@@ -20,7 +20,7 @@ globalThis.localStorage = {
   removeItem: (k) => mem.delete(k),
 };
 
-const { Wallet, STREAK_METRES_PER_COIN, BOAT_UNLOCK_COINS } = await import('../src/game/wallet.js');
+const { Wallet, STREAK_METRES_PER_COIN, BOAT_UNLOCK_COINS, CAN_PRICE, CAN_MAX } = await import('../src/game/wallet.js');
 const { FLEET, FLEET_BY_ID, priceOf, isUnlocked } = await import('../src/game/garage.js');
 const { Fuel, TANK_PRICE_BASE, TANK_PRICE_STEP } = await import('../src/game/fuel.js');
 const { stationsInBox, DEAL_SHARE } = await import('../src/world/props.js');
@@ -112,19 +112,88 @@ console.log('\n── gas bonus = coins ─────────────�
   check(reloaded.tankLevel('econ-a') === 1, 'the upgrade survives a reload', reloaded.tankLevel('econ-a'), '1');
 }
 
-/* ── 4. the boat is EARNED and spending cannot take it away ───────────────── */
-console.log('\n── spending never un-earns something ──────────────────────────────────────');
+/* ── 4. the boat is BOUGHT at a harbour, and spending cannot take it back ─── */
+console.log('\n── the boat is bought, not granted ────────────────────────────────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.boat' });
   w.addCoins(BOAT_UNLOCK_COINS);
-  check(w.boatUnlocked, `reaching ${BOAT_UNLOCK_COINS} coins earns the boat`, w.boatUnlocked, 'true');
-  check(w.spend(BOAT_UNLOCK_COINS), 'then spend every coin of it', 'true', 'true');
-  /* This is the trap the whole change had to avoid: boatUnlocked used to read "do you hold 50
-   * coins RIGHT NOW", which was fine while nothing could be spent and would have quietly taken
-   * the boat back the first time anyone bought a car. */
-  check(w.boatUnlocked, 'and the boat is STILL yours', w.boatUnlocked, 'true');
-  check(w.coins === 0, 'with an empty wallet', w.coins, '0');
+  /* THE RULE CHANGED, on instruction: "making buying a boat and unlock that. It isn't automatic, but
+   * something you get at the harbor." Holding the price used to latch the unlock right there in
+   * addCoins, which made the boat the one thing in the game that arrived without you going anywhere.
+   * These two checks asserted that old behaviour; they now assert the new one. */
+  check(!w.boatUnlocked, `holding ${BOAT_UNLOCK_COINS} coins does NOT hand you the boat`, w.boatUnlocked, 'false');
+  const ev = [];
+  for (let e = w.drain(); e; e = w.drain()) ev.push(e.kind);
+  check(ev.includes('boat-affordable'), 'but it does tell you, once, that you can afford one', ev.join(',') || '(none)', 'boat-affordable');
+
+  check(w.buyBoat(), 'buying it at a harbour works', 'true', 'true');
+  check(w.coins === 0, 'and the money is gone', w.coins, '0');
+  check(w.boatUnlocked, 'the boat is yours', w.boatUnlocked, 'true');
+  check(!w.buyBoat(), 'buying it twice is a no-op', 'false', 'false');
+
+  w.addCoins(200);
+  check(w.spend(200), 'then spend everything else you own', 'true', 'true');
+  /* The trap the whole change had to avoid: boatUnlocked used to read "do you hold 50 coins RIGHT
+   * NOW", which was fine while nothing could be spent and would have taken the boat back the first
+   * time anyone bought a car. */
+  check(w.boatUnlocked, 'and the boat is STILL yours on an empty wallet', w.boatUnlocked, 'true');
+
+  const reloaded = new Wallet({ storageKey: 'bench.econ.boat' });
+  check(reloaded.boatUnlocked, 'and it survives a reload', reloaded.boatUnlocked, 'true');
 }
+
+/* ── 4b. spare fuel cans, bought at a pump ────────────────────────────────── */
+console.log('\n── gas cans = coins, bought at a petrol station ───────────────────────────');
+{
+  const w = new Wallet({ storageKey: 'bench.econ.cansbought' });
+  check(w.cans === 0, 'the boot starts empty', w.cans, '0');
+  check(!w.buyCan(CAN_PRICE), 'a can cannot be bought with no money', 'false', 'false');
+  w.addCoins(CAN_PRICE * (CAN_MAX + 2));
+  for (let k = 0; k < CAN_MAX; k++) check(w.buyCan(CAN_PRICE), `can ${k + 1} of ${CAN_MAX} bought`, 'true', 'true');
+  console.log(`       bought ${w.cans} cans at ${CAN_PRICE} coins each; ${w.coins} coins left`);
+  check(w.cans === CAN_MAX, 'the boot holds the maximum', w.cans, String(CAN_MAX));
+  check(!w.buyCan(CAN_PRICE), 'and refuses one more', 'false', 'false');
+  check(w.useCan(), 'pouring one in works', 'true', 'true');
+  check(w.cans === CAN_MAX - 1, 'and takes it out of the boot', w.cans, String(CAN_MAX - 1));
+  const reloaded = new Wallet({ storageKey: 'bench.econ.cansbought' });
+  check(reloaded.cans === CAN_MAX - 1, 'the cans survive a reload', reloaded.cans, String(CAN_MAX - 1));
+}
+
+/* ── 4c. harbours are real places on real coastline ───────────────────────── */
+console.log('\n── harbours exist, on water deep enough for a boat ────────────────────────');
+{
+  const { harboursInBox, HARBOUR_DEPTH, HARBOUR_MAX_ROAD } = await import('../src/world/props.js');
+  const { Terrain, isDryAt, findSpawn } = await import('../src/world/terrain.js');
+  const { waterLevelAt } = await import('../src/world/biomes.js');
+  for (const seed of [20260726, 7]) {
+    const spawn = findSpawn(seed);
+    const R = 12000;
+    const big = new Terrain(seed, spawn.x - R - 800, spawn.z - R - 800, spawn.x + R + 800, spawn.z + R + 800);
+    const probe = {
+      height: (x, z) => big.height(x, z),
+      dry: (x, z) => isDryAt(x, z, seed),
+      waterY: (x, z) => {
+        const su = big.surface(x, z);
+        return su && su.w ? waterLevelAt(su.w, su.y) : null;
+      },
+    };
+    const list = harboursInBox(spawn.x - R, spawn.z - R, spawn.x + R, spawn.z + R, seed, probe);
+    let nearest = Infinity;
+    let shallow = 0;
+    let farFromRoad = 0;
+    for (const h of list) {
+      nearest = Math.min(nearest, Math.hypot(h.x - spawn.x, h.z - spawn.z));
+      if (h.depth < HARBOUR_DEPTH) shallow++;
+      if (h.roadDist > HARBOUR_MAX_ROAD) farFromRoad++;
+    }
+    console.log(`       seed ${seed}: ${list.length} harbours within ${R / 1000} km of spawn, nearest ${(nearest / 1000).toFixed(1)} km`);
+    check(list.length >= 3, `seed ${seed}: harbours exist near spawn`, list.length, '>= 3');
+    check(shallow === 0, `seed ${seed}: every one has water deep enough to float a boat`, `${shallow} too shallow`, '0');
+    check(farFromRoad === 0, `seed ${seed}: and every one is reachable from a road`, `${farFromRoad} unreachable`, '0');
+    check(nearest < R, `seed ${seed}: the nearest is a drive, not an expedition`, `${(nearest / 1000).toFixed(1)} km`, `< ${R / 1000} km`);
+  }
+}
+
 
 /* ── 5. dealerships are real places, at a reachable spacing ──────────────── */
 console.log('\n── dealerships exist in the world ─────────────────────────────────────────');
