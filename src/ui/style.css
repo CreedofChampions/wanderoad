@@ -1083,11 +1083,14 @@ canvas {
   opacity: 0;
   transition: opacity 260ms ease-out;
   /* A ring, not a wash: the middle of the screen is the road and must stay clear. */
-  box-shadow: inset 0 0 clamp(60px, 12vw, 160px) clamp(10px, 2vw, 26px) var(--rust);
+  /* A RING, and a restrained one. The first version spread 160 px with a 26 px spill at 0.5 opacity
+     under `multiply`, and a screenshot showed it washing the whole frame red rather than framing it —
+     the warning has to be unmissable at the EDGE, not a filter over the road you are trying to read. */
+  box-shadow: inset 0 0 clamp(40px, 7vw, 90px) clamp(2px, 0.6vw, 8px) var(--rust);
   mix-blend-mode: multiply;
 }
 #offroadEdge.on {
-  opacity: 0.5;
+  opacity: 0.34;
   transition: opacity 90ms linear;
 }
 

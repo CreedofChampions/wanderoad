@@ -496,10 +496,14 @@ export class Hud {
     /* And say it in words, because the whole complaint was that the bar meant nothing. The line names
      * the bar's length, what finishing it pays, and how far is left — the three things you can act
      * on. `fmtDistance` so a phone reads "820 m" rather than "0.8 km". */
+    /* A milestone length is always a round number (1, 1.5, 2, 3 km ...), so fmtDistance's two
+     * decimals print "1.00 km" where the bar is trying to say "1 km". A phone has no room for the
+     * noise and neither does the eye. */
+    const km = (m) => (m < 1000 ? `${Math.round(m)} m` : `${+(m / 1000).toFixed(1)} km`);
     if (ms) {
       this.barNext.textContent = live
-        ? `${fmtDistance(ms.length)} without leaving the road → ${ms.reward} sun${ms.reward === 1 ? '' : 's'} · ${fmtDistance(toGo)} to go`
-        : `${fmtDistance(ms.length)} without leaving the road → ${ms.reward} sun${ms.reward === 1 ? '' : 's'}`;
+        ? `${km(ms.length)} without leaving the road → ${ms.reward} sun${ms.reward === 1 ? '' : 's'} · ${km(toGo)} to go`
+        : `${km(ms.length)} without leaving the road → ${ms.reward} sun${ms.reward === 1 ? '' : 's'}`;
     }
 
     /* A FILLED BAR THROWS A SUN AT YOU. `takeFill()` pops the event the wallet recorded when the
