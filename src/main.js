@@ -840,6 +840,8 @@ async function boot() {
      * driving. */
     const minted = wallet.mintStreak(streak.state.distance);
     if (minted > 0) audio.pickup();
+    // The balance, top right, with a bump and a floating "+1" on a gain — see Hud.coins.
+    hud.coins(dt, wallet, minted);
 
     /* Arriving at a dealership says so, once. A shop you can walk into and not notice is not a
      * shop — and ESC is the only way in, which is not something a player would guess. Latched

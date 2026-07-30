@@ -1071,6 +1071,206 @@ export function nearestStation(x, z, seed, radius = 5000) {
   return best ? { ...best, dist: bd } : null;
 }
 
+/* ── AIRFIELDS ───────────────────────────────────────────────────────────────
+ *
+ * Operator: "place airports out 500m from roads randomly with a few things near by for people to
+ * be able to see it -- when people drive to them (no road there) say -- 'I wonder how you unlock
+ * planes'".
+ *
+ * So: OFF the network on purpose. Every other placed thing in this file hangs off a road, because
+ * everything else in the game is something you drive to along one. An airfield is the opposite —
+ * the point of it is that there is no road, you see something out in the open and go and look —
+ * and that is why it gets its own placement rather than the `deal` flag treatment a dealership got.
+ *
+ * HOW ONE IS PLACED, and every step of this is a pure function of (i, j, seed):
+ *
+ *   1. One candidate per AIRFIELD_CELL of the plane, so they are rare and evenly spread rather
+ *      than clustered — the same one-per-cell discipline the loot tiles use.
+ *   2. Offset AIRFIELD_DIST from the nearest road, in a hashed direction. "500 m from roads" is
+ *      the operator's own number and it is the whole character of the thing.
+ *   3. It must be FLAT. A runway on a hillside is not a runway, and this is the one placed thing
+ *      in the game that genuinely needs a long flat strip rather than a pad, so the flatness test
+ *      samples along the runway's own axis rather than in a box.
+ *   4. It must be DRY, and it must not have a road running through it after all that.
+ *
+ * A candidate that fails any of those is simply not an airfield. There is no relocation search:
+ * that would make the answer depend on the order things were tried in, and every placement in this
+ * file is deliberately a yes/no on a fixed candidate so two clients cannot disagree.
+ */
+/** One candidate airfield per this many metres of plane, each way. */
+export const AIRFIELD_CELL = 6000; // one candidate cell per 6 km each way — 19 airfields survive
+                                   // the flat/dry tests in a 54 km box, which is rare but findable
+/** Metres from the nearest road — the operator's own "out 500m from roads". */
+export const AIRFIELD_DIST = 500;
+/** And after placing, no road may be closer than this. The offset above is measured from ONE road;
+ *  a different one can still turn out to be nearer, and "there is no road here" is the whole idea. */
+export const AIRFIELD_MIN_ROAD = 300;
+/** Half the runway length, metres. 260 gives a 520 m strip, which a light aircraft can use. */
+export const AIRFIELD_HALF_LEN = 190; // a 380 m strip — ample for a light aircraft, and findable
+/** Half the runway width, metres. */
+export const AIRFIELD_HALF_WID = 14;
+/** Metres of height variation tolerated ALONG the strip. A runway is the flattest thing here. */
+export const AIRFIELD_FLAT = 11; // metres along the strip, i.e. under 3% — see AIRFIELD_TRIES
+
+/* How many places inside a cell are tried before the cell gives up.
+ *
+ * The first version tried ONE fixed spot per cell and 35 of 36 cells came back empty: half of them
+ * were over water and the rest had 17.5 m of relief along a 520 m strip (measured), because most of
+ * this world is not flat. One candidate per cell was not "rare and evenly spread", it was "almost
+ * never".
+ *
+ * Trying several is still perfectly deterministic — the candidates come out of the same hash in a
+ * fixed order and the FIRST that passes wins — so every client still agrees, which is the property
+ * that mattered. It is a search over a fixed list, not a relocation that depends on what was tried
+ * before it. */
+const AIRFIELD_TRIES = 8;
+
+const SALT_AIRFIELD = 0x41f1;
+
+/**
+ * The airfield for one AIRFIELD_CELL cell, or null. Pure in (gi, gj, seed).
+ * @param {number} gi @param {number} gj @param {number} seed
+ * @param {{height:(x:number,z:number)=>number}} [probe] a height source; without one the flatness
+ *        and dryness tests are skipped and the candidate is returned unchecked, which is what lets
+ *        a caller ask "where would they be" cheaply.
+ */
+export function airfieldForCell(gi, gj, seed, probe = null) {
+  const rnd = rng(hash3i(gi, gj, 0x1d, seed ^ SALT_AIRFIELD));
+  let first = null;
+  for (let attempt = 0; attempt < AIRFIELD_TRIES; attempt++) {
+    // somewhere inside the cell, well away from its edges so two neighbours cannot end up adjacent
+    const cx = (gi + 0.15 + rnd() * 0.7) * AIRFIELD_CELL;
+    const cz = (gj + 0.15 + rnd() * 0.7) * AIRFIELD_CELL;
+    const side = rnd() < 0.5 ? 1 : -1;
+    const spin = (rnd() - 0.5) * 1.2;
+
+    /* Find the road to be 500 m FROM. Asked of the real network rather than of the lattice, because
+     * "500 m from a road" has to mean the road that is actually built there. */
+    const near = nearestRoadPoint(cx, cz, seed);
+    if (!near) continue;
+
+    const awayX = -near.tz * side;
+    const awayZ = near.tx * side;
+    const x = near.x + awayX * AIRFIELD_DIST;
+    const z = near.z + awayZ * AIRFIELD_DIST;
+    const heading = Math.atan2(near.tx, near.tz) + spin;
+    const hx = Math.sin(heading);
+    const hz = Math.cos(heading);
+
+    const field = {
+      key: `af:${gi},${gj}`,
+      x,
+      z,
+      heading,
+      hx,
+      hz,
+      halfLen: AIRFIELD_HALF_LEN,
+      halfWid: AIRFIELD_HALF_WID,
+      y: 0,
+      relief: 0,
+    };
+    if (!first) first = field;
+    if (!probe || typeof probe.height !== 'function') return field;
+
+    /* FLAT ALONG THE STRIP, and dry. Sampled down the runway's own axis: a box test would pass a
+     * site that is level across the strip and falls away down it, which is the one shape a runway
+     * cannot be. */
+    let lo = Infinity;
+    let hi = -Infinity;
+    let sum = 0;
+    let n = 0;
+    let bad = false;
+    for (let t = -1; t <= 1.0001 && !bad; t += 0.1) {
+      const px = x + hx * AIRFIELD_HALF_LEN * t;
+      const pz = z + hz * AIRFIELD_HALF_LEN * t;
+      const h = probe.height(px, pz);
+      if (!Number.isFinite(h)) bad = true;
+      else {
+        lo = Math.min(lo, h);
+        hi = Math.max(hi, h);
+        sum += h;
+        n++;
+        if (probe.dry && !probe.dry(px, pz)) bad = true; // over water
+      }
+    }
+    if (bad || hi - lo > AIRFIELD_FLAT) continue;
+
+    // and no road may run through it after all that — the whole idea is that there is no road here
+    const road = nearestRoadPoint(x, z, seed);
+    if (road && road.dist < AIRFIELD_MIN_ROAD) continue;
+
+    field.y = sum / n;
+    field.relief = hi - lo;
+    field.roadDist = road ? road.dist : Infinity;
+    return field;
+  }
+  return null;
+}
+
+/** Every airfield whose centre falls in this box. Same shape as stationsInBox. */
+export function airfieldsInBox(x0, z0, x1, z1, seed, probe = null) {
+  const out = [];
+  const gi0 = Math.floor((x0 - AIRFIELD_CELL) / AIRFIELD_CELL);
+  const gi1 = Math.floor((x1 + AIRFIELD_CELL) / AIRFIELD_CELL);
+  const gj0 = Math.floor((z0 - AIRFIELD_CELL) / AIRFIELD_CELL);
+  const gj1 = Math.floor((z1 + AIRFIELD_CELL) / AIRFIELD_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) {
+      const f = airfieldForCell(gi, gj, seed, probe);
+      if (!f) continue;
+      if (f.x < x0 || f.x >= x1 || f.z < z0 || f.z >= z1) continue;
+      out.push(f);
+    }
+  }
+  return out;
+}
+
+/** Nearest airfield to a point, or null. What main.js asks to know whether to say the line. */
+export function nearestAirfield(x, z, seed, radius = 12000, probe = null) {
+  const list = airfieldsInBox(x - radius, z - radius, x + radius, z + radius, seed, probe);
+  let best = null;
+  let bd = Infinity;
+  for (const f of list) {
+    const d = Math.hypot(f.x - x, f.z - z);
+    if (d < bd) {
+      bd = d;
+      best = f;
+    }
+  }
+  return best ? { ...best, dist: bd } : null;
+}
+
+/** The nearest point on the real road network to (x,z), with its tangent. Null if nothing is near. */
+function nearestRoadPoint(x, z, seed) {
+  const R = 2600;
+  const edges = edgesInBox(x - R, z - R, x + R, z + R, seed, 0);
+  let best = null;
+  let bd = Infinity;
+  for (const e of edges) {
+    const n = e.pts.length / 2;
+    for (let k = 0; k < n - 1; k++) {
+      const ax = e.pts[k * 2];
+      const az = e.pts[k * 2 + 1];
+      const bx = e.pts[k * 2 + 2];
+      const bz = e.pts[k * 2 + 3];
+      const dx = bx - ax;
+      const dz = bz - az;
+      const len2 = dx * dx + dz * dz || 1;
+      let t = ((x - ax) * dx + (z - az) * dz) / len2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const px = ax + dx * t;
+      const pz = az + dz * t;
+      const d = Math.hypot(px - x, pz - z);
+      if (d < bd) {
+        bd = d;
+        const l = Math.hypot(dx, dz) || 1;
+        best = { x: px, z: pz, tx: dx / l, tz: dz / l, dist: d };
+      }
+    }
+  }
+  return best;
+}
+
 /** Mean metres of arterial between stations, for the acceptance harness. */
 export function stationSpacing(seed, halfSpan = 12000) {
   const edges = edgesInBox(-halfSpan, -halfSpan, halfSpan, halfSpan, seed, 0);

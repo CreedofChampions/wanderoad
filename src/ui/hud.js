@@ -58,7 +58,8 @@
  */
 
 import { fmtScore, fmtDistance } from '../game/streak.js';
-import { nextUnlock, fmtUnlock, FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
+import { FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
+import { STREAK_METRES_PER_COIN } from '../game/wallet.js';
 import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
 
@@ -111,7 +112,12 @@ function el(tag, idOrClass, text) {
  * cadence past 40: 80, 150, 300. Exported so tools/diag-hud.mjs checks the real list rather
  * than a hand-copied one.
  */
-export const MILESTONES_KM = [1, 3, 6, 10, 20, 40, 80, 150, 300];
+/* Coins shown across the bar at once. Four means each tick is a quarter of the width, which is
+ * big enough to read at a glance, and the band repeats — so a long run keeps filling and paying
+ * instead of running out of bar. See the COIN TICKS note in the constructor for why the old
+ * distance milestones (1, 3, 6, 10, 20, 40, 80, 150, 300 km on a log axis) had to go: cars are
+ * bought with coins now, so a distance ladder promised something that no longer happens. */
+export const COIN_TICKS = 4;
 
 /* ── the R hint ───────────────────────────────────────────────────────────────
  * Operator, verbatim: "give people the hint that they can click R to get back on road when
@@ -198,36 +204,56 @@ export class Hud {
     this.barMark = el('div', '.mark');
     this.barTrack.appendChild(this.barFill);
     this.barTrack.appendChild(this.barMark);
-    /* Milestone dots. Built once, on the same track and the same 0–100% coordinate space as
-     * the fill and the mark above (so `left: X%` means the same thing for all three) — only
-     * their passed/current class changes per frame, never their position or their count. Added
-     * after the fill and the mark so they draw on top of both. */
-    this.milestoneEls = MILESTONES_KM.map((km) => {
+    /* ── COIN TICKS, NOT DISTANCE MILESTONES ──────────────────────────────────
+     * Operator, playing the beta: "It's still profoundly unclear, even as the maker of the game,
+     * what you're unlocking and how. The bar at the bottom doesn't consistently fill up. There's
+     * these things that look like you can unlock something at a certain level, but the bar either
+     * doesn't move ... or it moves beyond all of them, and then you don't understand why you
+     * haven't unlocked it yet. It doesn't seem very congruent to the actual progress."
+     *
+     * It was not congruent, and the reason is a change made earlier the same day: cars are BOUGHT
+     * WITH COINS at a dealership now, and `unlockAt` no longer grants anything. The bar was still
+     * drawing a badge per car at the distance that used to unlock it, so it promised something
+     * that does not happen — you drive past the badge and nothing arrives. Meanwhile the dots sat
+     * on a log axis running to 300 km, so a normal run moved the fill through the first tenth of
+     * the bar and then a break sent it back to nothing.
+     *
+     * So the bar now shows the ONE thing that actually happens: a run pays a coin every
+     * STREAK_METRES_PER_COIN. The ticks are those coins, the fill is progress to the NEXT one, and
+     * it is linear because the mechanic is linear. It fills, pays, and starts again — every
+     * single time, with nothing on it that is not real.
+     *
+     * The car badges are gone from here entirely. What a car costs belongs next to the money, and
+     * it is in the garage panel and at the dealership, which is where you can act on it. */
+    this.tickEls = [];
+    for (let k = 1; k <= COIN_TICKS; k++) {
       const d = el('div', '.milestone');
-      d.dataset.km = String(km);
-      d.style.left = `${milestoneX(km).toFixed(2)}%`;
+      d.dataset.coin = String(k);
+      d.style.left = `${((k / COIN_TICKS) * 100).toFixed(2)}%`;
       this.barTrack.appendChild(d);
-      return { km, el: d };
-    });
-    /* Fleet unlock icons — one per car in src/game/garage.js's FLEET, so the WHOLE ladder
-     * (which cars are already open, which is next, which are still ahead) reads at a glance
-     * without opening the garage. Sits proud of the track via a `bottom` offset in the CSS,
-     * not centred on it like the milestones above, so the two dot families never compete for
-     * the same handful of pixels. A plain div holding one letter, never an <svg>: this file is
-     * built and driven by a stub DOM in tools/diag-hud.mjs (see this file's own header — "the
-     * whole block can be driven by a stub DOM in node") and that stub has no createElementNS.
-     * An inline icon would work in a real browser and throw in the one tool meant to catch a
-     * regression before it ships. */
-    this.fleetEls = FLEET.map((car) => {
-      const d = el('div', '.carIcon', car.label[0]);
-      d.dataset.id = car.id;
-      d.style.left = `${fleetX(car.unlockAt).toFixed(2)}%`;
-      this.barTrack.appendChild(d);
-      return { car, el: d };
-    });
+      this.tickEls.push(d);
+    }
     this.bar.appendChild(this.barNext);
     this.bar.appendChild(this.barTrack);
     this.root.appendChild(this.bar);
+
+    /* The off-road edge, and the coin balance. Both are new HUD surfaces asked for by the operator
+     * while playing the beta: an immediate red edge ("red off road feedback happens right away")
+     * and a prominent balance ("re-add the coins ticker to the top right, making it prominent").
+     * Built here rather than in their own files because neither owns any behaviour — they are a
+     * class toggle and a number — and a file each would be two more places to look. */
+    this.offroadEdge = el('div', 'offroadEdge');
+    this.root.appendChild(this.offroadEdge);
+    /** Raw off-road state as last written to the DOM — see the note in update(). */
+    this._offNow = false;
+
+    this.coinTicker = el('div', 'coinTicker');
+    this.coinTicker.innerHTML = '<i class="disc"></i><span class="n">0</span><span class="gain"></span>';
+    this.coinN = this.coinTicker.querySelector('.n');
+    this.coinGain = this.coinTicker.querySelector('.gain');
+    this.root.appendChild(this.coinTicker);
+    this._coins = -1;
+    this._gainT = 0;
 
     /* The streak block. Built here rather than in index.html so the markup stays a shell and
      * this module owns everything it touches. */
@@ -413,6 +439,27 @@ export class Hud {
       // underneath it. Text and colour agree, or neither moves.
       this.streakEl.classList.toggle('grace', this._capKey === 'grace');
 
+      /* AND THE IMMEDIATE ONE, off the RAW per-frame state with no confirm delay at all.
+       *
+       * Operator, playing the beta: "make it so red off road feedback happens right away (not
+       * waiting until way off road like now)". Two delays were stacked: `s.grace` only turns on
+       * once the streak's own off-road timer has started, the caption then holds any candidate
+       * for CAP_CONFIRM_S before believing it, and `s.grace` turns off AGAIN the moment the grace
+       * window expires — so the warning arrived late and then disappeared exactly when the streak
+       * broke.
+       *
+       * `s.onRoad` is the streak's own worst-wheel test (car.onRoadMin), so this lights the
+       * instant a single wheel crosses the verge. Flicker is handled by a 90 ms fade in CSS
+       * rather than by a timer here, which is what lets it be immediate — see #streak.offroad and
+       * #offroadEdge in ui/style.css. Not shown while auto-drive has the wheel: the streak is
+       * frozen then, so there is nothing to warn about. */
+      const offNow = !s.onRoad && !s.paused;
+      if (offNow !== this._offNow) {
+        this._offNow = offNow;
+        this.streakEl.classList.toggle('offroad', offNow);
+        this.offroadEdge.classList.toggle('on', offNow);
+      }
+
       /* The R hint. Fires on the CONFIRMED off-road transition — `this._capKey` only just
        * became 'grace' this frame, having not been 'grace' the frame before — never on the
        * raw `s.grace` this section reads above, for the same flicker reason the caption
@@ -445,86 +492,40 @@ export class Hud {
       this.streakPts.textContent = '';
     }
 
-    /* ── the unlock bar ─────────────────────────────────────────────── */
-    const best = Math.max(s.best, s.distance);
-    const nu = nextUnlock(best);
+    /* ── the run bar: one coin at a time ───────────────────────────────────
+     * See the COIN TICKS note in the constructor for why this replaced a car-unlock ladder. The
+     * whole widget answers one question — how far to the next coin — and it answers it the same
+     * way every time.
+     *
+     * `distance` and not `best`: this is the run you are on. When a run breaks the fill drops to
+     * nothing, which is the truth (you lost the run) and is why it now moves congruently instead
+     * of creeping along a log axis that ran to 300 km. */
+    const perCoin = STREAK_METRES_PER_COIN;
+    const runM = live ? s.distance : 0;
+    const spanM = perCoin * COIN_TICKS;
+    const intoSpan = runM % spanM;
+    const coinsThisRun = Math.floor(runM / perCoin);
     this.bar.classList.toggle('live', live);
-    if (nu) {
-      /* ONE AXIS, ONE MEANING. Operator: "The bar at the bottom filled at 1 kilometre. For
-       * some reason, it's really confusing to me why it would fill at 1 kilometre. The whole
-       * bar from left to right, I don't really understand it."
-       *
-       * They were reading two different scales drawn on the same track. The DOTS sit on a log
-       * distance axis spanning 0.5 km to 390 km, so the 1 km dot is a tenth of the way along —
-       * but the FILL was `distance / nextUnlock.unlockAt`, i.e. 0..1 per car, and the first
-       * car unlocks at 1 km. So the bar filled completely while the dot marking that same
-       * kilometre sat at 10% of its width, and then the fill reset. Two contradictory readings
-       * of the same pixels; no amount of staring at it would have resolved that.
-       *
-       * The fill now rides the SAME log axis as the dots and the car badges. It passes under
-       * each dot exactly when you reach that distance, it arrives at a car's badge exactly
-       * when that car unlocks, and it never resets — it only ever grows, which is what a
-       * distance-travelled bar should do. `barNext` still says which car is next and how far,
-       * because "how far to go" is the thing you can act on. */
-      const axis = (m) => clamp01(milestoneX(Math.max(m, 1) / 1000) / 100);
-      const runP = axis(s.distance);
-      const bestP = axis(s.best);
-      /* Floored, so the width written into the DOM is never literally 0%. The CSS min-width
-       * already guarantees the box, but a rendering floor that only exists in the stylesheet
-       * is a rendering floor an automated check has to take on trust. 0.4 % is 5 px on a
-       * 1400 px screen — a seed at the left edge, not a claim of progress. */
-      this.barFill.style.width = `${(Math.max(live ? runP : bestP, 0.004) * 100).toFixed(1)}%`;
-      // The old best, as a notch. It disappears the moment this run passes it — no fanfare,
-      // the fill simply arrives at the notch and keeps going.
-      this.barMark.style.left = `${(bestP * 100).toFixed(1)}%`;
-      this.barMark.classList.toggle('on', live && bestP > 0.01 && bestP < 0.99 && s.distance < s.best);
-      /* Say what the bar IS, not just what is next. A progress bar with no label is a puzzle,
-       * and this one measures the least obvious thing in the game — distance in a single run
-       * without leaving the road. "to go" is the actionable half; the prefix is the half that
-       * makes the whole widget legible the first time anyone looks at it. */
-      this.barNext.textContent = `without leaving the road · next: ${nu.car.label} in ${fmtUnlock(nu.remaining)}`;
-    } else {
-      this.barFill.style.width = `${(clamp01(milestoneX(Math.max(s.distance, 1) / 1000) / 100) * 100).toFixed(1)}%`;
-      this.barMark.classList.remove('on');
-      this.barNext.textContent = 'without leaving the road · every car unlocked';
+    this.barFill.style.width = `${(Math.max(intoSpan / spanM, 0.004) * 100).toFixed(1)}%`;
+    this.barMark.classList.remove('on');
+
+    /* Each tick lights as its coin is paid, and the one being worked towards is highlighted. The
+     * ticks are a repeating band of COIN_TICKS coins, so a long run keeps filling and paying
+     * rather than running out of bar. */
+    const paidInBand = Math.floor(intoSpan / perCoin);
+    for (let k = 0; k < this.tickEls.length; k++) {
+      const passed = k < paidInBand;
+      this.tickEls[k].classList.toggle('passed', passed);
+      this.tickEls[k].classList.toggle('current', k === paidInBand);
     }
 
-    /* ── milestone dots ──────────────────────────────────────────────
-     * A second readout on the same bar, independent of the car it is buying: fixed distance
-     * waypoints rather than the unlock ladder. Tracks the live run while one is happening, so
-     * a dot lights up the instant you cross it, and falls back to the all-time best at rest —
-     * the same live-vs-best rule streakKm itself already used a few lines up, so the two
-     * numbers on screen never disagree. The first not-yet-passed waypoint is "current"; there
-     * may be none once every waypoint is behind you, which is a fine resting state. */
-    const milestoneKm = (live ? s.distance : s.best) / 1000;
-    let milestoneCurrentSet = false;
-    for (const m of this.milestoneEls) {
-      const passed = milestoneKm >= m.km;
-      m.el.classList.toggle('passed', passed);
-      const current = !passed && !milestoneCurrentSet;
-      m.el.classList.toggle('current', current);
-      if (current) milestoneCurrentSet = true;
-    }
+    /* And say it in words, because a bar with no label was the other half of the complaint. The
+     * line names the rule, where you are in it, and what this run has earned so far. */
+    const toNext = Math.max(0, perCoin - (runM % perCoin));
+    this.barNext.textContent = live
+      ? `stay on the road — 1 coin every ${perCoin} m · next in ${Math.round(toNext)} m · ${coinsThisRun} this run`
+      : `stay on the road — 1 coin every ${perCoin} m`;
 
-    /* ── fleet unlock icons ──────────────────────────────────────────────────
-     * "Locked" is isUnlocked() actually checked against this frame's `best` — the identical
-     * value `nu` was just computed from a few lines up — never inferred from an icon's own
-     * position on the ladder. A car can only ever look unlocked here because garage.js itself
-     * already agrees it is (show the checked state, not the commanded one). */
-    for (const f of this.fleetEls) {
-      f.el.classList.toggle('locked', !isUnlocked(f.car, best));
-      f.el.classList.toggle('current', !!nu && nu.car.id === f.car.id);
-    }
-
-    /* Earning a car. nextUnlock() moving on is the signal, but it also moves when cheat mode
-     * is switched on, so the announcement is gated on the best having actually reached the
-     * old target. */
-    const nid = nu ? nu.car.id : '__all__';
-    if (this._nextId && nid !== this._nextId) {
-      const won = FLEET_BY_ID[this._nextId];
-      if (won && best >= won.unlockAt) this.say(`${won.label} unlocked`, 4.0);
-    }
-    this._nextId = nid;
 
     if (this._blip > 0) {
       this._blip -= dt;
@@ -581,6 +582,39 @@ export class Hud {
     if (this._toastT > 0) {
       this._toastT -= dt;
       if (this._toastT <= 0) this.toast.classList.remove('show');
+    }
+  }
+
+  /**
+   * The coin balance, top right. Called every frame from main.js with the wallet.
+   *
+   * Operator: "we need to re-add the coins ticker to the top right, making it prominent, showing
+   * how many coins you have in total". Everything is bought with coins now, so this is the most
+   * actionable number on the screen and it was a 12 px figure tucked under the player list.
+   *
+   * `gained` is what was minted THIS frame, which is the half that makes earning felt: the number
+   * bumps and a small green "+1" floats off it. That is the other half of "make it clear what you
+   * get for not leaving the road" — the bar says the rule, this says it just happened.
+   *
+   * @param {number} dt @param {{coins:number}} wallet @param {number} [gained]
+   */
+  coins(dt, wallet, gained = 0) {
+    if (!wallet || !this.coinN) return;
+    if (this._gainT > 0) {
+      this._gainT -= dt;
+      if (this._gainT <= 0) this.coinGain.classList.remove('show');
+    }
+    if (gained > 0) {
+      this.coinGain.textContent = `+${gained}`;
+      this.coinGain.classList.add('show');
+      this._gainT = 1.1;
+      this.coinTicker.classList.remove('bump');
+      void this.coinTicker.getBoundingClientRect().width; // restart the animation
+      this.coinTicker.classList.add('bump');
+    }
+    if (wallet.coins !== this._coins) {
+      this._coins = wallet.coins;
+      this.coinN.textContent = String(wallet.coins);
     }
   }
 }

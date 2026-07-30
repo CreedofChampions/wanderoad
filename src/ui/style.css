@@ -184,7 +184,10 @@ canvas {
 
 #players {
   position: absolute;
-  top: clamp(1rem, 4vw, 2rem);
+  /* Below #coinTicker, which now owns the top-right corner. Measured against a real screenshot:
+     at 1400x800 the ticker's own box is about 2.6rem tall including its shadow, and the player
+     name was printing straight through the middle of it. */
+  top: clamp(3.4rem, 8vw, 4.6rem);
   right: clamp(1rem, 4vw, 3rem);
   text-align: right;
   font-size: 0.82rem;
@@ -1049,4 +1052,91 @@ canvas {
     font-size: 0.72rem;
     padding: 0.5rem 0.8rem;
   }
+}
+
+/* ── OFF THE ROAD, THE INSTANT IT HAPPENS ────────────────────────────────────
+ * Operator, playing the beta: "make it so red off road feedback happens right away (not waiting
+ * until way off road like now) when offroad right away".
+ *
+ * They were describing two separate delays stacked on top of each other. The caption and its warm
+ * colour both ride `#streak.grace`, which is the streak's DEBOUNCED state: `s.grace` is
+ * `_off > 0 && _off < GRACE`, and the HUD then holds any candidate for CAP_CONFIRM_S (0.3 s) before
+ * believing it. Worse, `s.grace` goes FALSE again once the grace window expires — so the warning
+ * appeared late and then vanished at the exact moment the streak actually broke.
+ *
+ * The debounce is right for WORDS: a wheel riding the painted edge flips the state many times a
+ * second and text that flickers is unreadable. It is wrong for a COLOUR, because a colour can be
+ * given a fast fade instead — 90 ms in, 260 ms out — which absorbs the flicker without adding any
+ * delay at all. So the colour is driven off the RAW per-frame state and the words stay debounced.
+ *
+ * Two things light up, because one of them alone was missed: the streak figure goes rust, and a red
+ * vignette comes in around the edge of the screen. The vignette is what makes it unmissable while
+ * you are looking at the road rather than at the HUD. */
+#streak.offroad {
+  color: var(--rust);
+  transition: color 90ms linear;
+}
+#offroadEdge {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 260ms ease-out;
+  /* A ring, not a wash: the middle of the screen is the road and must stay clear. */
+  box-shadow: inset 0 0 clamp(60px, 12vw, 160px) clamp(10px, 2vw, 26px) var(--rust);
+  mix-blend-mode: multiply;
+}
+#offroadEdge.on {
+  opacity: 0.5;
+  transition: opacity 90ms linear;
+}
+
+/* ── THE COINS, TOP RIGHT, PROMINENT ─────────────────────────────────────────
+ * Operator: "we need to re-add the coins ticker to the top right, making it prominent, showing how
+ * many coins you have in total". Everything is bought with coins now, so the balance is the single
+ * most actionable number on the screen and it was a 12 px figure tucked under the player list.
+ *
+ * `#coinTicker` is its own block above #players rather than a change to #lootCounter, because that
+ * widget's job is the boat progress bar and this one's job is the balance. It bumps and flashes on
+ * a gain so earning is felt, which is the other half of "clear what you get". */
+#coinTicker {
+  position: absolute;
+  top: clamp(0.9rem, 3vw, 1.6rem);
+  right: clamp(1rem, 4vw, 3rem);
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font: 700 clamp(1.4rem, 3.4vw, 2.1rem) / 1 ui-rounded, -apple-system, Segoe UI, Roboto, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: var(--cream);
+  text-shadow: 0 2px 6px rgba(28, 34, 48, 0.7);
+  pointer-events: none;
+  z-index: 3;
+}
+#coinTicker .disc {
+  width: 0.86em;
+  height: 0.86em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 30%, #f0c96a, #8a6b2a);
+  box-shadow: 0 1px 4px rgba(28, 34, 48, 0.5);
+}
+#coinTicker .gain {
+  font-size: 0.5em;
+  font-weight: 600;
+  opacity: 0;
+  color: var(--leaf, #93b84e);
+  transform: translateY(0.2em);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+#coinTicker .gain.show {
+  opacity: 1;
+  transform: translateY(-0.3em);
+}
+#coinTicker.bump .n {
+  animation: coinBump 0.42s ease-out;
+}
+@keyframes coinBump {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.22); }
+  100% { transform: scale(1); }
 }

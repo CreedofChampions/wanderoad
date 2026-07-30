@@ -17,7 +17,7 @@ import { BOAT_UNLOCK_COINS } from '../game/wallet.js';
 
 const CSS = `
 #lootCounter{
-  position:absolute; top:clamp(5.6rem, 13vw, 7.2rem); right:clamp(1rem, 4vw, 3rem);
+  position:absolute; top:clamp(7.4rem, 16vw, 9.4rem); right:clamp(1rem, 4vw, 3rem);
   width:132px; text-align:right;
   pointer-events:none; opacity:.82;
   font:500 12px/1.3 ui-rounded,-apple-system,Segoe UI,Roboto,sans-serif;
@@ -49,7 +49,7 @@ const CSS = `
 #lootCounter.unlocked .fill{ background:#E0B14E; }
 #lootCounter .cap{ margin-top:.28em; opacity:.7; font-size:10px; letter-spacing:.05em; }
 #lootCounter.unlocked .cap{ opacity:.95; }
-@media (max-width:640px){ #lootCounter{ top:clamp(6.4rem, 20vw, 8rem); width:104px; font-size:11px; } }
+@media (max-width:640px){ #lootCounter{ top:clamp(8.2rem, 24vw, 10rem); width:104px; font-size:11px; } }
 `;
 
 export class LootCounter {

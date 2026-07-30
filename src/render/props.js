@@ -28,6 +28,7 @@ import { Terrain } from '../world/terrain.js';
 import { waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
 import {
   propsInBox, stationsInBox, fuelCansInBox, stationTownInBox, stationSpur, stationPad, PROP_BY_ID, PROP_IDS,
+  airfieldsInBox,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
 } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
@@ -1133,6 +1134,89 @@ const BUILDERS = {
  * level with the ROAD (a real one is), so on anything but dead-flat ground one edge would
  * otherwise show daylight underneath.
  */
+/* ── AN AIRFIELD ─────────────────────────────────────────────────────────────
+ * Operator: "place airports out 500m from roads randomly with a few things near by for people to
+ * be able to see it".
+ *
+ * "A few things near by" is the requirement that matters, and it is why this is not just a grey
+ * rectangle: an airstrip in open grass with nothing beside it reads as a texture bug from any
+ * distance. So it gets the silhouette an airfield actually has — a hangar with an arched roof, a
+ * windsock on a pole, runway threshold bars, and a parked light aircraft — which together say
+ * "aviation" from far enough away to be worth driving to.
+ *
+ * Local axes: +Z is down the runway, +X across it. `blit` in _bake rotates the lot to the strip's
+ * own heading, exactly as it does for a station.
+ */
+export function buildAirfield(M, r, f, skirt) {
+  const L = f.halfLen;
+  const W = f.halfWid;
+  const drop = Math.max(0.4, skirt);
+
+  // the strip itself, and a skirt down into the ground so no edge floats
+  pbox(M, 0, -drop * 0.5, 0, W, drop * 0.5, L, 0, TARMAC, MAT.MATTE);
+  pbox(M, 0, 0.006, 0, W - 0.5, 0.01, L - 0.5, 0, TARMAC_D, MAT.MATTE);
+
+  // centreline dashes, and threshold bars at both ends — the markings that read as a RUNWAY
+  const dashes = Math.max(6, Math.round(L / 26));
+  for (let i = -dashes; i <= dashes; i++) {
+    pbox(M, 0, 0.02, (i / dashes) * (L - 12), 0.55, 0.012, 5.5, 0, LINE, MAT.MATTE);
+  }
+  for (const end of [-1, 1]) {
+    for (let b = -3; b <= 3; b++) {
+      pbox(M, b * 2.6, 0.02, end * (L - 4), 0.85, 0.012, 3.2, 0, LINE, MAT.MATTE);
+    }
+  }
+
+  /* THE HANGAR, off to one side. An arched roof out of a few boxes rather than a curve: the same
+   * "modelled in code, no imported mesh" rule the hundred roadside props follow. */
+  const hx = W + 16;
+  const hz = -L * 0.45;
+  pbox(M, hx, 3.1, hz, 8.5, 3.1, 6.5, 0, PLASTER, MAT.MATTE);
+  for (let k = 0; k < 5; k++) {
+    const t = (k + 0.5) / 5;
+    const y = 6.2 + Math.sin(t * Math.PI) * 2.6;
+    const w = 8.5 * Math.cos((t - 0.5) * 1.1);
+    pbox(M, hx, y, hz, Math.max(1.2, w), 0.42, 6.7, 0, ROOF_A, MAT.MATTE);
+  }
+  // the open doorway, facing the strip
+  pbox(M, hx, 2.6, hz + 6.6, 5.2, 2.6, 0.2, 0, INK, MAT.MATTE);
+
+  /* THE WINDSOCK. Small, and the one thing here that is unmistakably an aerodrome. */
+  const wx = -W - 7;
+  pcyl(M, [wx, 0, 0], [wx, 6.2, 0], 0.14, 0.12, 7, CREAM, MAT.MATTE, false, false);
+  for (let k = 0; k < 3; k++) {
+    const t = k / 3;
+    pbox(M, wx + 0.9 + t * 2.4, 5.6 - t * 0.5, 0, 0.62, 0.5 - t * 0.12, 0.5 - t * 0.12, 0, k % 2 ? CREAM : VERMILION, MAT.MATTE);
+  }
+
+  /* A PARKED AEROPLANE beside the hangar — high wing, tail fin, three wheels. Rough on purpose;
+   * it is a silhouette at two hundred metres, and it is what makes the whole thing legible. */
+  const px = W + 6;
+  const pz = -L * 0.2;
+  pbox(M, px, 1.5, pz, 0.85, 0.7, 3.6, 0, CREAM, MAT.MATTE); // fuselage
+  pbox(M, px, 2.35, pz + 0.3, 6.4, 0.16, 1.05, 0, CREAM, MAT.MATTE); // wing
+  pbox(M, px, 2.1, pz - 3.2, 0.12, 0.95, 0.8, 0, VERMILION, MAT.MATTE); // fin
+  pbox(M, px, 1.5, pz - 3.1, 1.7, 0.12, 0.55, 0, CREAM, MAT.MATTE); // tailplane
+  pcyl(M, [px - 0.06, 1.62, pz + 2.0], [px + 0.06, 1.62, pz + 2.0], 0.5, 0.5, 8, INK, MAT.MATTE, false, false); // prop disc
+  for (const [ox, oz] of [[-1.1, 0.4], [1.1, 0.4], [0, -2.6]]) {
+    pcyl(M, [px + ox - 0.07, 0.34, pz + oz], [px + ox + 0.07, 0.34, pz + oz], 0.34, 0.34, 8, TYRE, MAT.MATTE, false, false);
+  }
+
+  /* AND A BEACON, the same trick the petrol stations use: an EMIT column, unlit by the sun, so an
+   * airfield is visible from outside its own draw distance. Taller than a station's, because this
+   * one is 500 m off the road and has to be seen from the road. */
+  {
+    const H = 90;
+    for (let i = 0; i < 3; i++) {
+      const y0 = 8 + (H * i) / 3;
+      const y1 = 8 + (H * (i + 1)) / 3;
+      const r0 = 0.7 * (1 - i / 3) + 0.1;
+      const r1 = 0.7 * (1 - (i + 1) / 3) + 0.1;
+      pcyl(M, [hx, y0, hz], [hx, y1, hz], r0, r1, 4, GLOW, MAT.EMIT, false, false);
+    }
+  }
+}
+
 export function buildStation(M, r, skirt, deal = false) {
   // Single source of truth in src/world/props.js — the access spur, the collision hitboxes
   // and the station's own placement code all read the same two numbers.
@@ -1904,6 +1988,16 @@ export class Props {
         job.cans = fuelCansInBox(ox, oz, ox + size, oz + size, this.seed, job.probe);
         job.phase = 4;
         return;
+      case 4:
+        /* Airfields, with the tile's own probe — the flat-along-the-strip and dry tests in
+         * world/props.js need real ground, exactly like a station's apron does. Its own phase so a
+         * tile that happens to contain one does not pay for it in the same frame as the stations. */
+        job.airfields = airfieldsInBox(ox, oz, ox + size, oz + size, this.seed, {
+          height: job.probe.height,
+          dry: job.probe.dry,
+        });
+        job.phase = 5;
+        return;
       default:
         this._bake(job);
         this._job = null;
@@ -1912,7 +2006,7 @@ export class Props {
 
   /** Turn one tile's queried props into one geometry, one mesh and one solids block. */
   _bake(job) {
-    const { key, props, stations, cans } = job;
+    const { key, props, stations, cans, airfields } = job;
     const height = job.probe.height;
     const M = PB();
     for (const p of props) {
@@ -1928,6 +2022,23 @@ export class Props {
       const r = rng(hash3i(Math.round(p.x * 4), Math.round(p.z * 4), 0x9e37, this.seed));
       build(L, r, p.hue);
       blit(M, L, p.x, p.y, p.z, p.yaw, p.scale);
+    }
+
+    for (const f of airfields || []) {
+      /* One geometry per airfield, blitted at the strip's own heading. The skirt depth is worked
+       * out the same way a station's is: how far the ground falls away under the slab. */
+      const L2 = PB();
+      let lo = f.y;
+      for (let t = -1; t <= 1.0001; t += 0.25) {
+        for (const w of [-1, 1]) {
+          const px = f.x + f.hx * f.halfLen * t - f.hz * f.halfWid * w;
+          const pz = f.z + f.hz * f.halfLen * t + f.hx * f.halfWid * w;
+          const h = height(px, pz);
+          if (Number.isFinite(h)) lo = Math.min(lo, h);
+        }
+      }
+      buildAirfield(L2, rng(hash3i(Math.round(f.x), Math.round(f.z), 0x41f1, this.seed)), f, f.y - lo + 0.5);
+      blit(M, L2, f.x, f.y, f.z, f.heading, 1);
     }
 
     for (const s of stations) {
