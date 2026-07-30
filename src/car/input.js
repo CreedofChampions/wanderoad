@@ -47,12 +47,113 @@ const KEYMAP = {
   pitchDown: ['KeyI'],
   fine: ['ShiftLeft'],
   attack: ['ControlLeft'],
+  /* THE GARAGE, as an ACTION rather than a key listened for somewhere else. Escape and M were bound
+   * inside ui/menu.js, which meant a gamepad could never open the one panel that explains the game.
+   * Routing it through the same action table as everything else is what makes Start work. */
+  garage: ['Escape', 'KeyM'],
 };
+
+/* ── THE GAMEPAD, AS A FIRST-CLASS DEVICE ─────────────────────────────
+ *
+ * Operator: "add clear controler support and controls so u can open garage w reset to road and KNOW
+ * how to do that and get hints at tirght times".
+ *
+ * The pad could steer, accelerate, brake and pull the handbrake — four of the twenty things the game
+ * can do. Everything else was keyboard-only, including the two that matter most when you are stuck:
+ * getting back on the road, and opening the Garage. A controller that can drive you into a field and
+ * then cannot get you out of it is not controller support.
+ *
+ * So the pad gets the SAME action names as the keyboard, in a table beside it, and `tapped`/`held`
+ * read both. Indices are the W3C Standard Gamepad layout, which is what every Xbox, PlayStation and
+ * Switch Pro pad reports through the browser.
+ *
+ * The choices that are not arbitrary:
+ *   Start opens the Garage — it is the menu button on every console ever made.
+ *   View/Back AND Y both put you back on the road. Two bindings because this is the PANIC control:
+ *     Y is under your thumb while driving, View is where racing games put "reset", and a player who
+ *     is stuck should not have to remember which one this game chose.
+ *   X buys the car you are standing at, matching the keyboard's X — so the forecourt prompt can name
+ *     the same letter whichever device you are holding.
+ *   A stays the handbrake, which is where it already was.
+ */
+const PADMAP = {
+  handbrake: [0], // A
+  reverse: [1], // B
+  buyHere: [2], // X - the same letter as the keyboard binding
+  reset: [3, 8], // Y and View/Back - see above, this is the panic control
+  shiftDown: [4], // LB
+  shiftUp: [5], // RB
+  garage: [9], // Start
+  fly: [10], // left stick click
+  camera: [11], // right stick click
+  useCan: [12], // D-pad up
+  horn: [13], // D-pad down
+  radio: [14], // D-pad left
+  nextCar: [15], // D-pad right
+};
+
+/** What to CALL each pad button on screen. A prompt that names button 9 helps nobody. */
+const PAD_NAMES = {
+  0: 'A', 1: 'B', 2: 'X', 3: 'Y', 4: 'LB', 5: 'RB', 6: 'LT', 7: 'RT',
+  8: 'View', 9: 'Start', 10: 'L3', 11: 'R3',
+  12: 'D-pad up', 13: 'D-pad down', 14: 'D-pad left', 15: 'D-pad right',
+};
+
+/** What to CALL each key on screen, where the code is not already readable. */
+const KEY_NAMES = {
+  ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→',
+  Space: 'Space', ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Ctrl', Escape: 'Esc',
+};
+
+/** 'KeyR' -> 'R', 'Digit1' -> '1', and anything already readable straight through. */
+export function keyLabel(code) {
+  if (KEY_NAMES[code]) return KEY_NAMES[code];
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  return code;
+}
+
+/** What one action is called on one device, e.g. 'Start' or 'R'. Empty when it is not bound there. */
+export function actionLabel(action, device = 'keyboard') {
+  if (device === 'pad') {
+    const b = PADMAP[action];
+    return b && b.length ? PAD_NAMES[b[0]] || `button ${b[0]}` : '';
+  }
+  const k = KEYMAP[action];
+  return k && k.length ? keyLabel(k[0]) : '';
+}
+
+/** Every action the pad can reach, for the Garage's own controls list. [action, padLabel, what]. */
+export const PAD_HELP = [
+  ['throttle', 'RT', 'throttle'],
+  ['brake', 'LT', 'brake'],
+  ['steer', 'Left stick', 'steer'],
+  ['handbrake', 'A', 'handbrake'],
+  ['reset', 'Y or View', 'put me back on the road'],
+  ['garage', 'Start', 'this Garage - and Start or B closes it'],
+  ['buyHere', 'X', 'buy the car you are standing at'],
+  ['reverse', 'B', 'reverse'],
+  ['camera', 'R3', 'change camera'],
+  ['nextCar', 'D-pad right', 'next car'],
+  ['radio', 'D-pad left', 'radio station'],
+  ['useCan', 'D-pad up', 'pour in a spare fuel can'],
+  ['horn', 'D-pad down', 'horn'],
+  ['fly', 'L3', 'fly, once you have a plane'],
+];
 
 export class Input {
   constructor(target = window) {
     this.keys = new Set();
     this.pressed = new Set(); // edge-triggered, cleared each read
+    /* The pad's equivalent of `keys` and `pressed`. A gamepad fires no events - it is POLLED - so
+     * "was this button just pushed" has to be derived by comparing this frame against the last.
+     * Without it, holding Start would toggle the Garage sixty times a second. */
+    this.padDown = new Set();
+    this.padPressed = new Set();
+    this.padLive = false;
+    this._padWas = new Set();
+    this._navAxes = [0, 0];
+    this._navArmed = [true, true];
     this.analogue = false;
     this.padIndex = null;
     this._lastDevice = 'keyboard';
@@ -95,17 +196,64 @@ export class Input {
     this.touch = { steer: 0, throttle: 0, brake: 0, active: false };
   }
 
-  /** True once, on the frame the key went down. */
+  /** True once, on the frame the key OR the pad button went down. */
   tapped(action) {
-    const codes = KEYMAP[action] || [];
-    for (const c of codes) if (this.pressed.has(c)) return true;
+    for (const c of KEYMAP[action] || []) if (this.pressed.has(c)) return true;
+    for (const b of PADMAP[action] || []) if (this.padPressed.has(b)) return true;
     return false;
   }
 
   held(action) {
-    const codes = KEYMAP[action] || [];
-    for (const c of codes) if (this.keys.has(c)) return true;
+    for (const c of KEYMAP[action] || []) if (this.keys.has(c)) return true;
+    for (const b of PADMAP[action] || []) if (this.padDown.has(b)) return true;
     return false;
+  }
+
+  /**
+   * Which device is in the player's hands RIGHT NOW, so a prompt can name a control they have.
+   * Telling someone holding a pad to "press X to buy" when X is a key, or telling a keyboard player
+   * to "press Start", is the same as telling them nothing.
+   */
+  get device() {
+    if (this.touch.active) return 'touch';
+    return this.padLive ? 'pad' : 'keyboard';
+  }
+
+  /** What this action is called on the device in the player's hands. See actionLabel. */
+  label(action) {
+    return actionLabel(action, this.device === 'pad' ? 'pad' : 'keyboard');
+  }
+
+  /**
+   * Menu navigation off the pad: one step per push, never a stream.
+   *
+   * The Garage is a page of DOM buttons, and a pad that can open it but not move through it is worse
+   * than one that cannot open it at all. The stick is read as a d-pad here deliberately - a menu
+   * wants discrete steps - and each axis re-arms only when it returns near centre, which is what
+   * stops one flick from running the focus off the end of the list.
+   *
+   * @returns {{dx: number, dy: number, confirm: boolean, cancel: boolean}}
+   */
+  padNav() {
+    const ax = this._navAxes;
+    const step = (v, axis) => {
+      if (Math.abs(v) < 0.35) {
+        this._navArmed[axis] = true;
+        return 0;
+      }
+      if (!this._navArmed[axis]) return 0;
+      this._navArmed[axis] = false;
+      return Math.sign(v);
+    };
+    const dxStick = step(ax[0], 0);
+    const dyStick = step(ax[1], 1);
+    const d = (i) => (this.padPressed.has(i) ? 1 : 0);
+    return {
+      dx: d(15) - d(14) || dxStick,
+      dy: d(13) - d(12) || dyStick,
+      confirm: this.padPressed.has(0),
+      cancel: this.padPressed.has(1),
+    };
   }
 
   /** Read every device and produce one intent. Call once per frame. */
@@ -130,10 +278,20 @@ export class Input {
     let gBrake = 0;
     let gHand = 0;
     let padLive = false;
+    const nowDown = new Set();
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     for (const p of pads) {
       if (!p || !p.connected) continue;
       padLive = true;
+      /* EVERY button, not just the four the car reads. `pressed` covers the digital ones and the
+       * 0.5 threshold covers analogue triggers, which report a value and never a clean press on
+       * some pads. */
+      for (let i = 0; i < p.buttons.length; i++) {
+        const b = p.buttons[i];
+        if (b && (b.pressed || b.value > 0.5)) nowDown.add(i);
+      }
+      // Kept for the Garage's own navigation - see padNav().
+      this._navAxes = [p.axes[0] || 0, p.axes[1] || 0];
       // Radial deadzone with a response curve, never an axis-independent dead band. A large
       // centre deadzone is Solar Crown's single most repeated complaint.
       const ax = -(p.axes[0] || 0); // same handedness flip as the keyboard above
@@ -147,6 +305,13 @@ export class Input {
       gHand = p.buttons[0] && p.buttons[0].pressed ? 1 : 0;
       break;
     }
+    /* The pad's EDGES, derived by comparison because a gamepad is polled and never fires an event. */
+    this.padPressed = new Set([...nowDown].filter((b) => !this._padWas.has(b)));
+    this.padDown = nowDown;
+    this._padWas = nowDown;
+    this.padLive = padLive;
+    if (this.padPressed.size || Math.abs(gSteer) > 0.02 || gThrottle > 0.02 || gBrake > 0.02)
+      this._lastDevice = 'gamepad';
 
     // ── combine by magnitude; never switch device ──
     s.steer = Math.abs(gSteer) > Math.abs(kSteer) ? gSteer : kSteer;
@@ -181,6 +346,7 @@ export class Input {
   /** Call at the very end of the frame. */
   endFrame() {
     this.pressed.clear();
+    this.padPressed = new Set();
   }
 
   /** Wire the touch halves to a DOM element (mobile). */

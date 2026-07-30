@@ -1077,7 +1077,9 @@ function makeHint() {
   if (typeof document === 'undefined' || !document.body) return null;
   const el = document.createElement('div');
   el.id = 'introSkip';
-  el.textContent = 'any key to drive';
+  /* "key" was a lie to anyone holding a controller, and it is the first thing they read. Any button
+   * really does work — see main.js's skip test, which reads every pad button — so say so. */
+  el.textContent = 'any key or button to drive';
   el.style.cssText = [
     'position:fixed',
     'left:0',

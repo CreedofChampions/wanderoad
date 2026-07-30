@@ -33,7 +33,7 @@ import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
 import { loadCar, loadGhostCar, CARS, CAR_KEYS } from './car/loadedCar.js';
 import { Vehicle } from './car/vehicle.js';
-import { Input } from './car/input.js';
+import { Input, actionLabel } from './car/input.js';
 import { ChaseCamera } from './car/camera.js';
 import { Autopilot } from './car/autopilot.js';
 import { StreakTrail } from './render/trail.js';
@@ -440,6 +440,21 @@ async function boot() {
   /* Which display car the forecourt prompt last named, so nosing along the row says each car once
    * instead of every frame. Cleared the moment you are not beside one. */
   let showroomTold = null;
+  /* THE CONTROLLER INTRODUCES ITSELF, ONCE.
+   *
+   * Operator: "KNOW how to do that and get hints at tirght times". A pad that silently starts working
+   * still leaves the player guessing which button is the menu and which gets them unstuck — the two
+   * things the ask is actually about. So the first frame a pad is seen, the game names them.
+   *
+   * Latched on the transition rather than the state, so unplugging and replugging says it again
+   * (you probably swapped pads) while simply holding one does not repeat it. */
+  let padWas = false;
+  /* HINTS AT THE RIGHT TIME, and the right time for "here is how to get back on the road" is when
+   * you have been off it long enough to be looking for a way out — not the moment a wheel touches
+   * grass, which happens constantly and on purpose. Seconds of continuous off-road, and said once
+   * per excursion. */
+  let offRoadFor = 0;
+  let offRoadTold = false;
   /* The cars a dealership actually stocks, in the order the forecourt slots are laid out. Derived
    * from `unlockRule` rather than listed here, so the line-up is exactly "the ones you cannot get by
    * collecting" and stays that way if the ladder is ever retuned. */
@@ -546,6 +561,8 @@ async function boot() {
     wallet: () => wallet,
     fuel: () => fuel,
     canBuy: () => atDealer(),
+    /* So the Garage can label its own buttons for whatever is in the player's hands — see _mark(). */
+    device: () => input.device,
     atPump: () => atPumpShop(),
     atHarbour: () => atHarbour(),
     say: (t, secs) => hud.say(t, secs),
@@ -559,10 +576,24 @@ async function boot() {
   });
   menu.setCurrent({ car: carKeyLive, feel: CFG.feel, terrain: CFG.terrain });
 
+  /* THE ONE PERMANENT LINE ON SCREEN, and it has to be true for whoever is reading it.
+   *
+   * It said "ESC — garage" to everybody, including anyone holding a controller, for whom Esc is a key
+   * they are not touching and the actual answer is Start. That is exactly the operator's complaint —
+   * "so u can open garage w reset to road and KNOW how to do that" — and it is not solved by adding
+   * the pad's bindings somewhere: it is solved by this line naming the device in your hands.
+   *
+   * Retitled the moment a pad is picked up or put down (see the frame loop's `padWas` latch). */
   const openHint = document.createElement('div');
   openHint.id = 'openMenu';
   openHint.textContent = 'ESC — garage';
   hud.root.appendChild(openHint);
+  const refreshOpenHint = () => {
+    const g = input.label('garage');
+    const r = input.label('reset');
+    openHint.textContent = `${g} — garage · ${r} — back on the road`;
+  };
+  refreshOpenHint();
 
   /* The operator's playlist, in a small closable window — see src/ui/musicPanel.js. It is
    * entirely self-contained (owns its own DOM, appended to <body>, and its own J-key listener)
@@ -833,6 +864,33 @@ async function boot() {
 
     /* input */
     const cmd = input.poll();
+
+    /* THE GARAGE, AND THE PAD INSIDE IT.
+     *
+     * Operator: "add clear controler support and controls so u can open garage w reset to road".
+     * Escape and M were bound inside ui/menu.js's own key listener, which is why a pad could never
+     * open the one panel that explains the game. The binding lives in the action table now, so Start
+     * reaches it by the same route every other control does — and while it is open, the pad drives
+     * the panel itself (see Menu.padNav).
+     *
+     * Ordered BEFORE everything else in this block on purpose: whatever else is going on, the button
+     * that opens the menu has to work. */
+    /* Not while the cinematic is up: that press is the one that starts the game (see cine.skip
+     * below), and consuming it here as well would open the Garage over the top of the first frame
+     * the player ever sees. */
+    if (!cine.active && input.tapped('garage')) menu.toggle();
+    if (menu.open) menu.padNav(input.padNav());
+
+    if (input.padLive !== padWas) {
+      padWas = input.padLive;
+      refreshOpenHint();
+      if (input.padLive)
+        hud.say(
+          `controller ready — ${actionLabel('garage', 'pad')} opens the garage, ${actionLabel('reset', 'pad')} puts you back on the road`,
+          5.5
+        );
+    }
+
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
     if (input.tapped('reverse')) car.reverse = !car.reverse;
     if (input.tapped('nextCar')) {
@@ -966,6 +1024,29 @@ async function boot() {
       paused: auto.on || fuel.dry || fuel.refuelling,
       forgive: nearPump(),
     });
+
+    /* ── THE HINT THAT ARRIVES WHEN YOU NEED IT ──────────────────────────────
+     * Operator: "KNOW how to do that and get hints at tirght times".
+     *
+     * The right time to be told how to get back on the road is when you have been off it long enough
+     * to be looking for a way out. Not the instant a wheel touches grass — that happens on every
+     * corner, on purpose, and a game that shouted about it would be unbearable. Not on the loading
+     * screen either, which is where nobody reads anything.
+     *
+     * So: eight continuous seconds off the tarmac, said ONCE per excursion, naming the control on the
+     * device in the player's hands. One second back on the road re-arms it, which is what makes it
+     * once-per-excursion rather than once-per-session — get properly lost twice and you are told
+     * twice, clip a verge twenty times and you are never told at all.
+     *
+     * Suppressed while auto-driving, in the air, on the water, and while the Garage is open: in every
+     * one of those the player is not stuck, they are somewhere else. */
+    const offNow = (surf?.onRoad ?? 1) < 0.02 && !auto.on && !plane.active && !boatMode.active && !menu.open;
+    offRoadFor = offNow ? offRoadFor + dt : Math.max(0, offRoadFor - dt * 8);
+    if (offRoadFor > 8 && !offRoadTold) {
+      offRoadTold = true;
+      hud.say(`lost? ${input.label('reset')} puts you back on the road`, 4.5);
+    }
+    if (offRoadFor <= 0) offRoadTold = false;
     /* THE STREAK IS THE INCOME. Operator: "Streaks = suns." One sun per 250 m of unbroken
      * run — mintStreak() is safe to call every frame and remembers what it has already paid
      * for, and it follows the distance back DOWN when a streak breaks, so a lost run is never
@@ -1048,7 +1129,7 @@ async function boot() {
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {
       dealerWas = dealerNow;
-      if (dealerNow) hud.say(`dealership — drive up to a car, or ESC for the garage`, 3.6);
+      if (dealerNow) hud.say(`dealership — drive up to a car, or ${input.label('garage')} for the garage`, 3.6);
     }
 
     /* ── THE SHOWROOM: BUY THE CAR YOU ARE STANDING NEXT TO ──────────────────
@@ -1076,10 +1157,15 @@ async function boot() {
         const price = priceOf(spec);
         if (showroomTold !== spec.id) {
           showroomTold = spec.id;
+          /* NAME THE BUTTON THE PLAYER ACTUALLY HAS. "X to buy" is a key on a keyboard and a face
+           * button on a pad, and here they happen to be the same letter — but `input.label` is what
+           * makes that a fact rather than a coincidence, and it is what keeps every other prompt in
+           * this file honest when the two devices disagree. */
+          const key = input.label('buyHere');
           hud.say(
             mine
-              ? `${spec.label} — yours already. X to drive it`
-              : `${spec.label} — ${price} suns. You have ${wallet.suns}. X to buy`,
+              ? `${spec.label} — yours already. ${key} to drive it`
+              : `${spec.label} — ${price} suns. You have ${wallet.suns}. ${key} to buy`,
             4.0
           );
         }
@@ -1155,7 +1241,21 @@ async function boot() {
        line is really only here for the gamepad, which nothing else can see. */
     let sNorm = 0;
     if (cine.active) {
-      if (input.pressed.size || cmd.throttle > 0.05 || cmd.brake > 0.05 || Math.abs(cmd.steer) > 0.05) cine.skip();
+      /* A PAD BUTTON HAS TO SKIP IT TOO, and it did not.
+       *
+       * This line read the pad only through the DRIVING axes — throttle, brake, steer — so a
+       * controller player who pressed the natural first button (Start, or A) sat there watching the
+       * title card with nothing happening. Found by photographing the Garage from a synthetic pad and
+       * getting a picture of the intro instead: the Start press had gone nowhere, because the game
+       * had not begun. `padPressed` is every button, so now any of them does what the card says. */
+      if (
+        input.pressed.size ||
+        input.padPressed.size ||
+        cmd.throttle > 0.05 ||
+        cmd.brake > 0.05 ||
+        Math.abs(cmd.steer) > 0.05
+      )
+        cine.skip();
       cine.update(dt, car);
     }
     if (!cine.active) sNorm = chase.update(car, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });

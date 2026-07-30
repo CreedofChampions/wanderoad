@@ -15,8 +15,8 @@ import { TERRAINS } from '../game/presets.js';
 import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, unlockRule, cheatOn, fmtUnlock } from '../game/garage.js';
 import { BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
+import { PAD_HELP } from '../car/input.js';
 
-const ESC = ['Escape', 'KeyM'];
 
 /* ── the seed ────────────────────────────────────────────────────────────────
  * "Need to be able to change seed value." `?seed=` has always worked; nothing in the running
@@ -92,10 +92,12 @@ export function currentSeed() {
  * itself (see its up/down logic around `this.gear++`). Printing them here would be telling the
  * player about a control that does nothing, which is worse than not mentioning gears at all.
  *
- * input.js also exports a KEY_HELP array. It is imported by nobody, and it is out of date —
- * no F, no J, no Ctrl, and it credits Shift generally rather than the left one. It is not the
- * source of truth and it is not used here; consolidating the two means editing input.js, which
- * is not this pass's file. Flagged rather than silently duplicated.
+ * THE CONTROLLER SECTION IS NOT WRITTEN OUT HERE — it is built from input.js's PAD_HELP, beside
+ * the PADMAP it documents. That is the lesson of the KEY_HELP array, which also lives in input.js,
+ * is imported by nobody, and drifted out of date unnoticed (no F, no J, no Ctrl, and it credits
+ * Shift generally rather than the left one). A help list that lives away from its bindings becomes
+ * a lie at the speed the bindings change. The keyboard half above still has that problem and is
+ * flagged rather than silently duplicated; the pad half is now immune to it by construction.
  *
  * Shape: [group heading, [[keycaps], what it does]]. */
 const CONTROLS = [
@@ -127,12 +129,22 @@ const CONTROLS = [
     ],
   ],
   [
-    'Not the keyboard',
+    /* THE CONTROLLER, BUTTON BY BUTTON.
+     *
+     * This was one line — "left stick steers · triggers are throttle and brake · A is the handbrake"
+     * — which was an honest description of a pad that could do four things. It can do fourteen now,
+     * and the operator's ask was as much about KNOWING as about the bindings: "so u can open garage
+     * w reset to road and KNOW how to do that".
+     *
+     * Built from input.js's PAD_HELP rather than written out again here, so a binding that changes
+     * changes this list with it. The duplicated KEY_HELP is the cautionary tale — it sat in input.js
+     * for months, imported by nobody and quietly out of date. */
+    'Controller',
+    PAD_HELP.map(([, cap, what]) => [[cap], what]),
+  ],
+  [
+    'Touch',
     [
-      // input.js poll(): axes[0] steering with a radial deadzone, buttons[7] throttle,
-      // buttons[6] brake, buttons[0] handbrake. Devices are combined by magnitude and the game
-      // never auto-switches between them, so a plugged-in pad never steals the keyboard.
-      [['Gamepad'], 'left stick steers · triggers are throttle and brake · A is the handbrake'],
       // input.js attachTouch(), wired to the canvas in main.js.
       [['Touch'], 'left half of the screen steers · right half is throttle above, brake below'],
     ],
@@ -159,7 +171,7 @@ export class Menu {
     el.innerHTML = `
       <div class="sheet">
         <h2>Garage</h2>
-        <p class="hint">Escape or M to close · everything here is also a URL parameter</p>
+        <p class="hint">Escape, M or Start to close · on a pad: stick to move, A to choose, B to leave</p>
 
         <h3>Suns <small>everything you have ever collected, and what it opens next</small></h3>
         <div data-group="suns"></div>
@@ -232,11 +244,15 @@ export class Menu {
         if (e.key === 'Enter') this.applySeed();
       });
     }
-    addEventListener('keydown', (e) => {
-      if (!ESC.includes(e.code)) return;
-      e.preventDefault();
-      this.toggle();
-    });
+    /* NO KEY LISTENER HERE ANY MORE.
+     *
+     * Escape and M used to be caught right here, which is why a gamepad could never open the Garage:
+     * the binding lived in the panel instead of in the action table every other control goes through.
+     * main.js now consumes `tapped('garage')`, so Escape, M and Start all arrive by one route.
+     *
+     * Leaving this listener in place as well was a real regression for a few minutes — Escape fired
+     * BOTH handlers, the panel toggled twice in one frame, and it looked like the key had stopped
+     * working. `browser-test` caught it on the line "Escape opens the garage". */
   }
 
   /* Cars carry their unlock state. A locked one is shown, greyed, with what it costs —
@@ -417,6 +433,18 @@ export class Menu {
       ad.textContent = on ? 'Auto-drive: on (G)' : 'Auto-drive (G)';
       ad.classList.toggle('on', on);
     }
+    /* THE SHORTCUT IN THE LABEL HAS TO BE A SHORTCUT THE PLAYER HAS.
+     *
+     * "Put me back on the road (R)" is the most important button in the panel and it named a key —
+     * so on a controller it advertised the one thing the pad player could not do, right next to the
+     * button that would have done it. `device()` comes from main.js, which owns the Input. Auto-drive
+     * keeps its (G) because there is deliberately no pad binding for it: it is a spectator toggle,
+     * not something to hand a face button to. */
+    const rs = this.root.querySelector('[data-act="reset"]');
+    if (rs) {
+      const pad = this.hooks.device && this.hooks.device() === 'pad';
+      rs.textContent = `Put me back on the road (${pad ? 'Y' : 'R'})`;
+    }
   }
 
   async _onClick(e) {
@@ -583,6 +611,59 @@ export class Menu {
     return f.value;
   }
 
+
+  /**
+   * Drive the Garage from a gamepad.
+   *
+   * Operator: "add clear controler support and controls so u can open garage". Start opens it - but
+   * a panel you can open and then not touch is worse than one you cannot open, so the pad moves a
+   * focus ring through the buttons and A presses the one it is on.
+   *
+   * The focus is the BROWSER's own focus, not a private index, for two reasons: the ring is drawn
+   * for free and correctly, and Tab from a keyboard and the stick from a pad end up in the same
+   * place rather than fighting over two ideas of "the current button".
+   *
+   * `dy` steps a whole ROW because the rows are the sections - Car, Tank, Shop, Land - and stepping
+   * one button at a time through a fleet of seven to reach the next section is not navigation.
+   *
+   * @param {{dx:number, dy:number, confirm:boolean, cancel:boolean}} nav from Input.padNav()
+   */
+  padNav(nav) {
+    if (!this.open || !nav) return;
+    if (nav.cancel) {
+      this.hide();
+      return;
+    }
+    const rows = [...this.root.querySelectorAll('.sheet .row, .sheet .foot')].filter((r) =>
+      r.querySelector('button, .btn')
+    );
+    if (!rows.length) return;
+    const buttons = (r) => [...r.querySelectorAll('button, .btn')];
+    const active = document.activeElement;
+    let ri = rows.findIndex((r) => r.contains(active));
+    let bi = ri >= 0 ? buttons(rows[ri]).indexOf(active) : -1;
+    if (ri < 0) {
+      ri = 0;
+      bi = 0;
+    } else if (nav.dy) {
+      ri = (ri + nav.dy + rows.length) % rows.length;
+      bi = Math.min(Math.max(bi, 0), buttons(rows[ri]).length - 1);
+    } else if (nav.dx) {
+      const list = buttons(rows[ri]);
+      bi = (bi + nav.dx + list.length) % list.length;
+    } else if (!nav.confirm) {
+      return; // nothing asked for; do not steal a focus the player set with Tab
+    }
+    const target = buttons(rows[ri])[Math.max(0, bi)];
+    if (!target) return;
+    if (nav.confirm && active === target) {
+      target.click();
+      return;
+    }
+    target.focus({ preventScroll: false });
+    target.scrollIntoView({ block: 'nearest' });
+  }
+
   show() {
     /* REFILL EVERY ROW THAT READS THE WALLET, not just the cars.
      *
@@ -598,6 +679,11 @@ export class Menu {
     this.open = true;
     this.root.hidden = false;
     this._mark();
+    /* Put the focus somewhere on the way in. A pad player who opens the Garage and has to flick the
+     * stick once before anything highlights has been shown a dead panel for a second, which is
+     * exactly long enough to conclude the controller does not work in here. */
+    const first = this.root.querySelector('.sheet .row button, .sheet .row .btn');
+    if (first) first.focus({ preventScroll: true });
   }
 
   hide() {
