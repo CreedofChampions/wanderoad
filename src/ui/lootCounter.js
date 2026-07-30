@@ -1,4 +1,4 @@
-/* Wanderoad — the loot counter: coins, gems, and progress toward the boat.
+/* Wanderoad — the loot counter: suns, gems, and progress toward the boat.
  *
  * src/ui/fuelGauge.js's own pattern, exactly: its own `<style>` block appended once, a root
  * div appended to `hud.root`, and an update(dt, wallet) that only touches the DOM nodes whose
@@ -13,7 +13,7 @@
  * corner that does not exist at 1280x800.
  */
 
-import { BOAT_UNLOCK_COINS } from '../game/wallet.js';
+import { BOAT_UNLOCK_SUNS } from '../game/wallet.js';
 
 const CSS = `
 #lootCounter{
@@ -24,16 +24,16 @@ const CSS = `
   color:#F6ECD8; text-shadow:0 1px 3px rgba(28,34,48,.55);
 }
 #lootCounter .row{ display:flex; justify-content:flex-end; gap:.7em; letter-spacing:.02em; font-variant-numeric:tabular-nums; }
-/* ONE CURRENCY AT A TIME. Operator: "rather than showing people 9 coins, 0 gems, we should
+/* ONE CURRENCY AT A TIME. Operator: "rather than showing people 9 suns, 0 gems, we should
  * just not show people gems until they've unlocked the boat. Then we should switch it from
- * coins to gems ... only the relevant information to them that they need to know."
+ * suns to gems ... only the relevant information to them that they need to know."
  *
  * Exactly right, and "gems 0" was worse than useless before the boat: gems only exist out on
- * open water, so a zero next to your coins is a counter for a thing you cannot yet reach and
- * have not been told about. Coins are the whole game until the boat; gems are the whole game
+ * open water, so a zero next to your suns is a counter for a thing you cannot yet reach and
+ * have not been told about. Suns are the whole game until the boat; gems are the whole game
  * after it. So the row holds one of them, and the swap IS the reward moment. */
 #lootCounter .gem{ display:none; }
-#lootCounter.unlocked .coin{ display:none; }
+#lootCounter.unlocked .sun{ display:none; }
 #lootCounter.unlocked .gem{ display:inline; }
 #lootCounter .gemIcon{ display:inline-block; width:.78em; height:.78em; margin-right:.1em;
   background:linear-gradient(145deg, #7FD4E8, #2E7FA8); vertical-align:middle;
@@ -42,8 +42,18 @@ const CSS = `
  * reads the same everywhere. NO EMOJI: the operator's Windows 10 renders none of these
  * glyphs in this font stack, so they showed as nothing at all. Plain words instead;
  * they were reported rendering fine. */
-#lootCounter .coinIcon{ display:inline-block; width:.9em; height:.9em; border-radius:50%;
-  background:radial-gradient(circle at 34% 30%, #E0B14E, #8A6B2A); vertical-align:middle; }
+/* The little sun in the counter, matching the big one in #sunTicker — rays, a corona and a slow
+ * drift. Operator: "coin looks like the sun not coin ... lets make it collecting suns", then "make
+ * them shine :P". Small enough here that the rays are four rather than eight; more just muddies at
+ * this size. */
+#lootCounter .sunIcon{ position:relative; display:inline-block; width:.95em; height:.95em; border-radius:50%;
+  background:radial-gradient(circle at 42% 36%, #FFF6D2 0%, #FFDC6A 34%, #F5A63A 72%, #D9822B 100%);
+  box-shadow:0 0 .35em rgba(255,208,96,.85), 0 0 1em rgba(255,176,60,.45); vertical-align:middle; isolation:isolate; }
+#lootCounter .sunIcon::after{ content:''; position:absolute; inset:-60%; z-index:-1;
+  background:repeating-conic-gradient(from 0deg, rgba(255,214,110,.8) 0deg 8deg, rgba(255,214,110,0) 8deg 45deg);
+  -webkit-mask:radial-gradient(circle, transparent 0 44%, #000 48% 74%, transparent 78%);
+  mask:radial-gradient(circle, transparent 0 44%, #000 48% 74%, transparent 78%);
+  animation:sunSpin 18s linear infinite; }
 #lootCounter .track{ margin-top:.35em; height:4px; border-radius:2px; background:rgba(246,236,216,.22); overflow:hidden; }
 #lootCounter .fill{ height:100%; min-width:3px; width:0%; background:#93B84E; border-radius:2px; transition:width .4s ease; }
 #lootCounter.unlocked .fill{ background:#E0B14E; }
@@ -67,17 +77,17 @@ export class LootCounter {
 
     const row = document.createElement('div');
     row.className = 'row';
-    this.coinEl = document.createElement('span');
-    // The coin glyph is a CSS disc, not text — see the .coinIcon rule above — so this is
+    this.sunEl = document.createElement('span');
+    // The sun glyph is a CSS disc, not text — see the .sunIcon rule above — so this is
     // innerHTML, not textContent; resting value 0, never blank, see hud.js's own note.
-    this.coinEl.className = 'coin';
-    this.coinEl.innerHTML = '<span class="coinIcon"></span> 0';
+    this.sunEl.className = 'sun';
+    this.sunEl.innerHTML = '<span class="sunIcon"></span> 0';
     this.gemEl = document.createElement('span');
     this.gemEl.className = 'gem';
-    // A drawn diamond, for the same reason the coin is a drawn disc: the operator's Windows
-    // renders no emoji at all in this font stack (see the .coinIcon note above).
+    // A drawn diamond, for the same reason the sun is a drawn disc: the operator's Windows
+    // renders no emoji at all in this font stack (see the .sunIcon note above).
     this.gemEl.innerHTML = '<span class="gemIcon"></span> 0';
-    row.appendChild(this.coinEl);
+    row.appendChild(this.sunEl);
     row.appendChild(this.gemEl);
     this.root.appendChild(row);
 
@@ -90,42 +100,42 @@ export class LootCounter {
 
     this.cap = document.createElement('div');
     this.cap.className = 'cap';
-    // Resting value — never blank. Says what the coins are FOR, which is the only reason to
-    // show a coin count to someone who has never seen a boat.
-    this.cap.textContent = `${BOAT_UNLOCK_COINS} coins buys a boat`;
+    // Resting value — never blank. Says what the suns are FOR, which is the only reason to
+    // show a sun count to someone who has never seen a boat.
+    this.cap.textContent = `a boat costs ${BOAT_UNLOCK_SUNS} suns`;
     this.root.appendChild(this.cap);
 
-    this._coins = -1;
+    this._suns = -1;
     this._gems = -1;
     this._unlocked = null;
     root.appendChild(this.root);
   }
 
   /**
-   * @param {number} dt seconds — unused (nothing here needs smoothing: a coin count is an
+   * @param {number} dt seconds — unused (nothing here needs smoothing: a sun count is an
    *        integer, not a needle), kept for the same call signature fuelGauge.update(dt, ...)
    *        uses so every HUD widget in the frame loop is called the same way.
    * @param {import('../game/wallet.js').Wallet} wallet
    */
   update(dt, wallet) {
-    if (wallet.coins !== this._coins) {
-      this._coins = wallet.coins;
-      this.coinEl.innerHTML = `<span class="coinIcon"></span> ${wallet.coins}`;
+    if (wallet.suns !== this._suns) {
+      this._suns = wallet.suns;
+      this.sunEl.innerHTML = `<span class="sunIcon"></span> ${wallet.suns}`;
     }
     if (wallet.gems !== this._gems) {
       this._gems = wallet.gems;
       this.gemEl.innerHTML = `<span class="gemIcon"></span> ${wallet.gems}`;
     }
     const unlocked = wallet.boatUnlocked;
-    const pct = unlocked ? 100 : Math.min(100, (wallet.coins / BOAT_UNLOCK_COINS) * 100);
+    const pct = unlocked ? 100 : Math.min(100, (wallet.suns / BOAT_UNLOCK_SUNS) * 100);
     this.fill.style.width = `${pct.toFixed(1)}%`;
     if (unlocked !== this._unlocked) {
       this._unlocked = unlocked;
       this.root.classList.toggle('unlocked', unlocked);
-      /* The caption swaps with the currency. Before the boat it says what coins buy; after it,
+      /* The caption swaps with the currency. Before the boat it says what suns buy; after it,
        * what gems are — because the moment the row changes is the only moment anyone will read
        * it, and "boat unlocked" is a thing they just watched happen. */
-      this.cap.textContent = unlocked ? 'gems are out at sea' : `${BOAT_UNLOCK_COINS} coins buys a boat`;
+      this.cap.textContent = unlocked ? 'gems are out at sea' : `a boat costs ${BOAT_UNLOCK_SUNS} suns`;
     }
   }
 

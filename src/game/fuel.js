@@ -217,7 +217,7 @@ function mercyScarcityMul(distM) {
  * `stats.cansCollected` rather than separate tracked state, so there is exactly one number
  * this rule can ever disagree with itself about. */
 export const CAPACITY_UPGRADE_EVERY = 5;
-/** Coins for the first capacity upgrade, and how much dearer each one after it is. */
+/** Suns for the first capacity upgrade, and how much dearer each one after it is. */
 export const TANK_PRICE_BASE = 15;
 export const TANK_PRICE_STEP = 10;
 export const CAPACITY_UPGRADE_STEP = 0.10;
@@ -372,7 +372,7 @@ export class Fuel {
     return TANK_SECONDS * START_CAPACITY_MUL * (1 + this.capacityLevel * CAPACITY_UPGRADE_STEP);
   }
 
-  /* What one more capacity upgrade costs this car, in coins. Rises with the level so the
+  /* What one more capacity upgrade costs this car, in suns. Rises with the level so the
    * later ones are a real decision rather than a formality — 15, 25, 35, 45, 55. */
   get tankPrice() {
     return TANK_PRICE_BASE + this.capacityLevel * TANK_PRICE_STEP;
@@ -389,7 +389,7 @@ export class Fuel {
    * again, which is the point: the new car is faster and thirstier and has to earn its range,
    * so unlocking one is a decision rather than a strict upgrade. */
   get capacityLevel() {
-    /* BOUGHT, NOT EARNED BY PICKUPS. Operator: "Gas bonus = buy it for coins."
+    /* BOUGHT, NOT EARNED BY PICKUPS. Operator: "Gas bonus = buy it for suns."
      *
      * The cans still refuel you — that is what they are for — but the tank itself is now a
      * purchase at a dealership, so the one currency buys everything. `wallet` is optional and
@@ -404,7 +404,7 @@ export class Fuel {
     if (this.capacityLevel >= CAPACITY_UPGRADE_LEVELS) return 1;
     /* With a wallet the meter shows how close the money is, not how close the cans are —
      * the pips are a shop window now, not a collection. */
-    if (this.wallet) return clamp01(this.wallet.coins / Math.max(1, this.tankPrice));
+    if (this.wallet) return clamp01(this.wallet.suns / Math.max(1, this.tankPrice));
     return (this.carCans % CAPACITY_UPGRADE_EVERY) / CAPACITY_UPGRADE_EVERY;
   }
 

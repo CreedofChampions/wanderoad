@@ -1,10 +1,10 @@
-/* Wanderoad — the coin economy, end to end.
+/* Wanderoad — the sun economy, end to end.
  *
- * Operator: "add dealerships where you can buy cars with coins -- make the whole new reward
- * system run via coins. Streaks = coins. Gas bonus = buy it for coins. New cars = coins."
+ * Operator: "add dealerships where you can buy cars with suns -- make the whole new reward
+ * system run via suns. Streaks = suns. Gas bonus = buy it for suns. New cars = suns."
  *
  * Four claims, and each one is asserted against the thing that actually decides it rather than
- * against a flag: coins in a wallet that has been driven, a car in the owned set after paying
+ * against a flag: suns in a wallet that has been driven, a car in the owned set after paying
  * for it, a tank whose CAPACITY in seconds actually grew, and dealerships that really exist in
  * the world at a spacing a driver can reach.
  *
@@ -20,7 +20,7 @@ globalThis.localStorage = {
   removeItem: (k) => mem.delete(k),
 };
 
-const { Wallet, STREAK_METRES_PER_COIN, BOAT_UNLOCK_COINS, CAN_PRICE, CAN_MAX } = await import('../src/game/wallet.js');
+const { Wallet, STREAK_METRES_PER_SUN, BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } = await import('../src/game/wallet.js');
 const { FLEET, FLEET_BY_ID, priceOf, isUnlocked } = await import('../src/game/garage.js');
 const { Fuel, TANK_PRICE_BASE, TANK_PRICE_STEP } = await import('../src/game/fuel.js');
 const { stationsInBox, DEAL_SHARE } = await import('../src/world/props.js');
@@ -31,52 +31,52 @@ const check = (ok, label, got, want) => {
   console.log(`${ok ? ' PASS' : ' FAIL'}  ${label.padEnd(58)} ${String(got).padStart(14)}   want ${want}`);
 };
 
-console.log('\nWANDEROAD — COINS ARE THE WHOLE ECONOMY\n' + '-'.repeat(84));
+console.log('\nWANDEROAD — SUNS ARE THE WHOLE ECONOMY\n' + '-'.repeat(84));
 
-/* ── 1. a streak mints coins, and a broken streak is not charged for ───────── */
+/* ── 1. a streak mints suns, and a broken streak is not charged for ───────── */
 console.log('\n── streaks pay ────────────────────────────────────────────────────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.streak' });
-  check(w.coins === 0, 'a new wallet is empty', w.coins, '0');
+  check(w.suns === 0, 'a new wallet is empty', w.suns, '0');
 
   // a run, read every frame the way main.js reads it
   let minted = 0;
   for (let m = 0; m <= 1000; m += 5) minted += w.mintStreak(m);
-  console.log(`       1000 m of streak, read every 5 m: ${minted} coins (one per ${STREAK_METRES_PER_COIN} m)`);
-  check(minted === Math.floor(1000 / STREAK_METRES_PER_COIN), 'a kilometre pays the rate exactly, once', minted, String(Math.floor(1000 / STREAK_METRES_PER_COIN)));
-  check(w.coins === minted, 'and the coins are in the wallet', w.coins, String(minted));
+  console.log(`       1000 m of streak, read every 5 m: ${minted} suns (one per ${STREAK_METRES_PER_SUN} m)`);
+  check(minted === Math.floor(1000 / STREAK_METRES_PER_SUN), 'a kilometre pays the rate exactly, once', minted, String(Math.floor(1000 / STREAK_METRES_PER_SUN)));
+  check(w.suns === minted, 'and the suns are in the wallet', w.suns, String(minted));
 
   // reading the SAME distance again must not pay again
-  const before = w.coins;
+  const before = w.suns;
   for (let i = 0; i < 100; i++) w.mintStreak(1000);
-  check(w.coins === before, 'reading the same run again pays nothing', w.coins, String(before));
+  check(w.suns === before, 'reading the same run again pays nothing', w.suns, String(before));
 
   // the streak breaks: distance goes to 0, then a new run starts paying from its own metre 1
   w.mintStreak(0);
   let second = 0;
   for (let m = 0; m <= 500; m += 5) second += w.mintStreak(m);
-  console.log(`       streak broke, then 500 m more: ${second} coins`);
-  check(second === Math.floor(500 / STREAK_METRES_PER_COIN), 'a new run pays from its own first metre', second, String(Math.floor(500 / STREAK_METRES_PER_COIN)));
+  console.log(`       streak broke, then 500 m more: ${second} suns`);
+  check(second === Math.floor(500 / STREAK_METRES_PER_SUN), 'a new run pays from its own first metre', second, String(Math.floor(500 / STREAK_METRES_PER_SUN)));
 }
 
 /* ── 2. cars are bought, and stay bought ──────────────────────────────────── */
-console.log('\n── new cars = coins ───────────────────────────────────────────────────────');
+console.log('\n── new cars = suns ───────────────────────────────────────────────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.cars' });
   const first = FLEET[0];
   const second = FLEET[1];
   check(w.owns(first.id, first.id), 'the car you start in is yours from the first frame', w.owns(first.id, first.id), 'true');
   check(!w.owns(second.id, first.id), `and ${second.label} is not`, w.owns(second.id, first.id), 'false');
-  check(priceOf(second) > 0, `${second.label} has a price`, `${priceOf(second)} coins`, '> 0');
+  check(priceOf(second) > 0, `${second.label} has a price`, `${priceOf(second)} suns`, '> 0');
 
   check(!w.buyCar(second.id, priceOf(second)), 'buying with no money fails', 'false', 'false');
   check(!w.owns(second.id, first.id), 'and does not hand the car over anyway', w.owns(second.id, first.id), 'false');
 
-  w.addCoins(priceOf(second));
+  w.addSuns(priceOf(second));
   const bought = w.buyCar(second.id, priceOf(second));
-  console.log(`       bought ${second.label} for ${priceOf(second)}; ${w.coins} coins left`);
+  console.log(`       bought ${second.label} for ${priceOf(second)}; ${w.suns} suns left`);
   check(bought, `paying for ${second.label} works`, bought, 'true');
-  check(w.coins === 0, 'and the money is actually gone', w.coins, '0');
+  check(w.suns === 0, 'and the money is actually gone', w.suns, '0');
   check(w.owns(second.id, first.id), 'the car is owned', w.owns(second.id, first.id), 'true');
   check(isUnlocked(second, 0, w), 'and the garage lets you drive it on 0 m of streak', isUnlocked(second, 0, w), 'true');
   check(!isUnlocked(FLEET[2], 0, w), 'while the NEXT one up is still locked', isUnlocked(FLEET[2], 0, w), 'false');
@@ -88,20 +88,20 @@ console.log('\n── new cars = coins ─────────────�
 }
 
 /* ── 3. the gas bonus is bought, per car, and the tank really grows ───────── */
-console.log('\n── gas bonus = coins ──────────────────────────────────────────────────────');
+console.log('\n── gas bonus = suns ──────────────────────────────────────────────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.tank' });
   const a = new Fuel({ carId: 'econ-a', wallet: w });
   const capBefore = a.capacity;
-  check(a.tankPrice === TANK_PRICE_BASE, 'the first upgrade costs the base price', `${a.tankPrice} coins`, String(TANK_PRICE_BASE));
+  check(a.tankPrice === TANK_PRICE_BASE, 'the first upgrade costs the base price', `${a.tankPrice} suns`, String(TANK_PRICE_BASE));
   check(!w.buyTank('econ-a', a.tankPrice), 'and cannot be bought with an empty wallet', 'false', 'false');
   check(Math.abs(a.capacity - capBefore) < 1e-6, 'so the tank has not changed', a.capacity.toFixed(1), capBefore.toFixed(1));
 
-  w.addCoins(TANK_PRICE_BASE);
+  w.addSuns(TANK_PRICE_BASE);
   check(w.buyTank('econ-a', a.tankPrice), 'with the money, it goes through', 'true', 'true');
-  console.log(`       car A tank: ${(capBefore / 60).toFixed(1)} min -> ${(a.capacity / 60).toFixed(1)} min, next upgrade ${a.tankPrice} coins`);
+  console.log(`       car A tank: ${(capBefore / 60).toFixed(1)} min -> ${(a.capacity / 60).toFixed(1)} min, next upgrade ${a.tankPrice} suns`);
   check(a.capacity > capBefore, 'and the CAPACITY IN SECONDS actually grew', `${(a.capacity / 60).toFixed(1)} min`, `> ${(capBefore / 60).toFixed(1)} min`);
-  check(a.tankPrice === TANK_PRICE_BASE + TANK_PRICE_STEP, 'the next one is dearer', `${a.tankPrice} coins`, String(TANK_PRICE_BASE + TANK_PRICE_STEP));
+  check(a.tankPrice === TANK_PRICE_BASE + TANK_PRICE_STEP, 'the next one is dearer', `${a.tankPrice} suns`, String(TANK_PRICE_BASE + TANK_PRICE_STEP));
 
   // per car: a different car is back to the base tank, because capacity belongs to the car
   const b = new Fuel({ carId: 'econ-b', wallet: w });
@@ -116,24 +116,24 @@ console.log('\n── gas bonus = coins ─────────────�
 console.log('\n── the boat is bought, not granted ────────────────────────────────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.boat' });
-  w.addCoins(BOAT_UNLOCK_COINS);
+  w.addSuns(BOAT_UNLOCK_SUNS);
   /* THE RULE CHANGED, on instruction: "making buying a boat and unlock that. It isn't automatic, but
    * something you get at the harbor." Holding the price used to latch the unlock right there in
-   * addCoins, which made the boat the one thing in the game that arrived without you going anywhere.
+   * addSuns, which made the boat the one thing in the game that arrived without you going anywhere.
    * These two checks asserted that old behaviour; they now assert the new one. */
-  check(!w.boatUnlocked, `holding ${BOAT_UNLOCK_COINS} coins does NOT hand you the boat`, w.boatUnlocked, 'false');
+  check(!w.boatUnlocked, `holding ${BOAT_UNLOCK_SUNS} suns does NOT hand you the boat`, w.boatUnlocked, 'false');
   const ev = [];
   for (let e = w.drain(); e; e = w.drain()) ev.push(e.kind);
   check(ev.includes('boat-affordable'), 'but it does tell you, once, that you can afford one', ev.join(',') || '(none)', 'boat-affordable');
 
   check(w.buyBoat(), 'buying it at a harbour works', 'true', 'true');
-  check(w.coins === 0, 'and the money is gone', w.coins, '0');
+  check(w.suns === 0, 'and the money is gone', w.suns, '0');
   check(w.boatUnlocked, 'the boat is yours', w.boatUnlocked, 'true');
   check(!w.buyBoat(), 'buying it twice is a no-op', 'false', 'false');
 
-  w.addCoins(200);
+  w.addSuns(200);
   check(w.spend(200), 'then spend everything else you own', 'true', 'true');
-  /* The trap the whole change had to avoid: boatUnlocked used to read "do you hold 50 coins RIGHT
+  /* The trap the whole change had to avoid: boatUnlocked used to read "do you hold 50 suns RIGHT
    * NOW", which was fine while nothing could be spent and would have taken the boat back the first
    * time anyone bought a car. */
   check(w.boatUnlocked, 'and the boat is STILL yours on an empty wallet', w.boatUnlocked, 'true');
@@ -143,14 +143,14 @@ console.log('\n── the boat is bought, not granted ────────�
 }
 
 /* ── 4b. spare fuel cans, bought at a pump ────────────────────────────────── */
-console.log('\n── gas cans = coins, bought at a petrol station ───────────────────────────');
+console.log('\n── gas cans = suns, bought at a petrol station ───────────────────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.cansbought' });
   check(w.cans === 0, 'the boot starts empty', w.cans, '0');
   check(!w.buyCan(CAN_PRICE), 'a can cannot be bought with no money', 'false', 'false');
-  w.addCoins(CAN_PRICE * (CAN_MAX + 2));
+  w.addSuns(CAN_PRICE * (CAN_MAX + 2));
   for (let k = 0; k < CAN_MAX; k++) check(w.buyCan(CAN_PRICE), `can ${k + 1} of ${CAN_MAX} bought`, 'true', 'true');
-  console.log(`       bought ${w.cans} cans at ${CAN_PRICE} coins each; ${w.coins} coins left`);
+  console.log(`       bought ${w.cans} cans at ${CAN_PRICE} suns each; ${w.suns} suns left`);
   check(w.cans === CAN_MAX, 'the boot holds the maximum', w.cans, String(CAN_MAX));
   check(!w.buyCan(CAN_PRICE), 'and refuses one more', 'false', 'false');
   check(w.useCan(), 'pouring one in works', 'true', 'true');

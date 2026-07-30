@@ -1,63 +1,63 @@
-/* Wanderoad — the wallet: coins, gems, and the boat unlock.
+/* Wanderoad — the wallet: suns, gems, and the boat unlock.
  *
  * Pure and testable, no DOM, no three.js — the same "feed it plain numbers" discipline
  * src/game/streak.js documents for itself. localStorage is the one side effect, and it is
  * debounced and flushed exactly the way streak.js's own `save()`/`flush()` split works: a
- * coin collected every second of driving must not mean a write every second, but a long
+ * sun collected every second of driving must not mean a write every second, but a long
  * session must not lose one either.
  *
  * The boat is the one piece of state here that is not just a running total. Collecting your
- * five-hundredth coin is an EVENT — "the boat is yours" — not a threshold main.js has to poll
- * for, so crossing BOAT_UNLOCK_COINS queues a one-shot message the same way
+ * five-hundredth sun is an EVENT — "the boat is yours" — not a threshold main.js has to poll
+ * for, so crossing BOAT_UNLOCK_SUNS queues a one-shot message the same way
  * src/game/streak.js's own milestone ladder does (drain(), popped once by the frame loop).
  * `?cheat` (src/game/garage.js's cheatOn()) also unlocks the boat, per docs/BOAT-PLAN.md's own
  * hard rules — but that is a standing STATE check on `boatUnlocked`, not an event: turning
- * cheat mode on mid-drive should not fire the same toast a real 500-coin drive earns.
+ * cheat mode on mid-drive should not fire the same toast a real 500-sun drive earns.
  */
 
 import { cheatOn } from './garage.js';
 
-/** Coins needed to earn the boat outright. */
-/* 50, not 500. Coins are now ~1 per kilometre (see world/loot.js), so 500 was a 500 km
+/** Suns needed to earn the boat outright. */
+/* 50, not 500. Suns are now ~1 per kilometre (see world/loot.js), so 500 was a 500 km
  * errand — the operator's own number for the boat is 50. */
-export const BOAT_UNLOCK_COINS = 50;
+export const BOAT_UNLOCK_SUNS = 50;
 
 /** How rarely a dirty wallet is actually written to localStorage, seconds — see update(). */
 const SAVE_INTERVAL = 2;
 
-/* ── COINS ARE THE WHOLE ECONOMY ─────────────────────────────────────────────
- * Operator: "make the whole new reward system run via coins. Streaks = coins. Gas bonus = buy
- * it for coins. New cars = coins."
+/* ── SUNS ARE THE WHOLE ECONOMY ─────────────────────────────────────────────
+ * Operator: "make the whole new reward system run via suns. Streaks = suns. Gas bonus = buy
+ * it for suns. New cars = suns."
  *
  * So driving well is the only income and everything is bought with the same money. Three
  * consequences, all of them in this file because this is where the money lives:
  *
- *   1. A streak MINTS coins as it runs — see mintStreak(). Coins picked up off the verge stay,
+ *   1. A streak MINTS suns as it runs — see mintStreak(). Suns picked up off the verge stay,
  *      but they are pocket change next to a long run, which is the right way round: the reward
  *      should come from the thing the game is about.
- *   2. Coins can be SPENT. That breaks the old `boatUnlocked` shortcut, which read "do you hold
- *      50 coins right now" — spending would have un-earned the boat. The latched `boat` flag was
+ *   2. Suns can be SPENT. That breaks the old `boatUnlocked` shortcut, which read "do you hold
+ *      50 suns right now" — spending would have un-earned the boat. The latched `boat` flag was
  *      always the real source of truth (see its own comment); now it is the only one.
  *   3. Owning a car is a thing you buy, not a distance you pass. `owned` is persisted here
  *      rather than in garage.js because it is a purchase, and purchases live with the money.
  */
 
-/** Metres of unbroken streak per coin minted. 250 m at 60 km/h is a coin every 15 seconds — a
- *  drip you notice, and about 4 coins a kilometre against the roughly 1 a kilometre the verge
+/** Metres of unbroken streak per sun minted. 250 m at 60 km/h is a sun every 15 seconds — a
+ *  drip you notice, and about 4 suns a kilometre against the roughly 1 a kilometre the verge
  *  pickups give, so a good run out-earns scavenging without making the pickups pointless. */
-export const STREAK_METRES_PER_COIN = 250;
+export const STREAK_METRES_PER_SUN = 250;
 
-/** Coins for one spare fuel can at a pump, and the most you may carry. */
+/** Suns for one spare fuel can at a pump, and the most you may carry. */
 export const CAN_PRICE = 8;
 export const CAN_MAX = 3;
 
 export class Wallet {
   constructor({ storageKey = 'wanderoad.loot.v1' } = {}) {
     this.storageKey = storageKey;
-    this.coins = 0;
+    this.suns = 0;
     this.gems = 0;
-    /** Earned outright by reaching BOAT_UNLOCK_COINS at least once, ever — persisted, so the
-     *  boat stays unlocked even if coins were somehow spent (there is no spending yet, but the
+    /** Earned outright by reaching BOAT_UNLOCK_SUNS at least once, ever — persisted, so the
+     *  boat stays unlocked even if suns were somehow spent (there is no spending yet, but the
      *  flag, not the running total, is the source of truth for "have I earned this"). */
     this.boat = false;
     /** Car ids bought outright, ever. A Set in memory, an array on disk. The starting car is
@@ -87,7 +87,12 @@ export class Wallet {
       const raw = localStorage.getItem(this.storageKey);
       if (!raw) return;
       const d = JSON.parse(raw);
-      this.coins = Math.max(0, +d.coins || 0);
+      /* `?? d.coins` MIGRATES AN OLD SAVE. The currency was called coins until the operator looked
+       * at the disc on screen and said "coin looks like the sun not coin -- i like that lets make it
+       * collecting suns". Anyone who has already played beta has a balance stored under the old key,
+       * and a rename that quietly zeroed it would be the worst possible way to ship a nicer name.
+       * Written back under `suns` on the next save, so this only has to be read once per player. */
+      this.suns = Math.max(0, +(d.suns ?? d.coins) || 0);
       this.gems = Math.max(0, +d.gems || 0);
       this.boat = !!d.boat;
       if (Array.isArray(d.owned)) this.owned = new Set(d.owned);
@@ -105,7 +110,7 @@ export class Wallet {
       localStorage.setItem(
         this.storageKey,
         JSON.stringify({
-          coins: this.coins,
+          suns: this.suns,
           gems: this.gems,
           boat: this.boat,
           owned: [...this.owned],
@@ -121,12 +126,12 @@ export class Wallet {
     }
   }
 
-  /** Unlocked by having earned it, by having enough coins right now, or by cheat mode — see
+  /** Unlocked by having earned it, by having enough suns right now, or by cheat mode — see
    *  the file header for why only the FIRST of those is an event. */
   get boatUnlocked() {
-    /* `coins >= BOAT_UNLOCK_COINS` used to be part of this and is deliberately gone: now that
-     * coins can be spent, holding fewer than 50 would have taken the boat back off you. The
-     * latch below is set the moment you first reach 50 (see addCoins), which is the event that
+    /* `suns >= BOAT_UNLOCK_SUNS` used to be part of this and is deliberately gone: now that
+     * suns can be spent, holding fewer than 50 would have taken the boat back off you. The
+     * latch below is set the moment you first reach 50 (see addSuns), which is the event that
      * actually earns it. */
     return this.boat || cheatOn();
   }
@@ -140,11 +145,11 @@ export class Wallet {
    * Spend, if there is enough. Returns true only when the money actually moved, so a caller
    * can use it as the gate itself rather than checking the balance and then spending — two
    * steps that can disagree if anything happens between them.
-   * @param {number} n coins
+   * @param {number} n suns
    */
   spend(n) {
-    if (!(n > 0) || this.coins < n) return false;
-    this.coins -= n;
+    if (!(n > 0) || this.suns < n) return false;
+    this.suns -= n;
     this._dirty = true;
     this.save(); // a purchase is not left to the debounce; losing one is worse than a write
     return true;
@@ -176,37 +181,37 @@ export class Wallet {
 
   /**
    * Pay out a running streak. Called every frame with the streak's CURRENT distance in metres;
-   * mints one coin per STREAK_METRES_PER_COIN of new ground and remembers what it has already
+   * mints one sun per STREAK_METRES_PER_SUN of new ground and remembers what it has already
    * paid for, so this is safe to call at 120 Hz. A streak that BREAKS resets to zero, which is
    * less than `_paidM`, so the counter follows it down and the next run starts paying again
    * from its own first metre — you are never paid twice for the same tarmac, and never charged
    * for a run you lost.
    * @param {number} distanceM the streak's current distance
-   * @returns {number} coins minted this call
+   * @returns {number} suns minted this call
    */
   mintStreak(distanceM) {
     const m = Math.max(0, distanceM || 0);
     if (m < this._paidM) this._paidM = m; // the streak broke, or a new run began
-    const owed = Math.floor((m - this._paidM) / STREAK_METRES_PER_COIN);
+    const owed = Math.floor((m - this._paidM) / STREAK_METRES_PER_SUN);
     if (owed <= 0) return 0;
-    this._paidM += owed * STREAK_METRES_PER_COIN;
-    this.addCoins(owed);
+    this._paidM += owed * STREAK_METRES_PER_SUN;
+    this.addSuns(owed);
     return owed;
   }
 
-  /** @param {number} n coins gained this call (0 is a no-op, never a write). */
-  addCoins(n) {
+  /** @param {number} n suns gained this call (0 is a no-op, never a write). */
+  addSuns(n) {
     if (!n) return;
-    this.coins += n;
+    this.suns += n;
     this._dirty = true;
     /* THE BOAT IS NO LONGER GIVEN AWAY HERE. Operator: "making buying a boat and unlock that. It
      * isn't automatic, but something you get at the harbor."
      *
-     * Reaching BOAT_UNLOCK_COINS used to latch `boat` and fire a toast right here, which made it
+     * Reaching BOAT_UNLOCK_SUNS used to latch `boat` and fire a toast right here, which made it
      * the one unlock in the game that happened TO you rather than because you went somewhere. It is
      * bought at a harbour now — see buyBoat — and the only thing crossing the price does is tell
      * you that you can afford it, once. */
-    if (!this.boat && this.coins >= BOAT_UNLOCK_COINS && !this._toldAffordBoat) {
+    if (!this.boat && this.suns >= BOAT_UNLOCK_SUNS && !this._toldAffordBoat) {
       this._toldAffordBoat = true;
       this._events.push({ kind: 'boat-affordable' });
     }
@@ -215,7 +220,7 @@ export class Wallet {
   /* ── THE PLANE ────────────────────────────────────────────────────────────────
    * Operator: "make planes unlockable via diamonds in sea ... let me unlock via pass 123".
    *
-   * Gems, not coins, and that is the point of it: coins come from the road and gems only exist out on
+   * Gems, not suns, and that is the point of it: suns come from the road and gems only exist out on
    * open water, so the plane is the one thing you cannot buy by driving well. You have to have gone
    * to sea for it, which is what makes the boat worth owning. The pass is the operator's own back
    * door and it latches the same flag, so a passed unlock behaves identically to an earned one. */
@@ -247,7 +252,7 @@ export class Wallet {
   /** Buy the boat. Only ever called when the car is actually at a harbour — main.js gates it. */
   buyBoat() {
     if (this.boat) return false;
-    if (!this.spend(BOAT_UNLOCK_COINS)) return false;
+    if (!this.spend(BOAT_UNLOCK_SUNS)) return false;
     this.boat = true;
     this._events.push({ kind: 'boat-unlock' });
     this.save();
@@ -258,7 +263,7 @@ export class Wallet {
    * Operator: "Make it so you can buy gas cans in the petrol stations."
    *
    * A can in the boot is a tank you carry: it refills you once, wherever you are, which is the one
-   * thing coins could not buy before and the thing you actually want when a station is 3 km away and
+   * thing suns could not buy before and the thing you actually want when a station is 3 km away and
    * the needle is on the pin. Held as a count rather than as fuel so it survives a car swap and a
    * reload — you bought a can, you still have a can. */
   get cans() {

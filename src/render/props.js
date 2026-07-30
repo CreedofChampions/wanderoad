@@ -1354,7 +1354,7 @@ export function buildStation(M, r, skirt, deal = false) {
   pbox(M, 0, CH + 0.5, 1.0, CW + 0.95, 0.14, CD + 0.95, 0, deal ? SIGN_DEAL : VERMILION, MAT.MATTE);
 
   /* ── A DEALERSHIP READS AS A DEALERSHIP ──────────────────────────────────────
-   * Operator: "add dealerships where you can buy cars with coins". Same apron, same canopy,
+   * Operator: "add dealerships where you can buy cars with suns". Same apron, same canopy,
    * same spur — a dealership is a station with the `deal` flag (see world/props.js) so all of
    * that placement work is shared. What has to differ is what you SEE from the road, or the
    * two are the same building and the player cannot tell which one sells cars.

@@ -4,16 +4,16 @@
  *   node tools/diag-loot.mjs [seed]
  *
  * No renderer: this calls the same two pure placement functions src/render/loot.js's Loot
- * class calls (coinsInBox, gemsForTile) directly.
+ * class calls (sunsInBox, gemsForTile) directly.
  *
- * Coins are measured off a REAL, connected drive — the same walk tools/diag-stations.mjs uses
+ * Suns are measured off a REAL, connected drive — the same walk tools/diag-stations.mjs uses
  * (walkOptions/driveRoute/edgeAt, duplicated here for the same reason that file's own comment
  * on box-vs-route measurement gives: a map-wide average can look fine while one real corridor
  * a driver actually follows is starved or flooded). Gems are measured over a real 6 km square,
  * because a gem has no road to walk — it lives on open water instead.
  */
 import { connects, nodePos, edgesInBox } from '../src/world/roads.js';
-import { coinsInBox, gemsForTile, GEM_TILE, COIN_SLOT_P, GEM_ACCEPT_P } from '../src/world/loot.js';
+import { sunsInBox, gemsForTile, GEM_TILE, SUN_SLOT_P, GEM_ACCEPT_P } from '../src/world/loot.js';
 import { hash2i } from '../src/core/math.js';
 
 const SEED = (parseInt(process.argv[2] ?? '', 10) || 20260726) >>> 0;
@@ -80,34 +80,34 @@ function edgeLength(e) {
   return s;
 }
 
-console.log(`=== loot: coin density along a real route, gem density over open water — seed ${SEED} ===\n`);
-console.log(`COIN_SLOT_P ${COIN_SLOT_P}   GEM_ACCEPT_P ${GEM_ACCEPT_P}\n`);
+console.log(`=== loot: sun density along a real route, gem density over open water — seed ${SEED} ===\n`);
+console.log(`SUN_SLOT_P ${SUN_SLOT_P}   GEM_ACCEPT_P ${GEM_ACCEPT_P}\n`);
 
-/* ── 1. coins/km along a real, connected drive ─────────────────────────────── */
-console.log('--- 1. coins along a real, connected drive ---');
+/* ── 1. suns/km along a real, connected drive ─────────────────────────────── */
+console.log('--- 1. suns along a real, connected drive ---');
 const HOPS = 220;
 const route = driveRoute(SEED, 0xc01e, HOPS, 0, 0);
 let routeM = 0;
-let coinCount = 0;
+let sunCount = 0;
 const clusterSet = new Set();
 for (const pick of route) {
   const e = edgeAt(pick.ei, pick.ej, pick.edir, SEED);
   if (!e) continue;
   const total = edgeLength(e);
-  const pad = 30; // clears the coin's own small lateral jitter plus the query-box expansion
-  const coins = coinsInBox(e.minX - pad, e.minZ - pad, e.maxX + pad, e.maxZ + pad, SEED);
+  const pad = 30; // clears the sun's own small lateral jitter plus the query-box expansion
+  const suns = sunsInBox(e.minX - pad, e.minZ - pad, e.maxX + pad, e.maxZ + pad, SEED);
   const mine = `co:${e.key}:`;
-  for (const c of coins) {
+  for (const c of suns) {
     if (!c.id.startsWith(mine)) continue; // belongs to a neighbouring edge whose box overlaps
-    coinCount++;
+    sunCount++;
     clusterSet.add(c.id.split(':')[2]); // the slot index — one cluster per accepted slot
   }
   routeM += total;
 }
-const coinsPerKm = routeM > 0 ? coinCount / (routeM / 1000) : 0;
+const sunsPerKm = routeM > 0 ? sunCount / (routeM / 1000) : 0;
 console.log(`  ${(routeM / 1000).toFixed(1)} km of real connected arterial (${HOPS} hops)`);
-console.log(`  ${coinCount} coins in ${clusterSet.size} clusters — ${coinsPerKm.toFixed(1)} coins/km`);
-console.log(`${check(coinsPerKm >= 0.5 && coinsPerKm <= 2.5, `coins/km ${coinsPerKm.toFixed(1)} outside [0.5, 2.5]`)}  coins/km within [0.5, 2.5]\n`);
+console.log(`  ${sunCount} suns in ${clusterSet.size} clusters — ${sunsPerKm.toFixed(1)} suns/km`);
+console.log(`${check(sunsPerKm >= 0.5 && sunsPerKm <= 2.5, `suns/km ${sunsPerKm.toFixed(1)} outside [0.5, 2.5]`)}  suns/km within [0.5, 2.5]\n`);
 
 /* ── 2. gems over a real 6 km square ────────────────────────────────────────── */
 console.log('--- 2. gems over a 6 km square ---');

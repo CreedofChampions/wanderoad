@@ -338,13 +338,13 @@ export class EngineAudio {
   }
 
   /**
-   * A gold coin. Short, bright, TWO notes rather than pickup()'s three — a lighter touch, so
-   * the two are never confused mid-drive even though a coin is collected far more often than a
+   * A gold sun. Short, bright, TWO notes rather than pickup()'s three — a lighter touch, so
+   * the two are never confused mid-drive even though a sun is collected far more often than a
    * fuel can. Same triangle-oscillator shape as pickup(), a faster decay (0.22 s vs 0.34 s):
-   * coins come in clusters (world/loot.js), so several of these can overlap in under a second
+   * suns come in clusters (world/loot.js), so several of these can overlap in under a second
    * and each one needs to be OVER before the next lands, not ring into it.
    */
-  coin() {
+  sun() {
     const ctx = this.ctx;
     if (!ctx) return;
     const t = ctx.currentTime;
@@ -364,13 +364,13 @@ export class EngineAudio {
       o.stop(t + delay + 0.26);
     }
     /* Diagnostics only, same idea as pickup()'s own `this.pickups` counter. */
-    this.coins = (this.coins || 0) + 1;
+    this.suns = (this.suns || 0) + 1;
   }
 
   /**
    * A diamond. Three notes like pickup()'s arpeggio, but sine rather than triangle and a slow
    * 0.1 s stagger rather than a fast rise — gems are rare and only ever found by boat, so this
-   * is unhurried where pickup() and coin() are both quick, a shimmer rather than a chime.
+   * is unhurried where pickup() and sun() are both quick, a shimmer rather than a chime.
    */
   gem() {
     const ctx = this.ctx;

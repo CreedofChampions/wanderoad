@@ -18,7 +18,7 @@
 
 import { Terrain, isDryAt } from '../src/world/terrain.js';
 import { BIOME_COUNT, waterLevelAt } from '../src/world/biomes.js';
-import { gemsForTile, GEM_TILE, coinsInBox } from '../src/world/loot.js';
+import { gemsForTile, GEM_TILE, sunsInBox } from '../src/world/loot.js';
 import { EXIT_DEPTH, EXIT_PROBE_DIST, EXIT_STEEP_SLOPE } from '../src/game/boat.js';
 
 export function findFixture(seed = 20260726, opts = {}) {
@@ -98,7 +98,7 @@ export function findFixture(seed = 20260726, opts = {}) {
    *
    * The criterion is bench-boat.mjs's own `hasGentleLanding()` (its findLakesideRoad() uses it
    * for the same reason), duplicated here rather than imported — same reasoning as this file's
-   * `coinsAlongRoute()` duplicating tools/diag-stations.mjs's own walk helpers below: these are
+   * `sunsAlongRoute()` duplicating tools/diag-stations.mjs's own walk helpers below: these are
    * scripts with no shared-helper module, not libraries. Walked from a WET point outward rather
    * than from a real road inward (unlike `hasGentleLanding()`'s own callers): a direct search for
    * "the nearest actual road with a gentle line to deep water" found nothing within 60 m of this
@@ -189,8 +189,8 @@ export function findFixture(seed = 20260726, opts = {}) {
     else if (deep && s > deep.out + 40) break; // ran back into land — keep the last good one
   }
 
-  /* A DRY road: a carriageway point with no water anywhere near it, so a coins-per-kilometre
-   * measurement is measuring coins and not a car that drove into a lake. */
+  /* A DRY road: a carriageway point with no water anywhere near it, so a suns-per-kilometre
+   * measurement is measuring suns and not a car that drove into a lake. */
   let dryRoad = null;
   for (let z = -R; z <= R && !dryRoad; z += 60) {
     for (let x = -R; x <= R && !dryRoad; x += 60) {
@@ -228,16 +228,16 @@ export function findFixture(seed = 20260726, opts = {}) {
   };
 }
 
-/* Coins a DRIVER meets, per kilometre — not coins that exist per kilometre.
+/* Suns a DRIVER meets, per kilometre — not suns that exist per kilometre.
  *
- * tools/diag-loot.mjs asserts 26.4 coins/km along its own 381.8 km arterial walk, and the
- * browser playtest measured a driver collecting 8.8/km with every reachable coin picked up
- * (7 of 7). Only one of those can be what a player experiences, so this counts coins within
- * the game's own COIN_RADIUS of a road centreline followed metre by metre — the line a car
+ * tools/diag-loot.mjs asserts 26.4 suns/km along its own 381.8 km arterial walk, and the
+ * browser playtest measured a driver collecting 8.8/km with every reachable sun picked up
+ * (7 of 7). Only one of those can be what a player experiences, so this counts suns within
+ * the game's own SUN_RADIUS of a road centreline followed metre by metre — the line a car
  * on the road actually occupies. */
-export function coinsAlongRoute(seed = 20260726, startX = 721.1, startZ = 384.6, metres = 4000) {
+export function sunsAlongRoute(seed = 20260726, startX = 721.1, startZ = 384.6, metres = 4000) {
   const T = new Terrain(seed, startX - 3000, startZ - 3000, startX + 3000, startZ + 3000, 240);
-  const R = 7; // src/render/loot.js's COIN_RADIUS
+  const R = 7; // src/render/loot.js's SUN_RADIUS
   const pts = [];
   let x = startX;
   let z = startZ;
@@ -267,9 +267,9 @@ export function coinsAlongRoute(seed = 20260726, startX = 721.1, startZ = 384.6,
   }
   const xs = pts.map((p) => p[0]);
   const zs = pts.map((p) => p[1]);
-  const coins = coinsInBox(Math.min(...xs) - 40, Math.min(...zs) - 40, Math.max(...xs) + 40, Math.max(...zs) + 40, seed);
+  const suns = sunsInBox(Math.min(...xs) - 40, Math.min(...zs) - 40, Math.max(...xs) + 40, Math.max(...zs) + 40, seed);
   let reach = 0;
-  for (const c of coins) {
+  for (const c of suns) {
     for (const p of pts) {
       if (Math.hypot(c.x - p[0], c.z - p[1]) <= R) {
         reach++;
@@ -278,19 +278,19 @@ export function coinsAlongRoute(seed = 20260726, startX = 721.1, startZ = 384.6,
     }
   }
   const km = walked / 1000;
-  return { km: +km.toFixed(2), coinsInBox: coins.length, withinPickupOfCentreline: reach, perKm: +(reach / km).toFixed(1) };
+  return { km: +km.toFixed(2), sunsInBox: suns.length, withinPickupOfCentreline: reach, perKm: +(reach / km).toFixed(1) };
 }
 
 if (process.argv[1] && process.argv[1].endsWith('diag-playtest-fixtures.mjs')) {
   const seed = parseInt(process.argv[2] || '', 10) || 20260726;
-  if (process.argv.includes('--coins')) {
+  if (process.argv.includes('--suns')) {
     for (const [sx, sz] of [
       [721.1, 384.6],
       [997.1, -3437.7],
       [0, 0],
     ]) {
       try {
-        console.log(`route from (${sx}, ${sz}): ${JSON.stringify(coinsAlongRoute(seed, sx, sz, 4000))}`);
+        console.log(`route from (${sx}, ${sz}): ${JSON.stringify(sunsAlongRoute(seed, sx, sz, 4000))}`);
       } catch (e) {
         console.log(`route from (${sx}, ${sz}): ${e.message}`);
       }

@@ -1,11 +1,11 @@
 /* Wanderoad — does driving well actually pay?
  *
- * Operator: "Streaks = coins." A bench can prove the arithmetic (tools/bench-economy.mjs does),
+ * Operator: "Streaks = suns." A bench can prove the arithmetic (tools/bench-economy.mjs does),
  * but only the real game can prove the WIRING: that main.js calls mintStreak with the streak's
  * real distance, every frame, in the built bundle that is actually deployed. So this drives a
  * real headless Chrome down a real road with a real keypress and watches the wallet.
  *
- *   node tools/diag-coins.mjs [url]
+ *   node tools/diag-suns.mjs [url]
  */
 
 import { spawn } from 'node:child_process';
@@ -95,7 +95,7 @@ for (let i = 0; i < 80; i++) {
 console.log(`\nWANDEROAD — DRIVING WELL PAYS\n${'-'.repeat(76)}\n${URL}\n`);
 
 const start = await evalJs(`(() => { const W = window.WANDEROAD;
-  return { coins: W.wallet ? W.wallet.coins : -1, hasWallet: !!W.wallet }; })()`);
+  return { suns: W.wallet ? W.wallet.suns : -1, hasWallet: !!W.wallet }; })()`);
 check(start.hasWallet, 'the game exposes the wallet it actually spends from', start.hasWallet, 'true');
 
 /* Put the car on a road pointing along it — the same backToRoad() R calls — then hold W. A
@@ -120,7 +120,7 @@ const drive = (ms) => evalJs(`(async () => { const W = window.WANDEROAD; const c
     cur = s; };
   const q0 = c.terrain.roads.query(c.x, c.z);
   if (isFinite(q0.d)) c.placeAt(q0.qx, q0.qz, Math.atan2(q0.tx, q0.tz));
-  let best = 0, coins = W.wallet.coins;
+  let best = 0, suns = W.wallet.suns;
   K('KeyW','keydown');
   try {
     const t0 = performance.now();
@@ -134,27 +134,27 @@ const drive = (ms) => evalJs(`(async () => { const W = window.WANDEROAD; const c
       while (e > Math.PI) e -= Math.PI*2; while (e <= -Math.PI) e += Math.PI*2;
       set(e > 0.02 ? 1 : e < -0.02 ? -1 : 0);
       best = Math.max(best, W.streak.state.distance);
-      coins = W.wallet.coins;
+      suns = W.wallet.suns;
     }
   } finally { set(0); K('KeyW','keyup'); }
-  return { best, coins, kph: +c.kph.toFixed(1) }; })()`);
+  return { best, suns, kph: +c.kph.toFixed(1) }; })()`);
 
 let best = 0;
-let coins = start.coins;
-for (let leg = 0; leg < 4 && coins < start.coins + 2; leg++) {
+let suns = start.suns;
+for (let leg = 0; leg < 4 && suns < start.suns + 2; leg++) {
   const r = await drive(15000);
   if (!r) continue;
   best = Math.max(best, r.best);
-  coins = r.coins;
-  console.log(`       leg ${leg + 1}: ${r.kph} km/h, best streak this leg ${r.best.toFixed(0)} m, ${r.coins} coins`);
+  suns = r.suns;
+  console.log(`       leg ${leg + 1}: ${r.kph} km/h, best streak this leg ${r.best.toFixed(0)} m, ${r.suns} suns`);
 }
 
-const { STREAK_METRES_PER_COIN } = await import('../src/game/wallet.js');
-const earned = coins - start.coins;
-const expect = Math.floor(best / STREAK_METRES_PER_COIN);
-console.log(`       banked ${best.toFixed(0)} m of streak and earned ${earned} coin(s) (rate: one per ${STREAK_METRES_PER_COIN} m)`);
-check(best > STREAK_METRES_PER_COIN, 'the drive actually banked a streak worth paying for', `${best.toFixed(0)} m`, `> ${STREAK_METRES_PER_COIN} m`);
-check(earned >= 1, 'DRIVING WELL PAYS COINS in the built game', earned, '>= 1');
+const { STREAK_METRES_PER_SUN } = await import('../src/game/wallet.js');
+const earned = suns - start.suns;
+const expect = Math.floor(best / STREAK_METRES_PER_SUN);
+console.log(`       banked ${best.toFixed(0)} m of streak and earned ${earned} sun(s) (rate: one per ${STREAK_METRES_PER_SUN} m)`);
+check(best > STREAK_METRES_PER_SUN, 'the drive actually banked a streak worth paying for', `${best.toFixed(0)} m`, `> ${STREAK_METRES_PER_SUN} m`);
+check(earned >= 1, 'DRIVING WELL PAYS SUNS in the built game', earned, '>= 1');
 check(earned <= expect + 1, 'and it pays the rate, not a random number', earned, `<= ${expect + 1}`);
 
 /* And the shop is reachable from where the car actually is. Asked of the WORLD function rather
@@ -174,11 +174,11 @@ if (pose.seed === null || pose.seed === undefined) {
   let closest = Infinity;
   for (const d of deals) closest = Math.min(closest, Math.hypot(d.x - pose.x, d.z - pose.z));
   console.log(`       from (${pose.x.toFixed(0)},${pose.z.toFixed(0)}): ${near.length} stations within ${R} m, ${deals.length} dealerships, nearest ${isFinite(closest) ? closest.toFixed(0) + ' m' : 'none'}`);
-  check(deals.length > 0, 'there is somewhere to spend the coins near the car', deals.length, '>= 1');
+  check(deals.length > 0, 'there is somewhere to spend the suns near the car', deals.length, '>= 1');
   check(isFinite(closest) && closest < R, 'and it is within driving distance', isFinite(closest) ? `${closest.toFixed(0)} m` : 'none', `< ${R} m`);
 }
 
-console.log(`\n${failures ? `${failures} COIN CHECK(S) FAILED` : 'all coin checks passed'}\n`);
+console.log(`\n${failures ? `${failures} SUN CHECK(S) FAILED` : 'all sun checks passed'}\n`);
 sock.close();
 chrome.kill();
 process.exit(failures ? 1 : 0);

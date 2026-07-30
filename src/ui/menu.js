@@ -13,7 +13,7 @@
 import { CARS, CAR_KEYS } from '../car/loadedCar.js';
 import { TERRAINS } from '../game/presets.js';
 import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, cheatOn, fmtUnlock } from '../game/garage.js';
-import { BOAT_UNLOCK_COINS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
+import { BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
 
 const ESC = ['Escape', 'KeyM'];
@@ -161,7 +161,7 @@ export class Menu {
         <h2>Garage</h2>
         <p class="hint">Escape or M to close · everything here is also a URL parameter</p>
 
-        <h3>Car <small>each one drives differently — bought with coins at a dealership</small></h3>
+        <h3>Car <small>each one drives differently — bought with suns at a dealership</small></h3>
         <div class="row" data-group="car"></div>
 
         <h3>Tank <small>a bigger tank for the car you are driving — bought at a dealership</small></h3>
@@ -238,7 +238,7 @@ export class Menu {
   /* Cars carry their unlock state. A locked one is shown, greyed, with what it costs —
    * seeing what you have not earned yet is the entire point of an unlock ladder.
    *
-   * What it costs is now COINS, not distance (operator: "New cars = coins"), and the label says
+   * What it costs is now SUNS, not distance (operator: "New cars = suns"), and the label says
    * whether you can afford it right now, because a price you cannot act on is just a number.
    * The greyed ones are still shown and still say what they cost: that is the shop window. */
   _fillCars() {
@@ -248,14 +248,14 @@ export class Menu {
     row.innerHTML = FLEET.map((c) => {
       const open = isUnlocked(c, best, wallet);
       const price = priceOf(c);
-      const tag = wallet ? `${price} coins${wallet.coins >= price ? '' : ` — you have ${wallet.coins}`}` : fmtUnlock(c.unlockAt);
+      const tag = wallet ? `${price} suns${wallet.suns >= price ? '' : ` — you have ${wallet.suns}`}` : fmtUnlock(c.unlockAt);
       return `<button data-group="car" data-key="${c.id}" title="${c.blurb}"${
         open ? '' : ` class="locked" data-unlock="${tag}"`
       }>${c.label}</button>`;
     }).join('');
   }
 
-  /* The gas bonus, as a purchase. Operator: "Gas bonus = buy it for coins."
+  /* The gas bonus, as a purchase. Operator: "Gas bonus = buy it for suns."
    *
    * One button, because there is one thing to buy: the next capacity step for the car you are
    * in. It says the price, whether you can afford it, and — when you are not standing at a
@@ -274,10 +274,10 @@ export class Menu {
       return;
     }
     const price = fuel.tankPrice;
-    const canAfford = wallet.coins >= price;
-    const label = `+10% tank · ${price} coins`;
+    const canAfford = wallet.suns >= price;
+    const label = `+10% tank · ${price} suns`;
     row.innerHTML = `<button data-group="tank" data-key="buy"${
-      canAfford ? '' : ` class="locked" data-unlock="you have ${wallet.coins}"`
+      canAfford ? '' : ` class="locked" data-unlock="you have ${wallet.suns}"`
     }>${label}</button>`;
   }
 
@@ -302,17 +302,17 @@ export class Menu {
     if (wallet.boat) {
       out.push('<button class="locked" data-unlock="yours — B to take it out">Boat owned</button>');
     } else {
-      const price = BOAT_UNLOCK_COINS;
-      const why = !here.harbour ? 'at a harbour' : wallet.coins < price ? `you have ${wallet.coins}` : '';
+      const price = BOAT_UNLOCK_SUNS;
+      const why = !here.harbour ? 'at a harbour' : wallet.suns < price ? `you have ${wallet.suns}` : '';
       out.push(
-        `<button data-group="shop" data-key="boat"${why ? ` class="locked" data-unlock="${why}"` : ''}>Boat · ${price} coins</button>`
+        `<button data-group="shop" data-key="boat"${why ? ` class="locked" data-unlock="${why}"` : ''}>Boat · ${price} suns</button>`
       );
     }
 
     const canFull = wallet.cans >= CAN_MAX;
-    const canWhy = canFull ? 'boot is full' : !here.pump ? 'at a petrol station' : wallet.coins < CAN_PRICE ? `you have ${wallet.coins}` : '';
+    const canWhy = canFull ? 'boot is full' : !here.pump ? 'at a petrol station' : wallet.suns < CAN_PRICE ? `you have ${wallet.suns}` : '';
     out.push(
-      `<button data-group="shop" data-key="can"${canWhy ? ` class="locked" data-unlock="${canWhy}"` : ''}>Fuel can · ${CAN_PRICE} coins (${wallet.cans}/${CAN_MAX})</button>`
+      `<button data-group="shop" data-key="can"${canWhy ? ` class="locked" data-unlock="${canWhy}"` : ''}>Fuel can · ${CAN_PRICE} suns (${wallet.cans}/${CAN_MAX})</button>`
     );
     row.innerHTML = out.join('');
   }
@@ -384,11 +384,11 @@ export class Menu {
        * choose between the cars you own, and a dealership is where the fleet grows. */
       if (spec && !isUnlocked(spec, best, wallet)) {
         if (!wallet || !this.hooks.canBuy?.()) {
-          this.hooks.say?.(`${spec.label} costs ${priceOf(spec)} coins — buy it at a dealership`, 3.2);
+          this.hooks.say?.(`${spec.label} costs ${priceOf(spec)} suns — buy it at a dealership`, 3.2);
           return;
         }
         if (!wallet.buyCar(spec.id, priceOf(spec))) {
-          this.hooks.say?.(`${spec.label} costs ${priceOf(spec)} coins — you have ${wallet.coins}`, 3.2);
+          this.hooks.say?.(`${spec.label} costs ${priceOf(spec)} suns — you have ${wallet.suns}`, 3.2);
           return;
         }
         this.hooks.say?.(`${spec.label} is yours`, 3.0);
@@ -412,7 +412,7 @@ export class Menu {
       if (!fuel.tankUpgradable) return;
       const price = fuel.tankPrice;
       if (!wallet.buyTank(fuel.carId, price)) {
-        this.hooks.say?.(`a bigger tank costs ${price} coins — you have ${wallet.coins}`, 3.2);
+        this.hooks.say?.(`a bigger tank costs ${price} suns — you have ${wallet.suns}`, 3.2);
         return;
       }
       this.hooks.say?.(`bigger tank fitted — ${(fuel.capacity / 60).toFixed(0)} min now`, 3.0);
@@ -427,7 +427,7 @@ export class Menu {
           return;
         }
         if (!wallet.buyBoat()) {
-          this.hooks.say?.(`the boat costs ${BOAT_UNLOCK_COINS} coins — you have ${wallet.coins}`, 3.4);
+          this.hooks.say?.(`the boat costs ${BOAT_UNLOCK_SUNS} suns — you have ${wallet.suns}`, 3.4);
           return;
         }
         this.hooks.say?.('the boat is yours — B to take it out on the water', 4.0);
@@ -438,7 +438,7 @@ export class Menu {
         }
         if (!wallet.buyCan(CAN_PRICE)) {
           this.hooks.say?.(
-            wallet.cans >= CAN_MAX ? 'the boot is already full of cans' : `a can costs ${CAN_PRICE} coins — you have ${wallet.coins}`,
+            wallet.cans >= CAN_MAX ? 'the boot is already full of cans' : `a can costs ${CAN_PRICE} suns — you have ${wallet.suns}`,
             3.2
           );
           return;

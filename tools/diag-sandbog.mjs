@@ -183,3 +183,60 @@ console.log('\n── recovery: does it ever trap the player? ──────
 }
 
 console.log('');
+
+/* ── AND THE BOG MUST NOT FOLLOW YOU ONTO THE ROAD ───────────────────────────
+ * Operator, playing the beta: "dunes off roading shuts off car when on-road".
+ *
+ * The bog is a debt that drains over about 1.6 s once you are back on a made surface, and draining
+ * is the right model — but its PHYSICS used to be applied regardless of what was under the tyres
+ * while it drained, so for that second and a half a car back on tarmac carried crrBogged 0.25 and
+ * vDragBogged 350 N per m/s. At 10 m/s that is 3500 N of drag on a road, which does not read as sand
+ * on your tyres, it reads as the engine cutting out.
+ *
+ * One variable, three values. `_probeWheels()` runs at the top of every `_step` and rewrites
+ * onRoad/onRoadMin from the terrain, so pinning the PROBE is the only honest way to hold the road
+ * signal still while measuring against it — setting the fields in the loop is silently discarded,
+ * and with `terrain: null` they default to 1, which quietly disables the bog altogether.
+ */
+/* This file was a REPORT — it printed numbers and never asserted any of them — which is why the bog
+ * following a car onto the road went unnoticed until the operator drove into it. The section below is
+ * the first part of it with real checks, and it exits non-zero, so npm test can catch a regression
+ * here rather than a player doing it. */
+let sandFailures = 0;
+const check = (ok, label, got, want) => {
+  if (!ok) sandFailures++;
+  console.log(`${ok ? ' PASS' : ' FAIL'}  ${label.padEnd(58)} ${String(got).padStart(14)}   want ${want}`);
+};
+
+console.log('── the bog belongs to the sand, not to the car ──────────────────────────────');
+{
+  const FULL2 = { steer: 0, throttle: 1, brake: 0, handbrake: 0, analogue: true };
+  const held = (onRoadVal) => {
+    const c = new Vehicle({ tier: 'gt', terrain: null, preset: 'cruise' });
+    c._probeWheels = () => {
+      c.onRoad = onRoadVal;
+      c.onRoadMin = onRoadVal;
+      for (const w of c.wheels || []) w.onRoad = onRoadVal;
+    };
+    c.speed = 8;
+    c.vz = 8;
+    for (let i = 0; i < 6 / PHYSICS_DT; i++) {
+      c._sandBogDist = 999; // hold the DEBT at full, so only the surface differs
+      c.sandBog = 1;
+      c._step(PHYSICS_DT, FULL2);
+    }
+    return c.kph;
+  };
+  const sand = held(0);
+  const half = held(0.5);
+  const road = held(1);
+  console.log(`  fully bogged, 6 s at full throttle: in the sand ${sand.toFixed(1)} km/h, half on ${half.toFixed(1)} km/h, on the road ${road.toFixed(1)} km/h`);
+  check(sand < 25, 'a bogged car in the sand really is bogged', `${sand.toFixed(1)} km/h`, '< 25 km/h');
+  check(road > 45, 'and the SAME car with the SAME debt drives normally on tarmac', `${road.toFixed(1)} km/h`, '> 45 km/h');
+  check(half > sand && half < road, 'half on, half off is in between rather than a switch', `${half.toFixed(1)} km/h`, `${sand.toFixed(0)} .. ${road.toFixed(0)}`);
+}
+
+console.log(`
+${sandFailures ? `${sandFailures} SANDBOG CHECK(S) FAILED` : 'all sandbog checks passed'}
+`);
+process.exit(sandFailures ? 1 : 0);

@@ -133,7 +133,7 @@ export function bestStreak() {
 }
 
 /* ── CARS ARE BOUGHT, NOT PASSED ──────────────────────────────────────────────
- * Operator: "add dealerships where you can buy cars with coins ... New cars = coins."
+ * Operator: "add dealerships where you can buy cars with suns ... New cars = suns."
  *
  * `unlockAt` is kept — it still places each car's badge along the unlock bar, and it is still
  * what `nextUnlock` reports, so the bar continues to answer "what is coming next". But it no
@@ -150,7 +150,7 @@ export function isUnlocked(car, best = bestStreak(), wallet = null) {
   return best >= car.unlockAt;
 }
 
-/** What this car costs at a dealership, in coins. */
+/** What this car costs at a dealership, in suns. */
 export function priceOf(car) {
   return Math.max(0, +car.price || 0);
 }

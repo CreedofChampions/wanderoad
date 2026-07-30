@@ -1,20 +1,20 @@
-/* Wanderoad — loot: gold coins along the road, diamonds on open water.
+/* Wanderoad — loot: gold suns along the road, diamonds on open water.
  *
  * Two placement functions, no three.js and no DOM, in the same spirit as world/props.js:
  * everything here is a pure function of (x, z, seed) so the client and the server (if this
- * ever grows one) can never disagree about where a coin sits, and so a tile that leaves the
- * rolling window and comes back hands out the SAME coins rather than inventing new ones.
+ * ever grows one) can never disagree about where a sun sits, and so a tile that leaves the
+ * rolling window and comes back hands out the SAME suns rather than inventing new ones.
  *
- * COINS follow the exact idiom world/props.js's `fuelCansInBox` already established: walk
- * every road edge in the box by arc length, slot every COIN_SLOT metres, accept a slot with a
+ * SUNS follow the exact idiom world/props.js's `fuelCansInBox` already established: walk
+ * every road edge in the box by arc length, slot every SUN_SLOT metres, accept a slot with a
  * plain hash before a PRNG stream is ever built (nineteen slots in twenty die on that one
  * cheap test — see props.js's own comment on why that ordering matters). The one real
- * difference from a fuel can is that a coin is common enough to be the game's everyday
- * currency, so ONE accepted slot buys a small CLUSTER of coins rather than a single pickup —
- * a scatter of coins along the tarmac reads as "money on this stretch of road" at a glance,
- * where one coin every 150 m would just look like debris.
+ * difference from a fuel can is that a sun is common enough to be the game's everyday
+ * currency, so ONE accepted slot buys a small CLUSTER of suns rather than a single pickup —
+ * a scatter of suns along the tarmac reads as "money on this stretch of road" at a glance,
+ * where one sun every 150 m would just look like debris.
  *
- * A coin needs nothing but the road's OWN elevation — it stands right on the centreline, not
+ * A sun needs nothing but the road's OWN elevation — it stands right on the centreline, not
  * off in the verge where a footprint or a slope could matter — so this never builds a Terrain
  * or asks a caller for a ground probe the way propsInBox/fuelCansInBox do. `edgeProfile()`
  * (world/roads.js), the same call stationForEdge makes, is enough, and it is memoised per edge
@@ -92,34 +92,34 @@ function atArc(e, cum, s, out) {
   return out;
 }
 
-/* ── coins ────────────────────────────────────────────────────────────────── */
+/* ── suns ────────────────────────────────────────────────────────────────── */
 
-const SALT_COIN = 0x434f4931; // 'COI1'
+const SALT_SUN = 0x434f4931; // 'COI1'
 
 /** Candidate slot every this many metres of road arc. */
-/* One coin per kilometre of road, not twenty-six. Operator: "Coins -- 1 per km max".
- * Expected coins per metre = (P / SLOT) * mean(cluster). At 64 m / 0.42 / 3-5 that was
+/* One sun per kilometre of road, not twenty-six. Operator: "Suns -- 1 per km max".
+ * Expected suns per metre = (P / SLOT) * mean(cluster). At 64 m / 0.42 / 3-5 that was
  * 0.026/m = 26 per km. At 620 m / 0.62 / 1 it is 0.0010/m = ~1.0 per km. */
-export const COIN_SLOT = 620;
+export const SUN_SLOT = 620;
 /** Accept probability per slot — a single scalar, not tiered like the props/cans arrays,
- *  because coins are meant to be everyday and equally likely on a lane or an arterial. */
-export const COIN_SLOT_P = 0.62;
-/** Metres above the road surface a coin's origin sits at — render/loot.js blits the geometry
+ *  because suns are meant to be everyday and equally likely on a lane or an arterial. */
+export const SUN_SLOT_P = 0.62;
+/** Metres above the road surface a sun's origin sits at — render/loot.js blits the geometry
  *  at this height above the ground-contact point, the same "hover is a fixed constant, not
  *  part of placement" rule world/props.js's floating can uses. */
-export const COIN_HOVER = 0.6;
-/** A cluster is this many coins, inclusive. */
-export const COIN_CLUSTER_MIN = 1;
-export const COIN_CLUSTER_MAX = 1;
-/** Metres between coins in a cluster, measured along the road's own tangent. */
-export const COIN_SPACING = 7;
-/** How far a coin may wander off the centreline, as a fraction of the carriageway's own half
- *  width — small, because a coin belongs ON the road, not beside it (that is the fuel can's
+export const SUN_HOVER = 0.6;
+/** A cluster is this many suns, inclusive. */
+export const SUN_CLUSTER_MIN = 1;
+export const SUN_CLUSTER_MAX = 1;
+/** Metres between suns in a cluster, measured along the road's own tangent. */
+export const SUN_SPACING = 7;
+/** How far a sun may wander off the centreline, as a fraction of the carriageway's own half
+ *  width — small, because a sun belongs ON the road, not beside it (that is the fuel can's
  *  job). */
-export const COIN_LATERAL_JITTER = 0.2;
-/** Query-box expansion. Generous over the small lateral jitter above, so a coin whose slot
+export const SUN_LATERAL_JITTER = 0.2;
+/** Query-box expansion. Generous over the small lateral jitter above, so a sun whose slot
  *  sits just outside the box but whose position lands inside it is never missed. */
-const COIN_MAX_OFFSET = 20;
+const SUN_MAX_OFFSET = 20;
 
 let _land = null;
 let _water = null;
@@ -136,15 +136,15 @@ function pureFns(seed) {
 }
 
 /**
- * Every coin whose position lands inside the box.
+ * Every sun whose position lands inside the box.
  *
  * @param {number} x0,z0,x1,z1 world box
  * @param {number} seed
  * @returns {Array<{x:number, z:number, y:number, id:string}>}
  */
-export function coinsInBox(x0, z0, x1, z1, seed) {
+export function sunsInBox(x0, z0, x1, z1, seed) {
   const out = [];
-  const edges = edgesInBox(x0 - COIN_MAX_OFFSET, z0 - COIN_MAX_OFFSET, x1 + COIN_MAX_OFFSET, z1 + COIN_MAX_OFFSET, seed, 20);
+  const edges = edgesInBox(x0 - SUN_MAX_OFFSET, z0 - SUN_MAX_OFFSET, x1 + SUN_MAX_OFFSET, z1 + SUN_MAX_OFFSET, seed, 20);
   const { land, water } = pureFns(seed);
   const at = { x: 0, z: 0, tx: 1, tz: 0, k: 0, t: 0 };
 
@@ -152,7 +152,7 @@ export function coinsInBox(x0, z0, x1, z1, seed) {
     const ids = edgeIds(e);
     const cum = arcTable(e);
     const total = cum[cum.length - 1];
-    const slots = Math.floor(total / COIN_SLOT);
+    const slots = Math.floor(total / SUN_SLOT);
     if (slots < 1) continue;
     const key0 = ids.i * 4 + ids.dir * 2 + ids.tier;
     const half = e.width * 0.5;
@@ -163,30 +163,30 @@ export function coinsInBox(x0, z0, x1, z1, seed) {
     for (let s = 0; s < slots; s++) {
       // Acceptance from a plain hash before any PRNG stream exists — see fuelCansInBox's own
       // comment in world/props.js for why this ordering is the one that keeps the cost down.
-      if (hash3i(key0, ids.j, s, seed ^ SALT_COIN) * F32 >= COIN_SLOT_P) continue;
-      const rnd = rng(hash3i(key0, ids.j, s, seed ^ SALT_COIN ^ 0x1c2b3a4d));
-      const n = COIN_CLUSTER_MIN + Math.floor(rnd() * (COIN_CLUSTER_MAX - COIN_CLUSTER_MIN + 1));
+      if (hash3i(key0, ids.j, s, seed ^ SALT_SUN) * F32 >= SUN_SLOT_P) continue;
+      const rnd = rng(hash3i(key0, ids.j, s, seed ^ SALT_SUN ^ 0x1c2b3a4d));
+      const n = SUN_CLUSTER_MIN + Math.floor(rnd() * (SUN_CLUSTER_MAX - SUN_CLUSTER_MIN + 1));
       // Jitter the cluster's start within the slot, leaving room for its own spread so the
       // whole cluster stays inside the slot it was drawn from rather than spilling far into
       // the next one.
-      const s0 = (s + 0.1 + rnd() * 0.25) * COIN_SLOT;
+      const s0 = (s + 0.1 + rnd() * 0.25) * SUN_SLOT;
 
       for (let ci = 0; ci < n; ci++) {
-        const sArc = s0 + ci * COIN_SPACING;
+        const sArc = s0 + ci * SUN_SPACING;
         if (sArc >= total) break;
         atArc(e, cum, sArc, at);
-        if (at.x < x0 - COIN_MAX_OFFSET || at.x > x1 + COIN_MAX_OFFSET) continue;
+        if (at.x < x0 - SUN_MAX_OFFSET || at.x > x1 + SUN_MAX_OFFSET) continue;
 
         // A small lateral jitter off the centreline, never off the carriageway — half the
-        // road's own width times COIN_LATERAL_JITTER, the same right-hand normal convention
+        // road's own width times SUN_LATERAL_JITTER, the same right-hand normal convention
         // propsInBox and render/road.js both use: (rx, rz) = (tz, -tx).
-        const lat = (rnd() - 0.5) * 2 * half * COIN_LATERAL_JITTER;
+        const lat = (rnd() - 0.5) * 2 * half * SUN_LATERAL_JITTER;
         const x = at.x + at.tz * lat;
         const z = at.z - at.tx * lat;
         if (x < x0 || x >= x1 || z < z0 || z >= z1) continue;
 
         const roadY = e.y[at.k - 1] + (e.y[at.k] - e.y[at.k - 1]) * at.t;
-        out.push({ x, z, y: roadY + COIN_HOVER, id: `co:${e.key}:${s}:${ci}` });
+        out.push({ x, z, y: roadY + SUN_HOVER, id: `co:${e.key}:${s}:${ci}` });
       }
     }
   }

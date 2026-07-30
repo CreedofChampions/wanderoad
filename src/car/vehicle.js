@@ -1027,8 +1027,24 @@ export class Vehicle {
      * that never bites — correct, because half a car on the tarmac is still half a car on
      * the tarmac. It is the min, not the average, that says you are off-road. */
     let offCap = lerp(12.2, 200, clamp01(onRoad * 1.4)); // 44 km/h off the carriageway
+    /* ── THE BOG ONLY BITES WHERE THE SAND IS ─────────────────────────────────
+     * Operator, playing the beta: "dunes off roading shuts off car when on-road".
+     *
+     * Exactly right, and it is this: the bog is a DEBT that builds with distance through dune sand
+     * and drains over about 1.6 s once you are back on a made surface (see SAND). Draining is the
+     * correct model — but the debt's PHYSICS were applied regardless of what was under the tyres at
+     * the time, so for those one and a half seconds a car back on tarmac was still carrying
+     * crrBogged 0.25 and vDragBogged 350 N per m/s. At 10 m/s that is 3500 N of drag on a road
+     * surface, which does not feel like sand on your tyres, it feels like the engine cutting out.
+     *
+     * So the severity is scaled by how far OFF the road you actually are. `onRoad` is the four-wheel
+     * average and it is the right number here rather than the worst wheel: two wheels on the tarmac
+     * really is half as bogged. On the road it is zero and the bog is invisible, which is what a
+     * road is for; out in the sand it is unchanged. The debt still drains at the same rate, so
+     * digging yourself out still works exactly as it did. */
+    const bogHere = this.sandBog * (1 - clamp01(onRoad));
     // Dunes: a bogged car does not merely have a lower ceiling, it barely moves. See SAND.
-    if (this.sandBog > 0) offCap = lerp(offCap, SAND.capBogged, this.sandBog);
+    if (bogHere > 0) offCap = lerp(offCap, SAND.capBogged, bogHere);
     if (contact && vLong > offCap && driveForce > 0) driveForce = 0;
 
     const fxTotal = (driveForce + brakeForce) * contact;
@@ -1071,7 +1087,7 @@ export class Vehicle {
     // ENTRY speed within a few metres, it can only stop the car from creeping once it is
     // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
     // drive at speed" part.
-    if (this.sandBog > 0) crr = lerp(crr, SAND.crrBogged, this.sandBog);
+    if (bogHere > 0) crr = lerp(crr, SAND.crrBogged, bogHere); // bogHere, not sandBog — see the note by offCap
     let vDrag = lerp(18.7, 1.4, clamp01(onRoad));
     /* The speed-proportional half of off-road resistance is what a car arriving off the
      * tarmac at speed actually decelerates against — the constant term above is too small at
@@ -1083,7 +1099,7 @@ export class Vehicle {
      * GROW with speed, so a fast entry gets punished hard while a genuine crawl under gentle
      * throttle still settles at a real, non-zero speed (never a hard wall) once drive force
      * and drag reach equilibrium. */
-    if (this.sandBog > 0) vDrag = lerp(vDrag, SAND.vDragBogged, this.sandBog);
+    if (bogHere > 0) vDrag = lerp(vDrag, SAND.vDragBogged, bogHere);
     const rr = crr * this.mass * AIR.gravity * Math.sign(vLong) + vDrag * vLong;
     // Closed throttle drives the engine through the transmission; the retarding force
     // scales with gear and rpm exactly as the drive force does.

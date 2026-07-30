@@ -27,6 +27,7 @@ import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
 import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
+import { nearestStation as nearestStationWorld } from './world/props.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
@@ -38,7 +39,7 @@ import { Autopilot } from './car/autopilot.js';
 import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak, STATION_FORGIVE_R } from './game/streak.js';
-import { Wallet, BOAT_UNLOCK_COINS, CAN_PRICE } from './game/wallet.js';
+import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
 import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat } from './game/garage.js';
@@ -346,7 +347,7 @@ async function boot() {
    * re-deriving the road network — the pure lookups in world/props.js cost tens of
    * milliseconds. props.update() below is called with the car's own x/z every frame, so it
    * already knows when the car is near a can; drainCollectedFuel() just asks what it found. */
-  /* The money, built before anything that spends it. Coins are the whole economy now — a
+  /* The money, built before anything that spends it. Suns are the whole economy now — a
    * streak mints them, a dealership takes them for a car, a pump takes them for a bigger tank
    * — so the wallet has to exist before the fuel system and the garage, both of which read it.
    * See src/game/wallet.js's own header. */
@@ -355,7 +356,26 @@ async function boot() {
   /* The off-road dust cue. Owns one InstancedMesh and nothing else; see src/game/spray.js. */
   const spray = new Spray({ scene });
   const fuel = new Fuel({
-    findStation: (x, z) => props.nearestStation(x, z),
+    /* WHERE IS THE NEAREST STATION, and it has to be right rather than merely available.
+     *
+     * This used to be `props.nearestStation` alone, which reports out of the tiles the renderer has
+     * BAKED — and that list can hold a station from a kilometre behind you while saying nothing about
+     * the forecourt you are turning onto. Everything downstream inherits that: the distance on the
+     * fuel gauge, the low-fuel toast, and — the operator's own bug, reported twice — the streak
+     * forgiveness, which is a radius around this answer. "Turning into gas station still kills
+     * streak" was never the forgiveness rule failing; it was the rule being handed the wrong station.
+     *
+     * So the WORLD is asked as well. `nearestStationWorld` is pure and cannot be stale, and over a
+     * small radius it is cheap (a road query over an 800 m box measured at about 1 ms). It runs on a
+     * timer, and the nearer of the two answers wins — the renderer's list is still useful because it
+     * includes stations already proven to sit on buildable ground. */
+    findStation: (x, z) => {
+      const baked = props.nearestStation(x, z);
+      const truth = stationScan(x, z);
+      if (!baked) return truth;
+      if (!truth) return baked;
+      return truth.dist < baked.dist ? truth : baked;
+    },
     /* Picking up a can, with its sound. The audio hangs off THIS callback rather than off a
      * flag polled somewhere else, because this is the one function in the game that can say
      * "a can was collected on this exact frame" — game/fuel.js calls it once a tick and a
@@ -381,6 +401,26 @@ async function boot() {
      * game/fuel.js's capacityLevel. */
     wallet,
   });
+  /* The world's own answer to "where is the nearest station", on a timer. Kept small and cached
+   * because it is asked every frame by findStation above: a 900 m radius is far more than the 140 m
+   * the forgiveness needs and the 26 m refuelling needs, and re-running it more than about twice a
+   * second would be paying for an answer that cannot have changed. */
+  let stationScanAt = -1e9;
+  let stationScanNear = null;
+  let stationScanX = 1e9;
+  let stationScanZ = 1e9;
+  const STATION_SCAN_EVERY = 0.4; // seconds
+  let stationClock = 0;
+  const stationScan = (x, z) => {
+    const moved = Math.hypot(x - stationScanX, z - stationScanZ) > 60;
+    if (!moved && stationClock - stationScanAt < STATION_SCAN_EVERY) return stationScanNear;
+    stationScanAt = stationClock;
+    stationScanX = x;
+    stationScanZ = z;
+    stationScanNear = nearestStationWorld(x, z, SEED, 900);
+    return stationScanNear;
+  };
+
   /* "Am I on a forecourt?" — the one question streak.js asks about petrol stations, answered
    * from the scan the fuel system already runs (see Fuel's `nearest`) rather than by probing
    * the world a second time every frame. Operator: "massive forgiveness area around gas
@@ -399,7 +439,7 @@ async function boot() {
    * its own thing. */
   const atPumpShop = () => !!fuel.nearest && fuel.nearest.deal !== true && fuel.nearest.dist <= DEAL_RADIUS;
 
-  /* AT A HARBOUR. The boat is bought here rather than granted at 50 coins — operator: "buying a boat
+  /* AT A HARBOUR. The boat is bought here rather than granted at 50 suns — operator: "buying a boat
    * ... isn't automatic, but something you get at the harbor".
    *
    * Asked of the RENDER layer, not of the pure world function. The first version called
@@ -428,9 +468,9 @@ async function boot() {
   const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
   const fuelGauge = new FuelGauge(hud.root);
 
-  /* Coins along the road, gems on open water — src/render/loot.js. `wallet`
+  /* Suns along the road, gems on open water — src/render/loot.js. `wallet`
    * (src/game/wallet.js) tracks what has been collected and gates the boat unlock at
-   * BOAT_UNLOCK_COINS; `lootCounter` (src/ui/lootCounter.js) is fuelGauge's own pattern,
+   * BOAT_UNLOCK_SUNS; `lootCounter` (src/ui/lootCounter.js) is fuelGauge's own pattern,
    * docked in the one HUD corner not already claimed — see that file's own comment. */
   const loot = new Loot({ seed: SEED, scene });
   const lootCounter = new LootCounter(hud.root);
@@ -800,7 +840,7 @@ async function boot() {
     if (input.tapped('horn')) audio.horn();
     if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
     /* F: pour a spare can in. A can is a tank you carry — bought at a pump, used anywhere, which is
-     * the one thing coins could not buy before and exactly what you want when the needle is on the
+     * the one thing suns could not buy before and exactly what you want when the needle is on the
      * pin and the nearest station is 3 km back. */
     /* P: take off, or land. An airfield is where a plane starts from — that is what the 380 m strip
      * and the windsock are for — but the check is deliberately soft: the plane only needs somewhere
@@ -898,7 +938,7 @@ async function boot() {
      * game/streak.js's update() for why a chauffeured kilometre must not count AND must not
      * cost you the eighty you already have. */
     streak.update(dt, car, surf, { paused: auto.on, forgive: nearPump() });
-    /* THE STREAK IS THE INCOME. Operator: "Streaks = coins." One coin per 250 m of unbroken
+    /* THE STREAK IS THE INCOME. Operator: "Streaks = suns." One sun per 250 m of unbroken
      * run — mintStreak() is safe to call every frame and remembers what it has already paid
      * for, and it follows the distance back DOWN when a streak breaks, so a lost run is never
      * charged for and the next one starts paying from its own first metre. Verse pickups still
@@ -906,8 +946,8 @@ async function boot() {
      * driving. */
     const minted = wallet.mintStreak(streak.state.distance);
     if (minted > 0) audio.pickup();
-    // The balance, top right, with a bump and a floating "+1" on a gain — see Hud.coins.
-    hud.coins(dt, wallet, minted);
+    // The balance, top right, with a bump and a floating "+1" on a gain — see Hud.suns.
+    hud.suns(dt, wallet, minted);
 
     /* Arriving at a dealership says so, once. A shop you can walk into and not notice is not a
      * shop — and ESC is the only way in, which is not something a player would guess. Latched
@@ -944,6 +984,7 @@ async function boot() {
       }
     }
 
+    stationClock += dt;
     const harbourNow = atHarbour();
     if (harbourNow !== harbourWas) {
       harbourWas = harbourNow;
@@ -951,7 +992,7 @@ async function boot() {
         hud.say(
           wallet.boat
             ? 'the harbour — B to take the boat out'
-            : `harbour — ESC to buy the boat for ${BOAT_UNLOCK_COINS} coins (you have ${wallet.coins})`,
+            : `harbour — ESC to buy the boat for ${BOAT_UNLOCK_SUNS} suns (you have ${wallet.suns})`,
           3.8
         );
       }
@@ -960,7 +1001,7 @@ async function boot() {
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {
       dealerWas = dealerNow;
-      if (dealerNow) hud.say(`dealership — ESC to spend your ${wallet.coins} coins`, 3.6);
+      if (dealerNow) hud.say(`dealership — ESC to spend your ${wallet.suns} suns`, 3.6);
     }
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
@@ -1036,15 +1077,15 @@ async function boot() {
     flora.update(dt, camera.position);
     props.update(dt, car.x, car.z);
     ships.update(dt, car.x, car.z);
-    /* Loot: coins along the road, gems on open water — src/render/loot.js. `boatMode.active`
+    /* Loot: suns along the road, gems on open water — src/render/loot.js. `boatMode.active`
      * replaces workstream B's own `const boatActive = false` placeholder now that
      * src/game/boat.js exists — see docs/BOAT-PLAN.md's deviations log (workstream B entry)
      * for why that was the honest interim behaviour rather than a fake unlock. */
     loot.update(dt, car, boatMode.active);
-    const gainedCoins = loot.drainCoins();
-    if (gainedCoins) {
-      wallet.addCoins(gainedCoins);
-      audio.coin();
+    const gainedSuns = loot.drainSuns();
+    if (gainedSuns) {
+      wallet.addSuns(gainedSuns);
+      audio.sun();
     }
     const gainedGems = loot.drainGems();
     if (gainedGems) {
@@ -1126,7 +1167,7 @@ async function boot() {
     /* The seed this world was grown from. Exposed because several diagnostics have to ask the
      * PURE world functions about the same plane the page is showing — the renderer only knows
      * the tiles it has streamed, so its answer to "is there a dealership near me" is about
-     * loading, not about the world. See tools/diag-coins.mjs. */
+     * loading, not about the world. See tools/diag-suns.mjs. */
     seed: SEED,
     renderer,
     scene,
@@ -1146,7 +1187,7 @@ async function boot() {
     audio,
     /* The money, for the same reason `audio` is here: "did that streak pay" can only be
      * answered by reading the wallet that the game is actually spending from. See
-     * tools/diag-coins.mjs. */
+     * tools/diag-suns.mjs. */
     wallet,
     solids,
     // `flora` is here so a test can reconcile the colliders against the trees the renderer

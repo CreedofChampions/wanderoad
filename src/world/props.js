@@ -624,7 +624,7 @@ export const STATION_MAX_GRADE = 0.11;
  *
  * The lever costs nothing, because the search was already there and was spending itself on the
  * wrong question. STATION_AT offers 11 candidate sites along the edge and each has two sides;
- * the old code took the flattest ROAD grade of the eleven and then picked a side by a coin
+ * the old code took the flattest ROAD grade of the eleven and then picked a side by a sun
  * flip. Ranking the same 22 (site, side) pairs by the STEP between the road and the ground the
  * forecourt would stand on instead — grade and water still hard requirements, not preferences —
  * moves the achievable step from "≤1 m at 18% of edges" to "≤1 m at 64%, ≤2 m at 76%"
@@ -726,7 +726,7 @@ function stationForEdge(e, seed, stats = null) {
    * within the road's own 1.6 m freeboard of open water, the worst clearing it by only 0.76 m.
    * The operator's screenshot is one of them — a forecourt at the very edge of the water.
    *
-   * The side used to be a free coin flip; it is now part of the search (see STATION_MAX_STEP
+   * The side used to be a free sun flip; it is now part of the search (see STATION_MAX_STEP
    * above), and the flip survives only as the tie-break order, so a station on genuinely
    * symmetric ground still picks a side unpredictably instead of always leaning one way. */
   const off = e.width * 0.5 + STATION_OFFSET;
@@ -778,7 +778,7 @@ function stationForEdge(e, seed, stats = null) {
       continue;
     }
     /* Both sides, both hard tests, and the STEP is what ranks the survivors. Ordering the two
-     * sides by the coin flip is what makes the tie-break unbiased; `<` (not `<=`) then keeps
+     * sides by the sun flip is what makes the tie-break unbiased; `<` (not `<=`) then keeps
      * the first-tried side when the two are exactly equal. */
     let wet = 0;
     for (const s of [first, -first]) {
@@ -814,7 +814,7 @@ function stationForEdge(e, seed, stats = null) {
   return {
     key: `st:${e.key}`,
     /* ── DEALERSHIP OR PETROL STATION ─────────────────────────────────────────
-     * Operator: "add dealerships where you can buy cars with coins".
+     * Operator: "add dealerships where you can buy cars with suns".
      *
      * A dealership needs exactly what a station needs — a graded pad beside the road, an access
      * spur onto it, flat ground, a hitbox and something visible from a distance — and all of
@@ -1347,9 +1347,9 @@ function _nearestRoadPoint(x, z, seed, R = 800) {
  * Operator: "making buying a boat and unlock that. It isn't automatic, but something you get at the
  * harbor. So you're going to have to build a harbor."
  *
- * The boat used to appear by itself the moment you held 50 coins, which is the one unlock in the
+ * The boat used to appear by itself the moment you held 50 suns, which is the one unlock in the
  * game that happened TO you rather than because you went somewhere. Now it is a place: find a
- * harbour, spend the coins, get the boat.
+ * harbour, spend the suns, get the boat.
  *
  * A NOTE ON THE ASSETS. The operator pointed at the Synty POLYGON packs on the household share for
  * this. They are a proprietary EULA and the `wanderoad` repo is public, so shipping their meshes
@@ -1662,7 +1662,7 @@ export const CAN_RADIUS = 14;
  * hunt entirely, which costs the fuel mechanic its point. */
 /* Halved again -- "Getting fuel still too easy (too many cans)". 0.22 -> 0.11 -> 0.055.
  * Stations remain the intended refuel; cans exist so running dry is a bad decision rather
- * than a coin flip about where the road went. */
+ * than a sun flip about where the road went. */
 export const CAN_FRACTION = 0.055;
 /** Footprint radius for clearance and freeboard purposes — small; it is a jerry can. */
 export const CAN_FOOT = 0.5;

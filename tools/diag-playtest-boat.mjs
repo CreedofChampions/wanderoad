@@ -244,7 +244,7 @@ const INSTRUMENT = `(() => {
       P.samples.push({ t: +now.toFixed(2), x: +c.x.toFixed(1), y: +c.y.toFixed(2), z: +c.z.toFixed(1),
         kph: +c.kph.toFixed(1), yaw: +c.yaw.toFixed(3),
         boat: !!(W.boatMode && W.boatMode.active), roll: W.boatMode ? +W.boatMode.roll.toFixed(3) : 0,
-        coins: W.wallet.coins, gems: W.wallet.gems, fps: +W.fps().toFixed(1),
+        suns: W.wallet.suns, gems: W.wallet.gems, fps: +W.fps().toFixed(1),
         depth: (() => { const d = depthAt(c.x, c.z); return d === null ? null : +d.toFixed(2); })(),
         vis: !!(W.boatMesh && W.boatMesh.visible), carVis: !!(W.model && W.model.group.visible) });
       if (P.samples.length > 3000) P.samples.splice(0, 1000);
@@ -277,7 +277,7 @@ const keys = (S, list) => S.evalJs(`window._keys(${JSON.stringify(list)})`);
 const state = (S) => S.evalJs(`(() => { const W = window.WANDEROAD, c = W.car;
   return { x: +c.x.toFixed(1), y: +c.y.toFixed(2), z: +c.z.toFixed(1), kph: +c.kph.toFixed(1),
     boat: W.boatMode.active, boatMeshVisible: W.boatMesh.visible, carVisible: W.model.group.visible,
-    boatUnlocked: W.wallet.boatUnlocked, coins: W.wallet.coins, gems: W.wallet.gems,
+    boatUnlocked: W.wallet.boatUnlocked, suns: W.wallet.suns, gems: W.wallet.gems,
     lootStats: { ...W.loot.stats }, fps: +W.fps().toFixed(1),
     finite: [c.x, c.y, c.z, c.kph, c.yaw].every(Number.isFinite) }; })()`);
 
@@ -441,15 +441,15 @@ async function testSmoke(S) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * 1. FRESH PROFILE ON THE ROAD — coins visible, collected, counter climbing
+ * 1. FRESH PROFILE ON THE ROAD — suns visible, collected, counter climbing
  * ══════════════════════════════════════════════════════════════════════════ */
 async function testRoad(S, FIX) {
   console.log('\n── 1. fresh profile, 90 s on the road ─────────────────────────────');
   await boot(S, `${BASE}?intro=off`, { fresh: true });
   const start = await state(S);
-  check('fresh profile really is fresh (0 coins, boat locked)', start.coins === 0 && start.gems === 0 && start.boatUnlocked === false, JSON.stringify({ coins: start.coins, gems: start.gems, unlocked: start.boatUnlocked }));
+  check('fresh profile really is fresh (0 suns, boat locked)', start.suns === 0 && start.gems === 0 && start.boatUnlocked === false, JSON.stringify({ suns: start.suns, gems: start.gems, unlocked: start.boatUnlocked }));
 
-  /* Start on a road with no water within 250 m — a coins-per-kilometre number measured on a
+  /* Start on a road with no water within 250 m — a suns-per-kilometre number measured on a
    * drive that ended in a lake is measuring the lake. */
   if (FIX.dryRoad) {
     await placeCar(S, FIX.dryRoad.x, FIX.dryRoad.z, FIX.dryRoad.heading);
@@ -458,7 +458,7 @@ async function testRoad(S, FIX) {
 
   await mark(S, 'road-drive');
   await S.evalJs(AUTOPILOT(95));
-  let firstCoinAt = null;
+  let firstSunAt = null;
   let firstVisibleAt = null;
   let widget = null;
   let stalled = 0;
@@ -466,17 +466,17 @@ async function testRoad(S, FIX) {
   for (let i = 0; i < 19; i++) {
     await sleep(5000);
     const st = await state(S);
-    if (firstCoinAt === null && st.coins > 0) firstCoinAt = (i + 1) * 5;
-    /* "coins become visible" measured the way a player sees them: project a live coin mesh
+    if (firstSunAt === null && st.suns > 0) firstSunAt = (i + 1) * 5;
+    /* "suns become visible" measured the way a player sees them: project a live sun mesh
      * through the real camera and check it lands inside the viewport, in front of the lens. */
     const seen = await S.evalJs(`(() => { const W = window.WANDEROAD, T = window.THREE;
       const cam = W.camera; let onScreen = 0, nearest = 1e9;
-      for (const [, c] of W.loot.coins) {
+      for (const [, c] of W.loot.suns) {
         const v = new T.Vector3(c.x, c.y, c.z).project(cam);
         const d = Math.hypot(c.x - W.car.x, c.z - W.car.z);
         if (v.z < 1 && Math.abs(v.x) < 1 && Math.abs(v.y) < 1) { onScreen++; nearest = Math.min(nearest, d); }
       }
-      return { built: W.loot.stats.coins, onScreen, nearest: isFinite(nearest) ? +nearest.toFixed(1) : null }; })()`);
+      return { built: W.loot.stats.suns, onScreen, nearest: isFinite(nearest) ? +nearest.toFixed(1) : null }; })()`);
     if (firstVisibleAt === null && seen.onScreen > 0) firstVisibleAt = (i + 1) * 5;
     /* A player does not sit at 5 km/h in a hedge for a minute and a half; they press R. The
      * autopilot (tools/shoot.mjs's, borrowed whole) has no reset of its own, so this loop is
@@ -491,7 +491,7 @@ async function testRoad(S, FIX) {
     }
     if (i === 8) widget = await readWidget(S); // measured mid-drive, see readWidget's own note
     if (i === 2 || i === 8 || i === 17) await S.shot(`road-${(i + 1) * 5}s`);
-    if (i % 3 === 0 || seen.onScreen) note(`t+${(i + 1) * 5}s  coins ${st.coins}  built ${seen.built}  on-screen ${seen.onScreen}${seen.nearest !== null ? ` (nearest ${seen.nearest} m)` : ''}  kph ${st.kph}  fps ${st.fps}`);
+    if (i % 3 === 0 || seen.onScreen) note(`t+${(i + 1) * 5}s  suns ${st.suns}  built ${seen.built}  on-screen ${seen.onScreen}${seen.nearest !== null ? ` (nearest ${seen.nearest} m)` : ''}  kph ${st.kph}  fps ${st.fps}`);
   }
   const p = await probe(S);
   const end = await state(S);
@@ -512,20 +512,20 @@ async function testRoad(S, FIX) {
       return Array.from(g.getImageData(0,0,64,64).data).join(','); };
     const w = (ch) => { g.font = font; return +g.measureText(ch).width.toFixed(2); };
     const tofu = draw('\\u{10FFFD}');   // guaranteed no glyph on any font
-    return { coin: { w: w('🪙'), tofu: draw('🪙') === tofu },
+    return { sun: { w: w('🪙'), tofu: draw('🪙') === tofu },
              gem:  { w: w('💎'), tofu: draw('💎') === tofu },
              boat: { w: w('⛵'), tofu: draw('⛵') === tofu }, font }; })()`);
   note(`glyphs: ${JSON.stringify(glyph)}`);
-  check('the 🪙 coin glyph actually renders (not a tofu box)', glyph.coin && glyph.coin.tofu === false, `coin tofu=${glyph.coin?.tofu}, gem tofu=${glyph.gem?.tofu}, boat tofu=${glyph.boat?.tofu}`);
+  check('the 🪙 sun glyph actually renders (not a tofu box)', glyph.sun && glyph.sun.tofu === false, `sun tofu=${glyph.sun?.tofu}, gem tofu=${glyph.gem?.tofu}, boat tofu=${glyph.boat?.tofu}`);
 
-  check('coins exist in the world around the player', end.lootStats.coins > 0, `${end.lootStats.coins} coin meshes live in ${end.lootStats.coinTiles} tiles`);
-  check('a coin was actually ON SCREEN (projected through the real camera)', firstVisibleAt !== null, firstVisibleAt !== null ? `first seen by t+${firstVisibleAt}s` : 'never framed one');
-  check('coins collected within 60 s of driving (BOAT-PLAN acceptance #1)', firstCoinAt !== null && firstCoinAt <= 60, firstCoinAt === null ? 'none in 95 s' : `first at t+${firstCoinAt}s, ${end.coins} total`);
-  check('counter widget shows the same number the wallet holds', String(await S.evalJs(`document.getElementById('lootCounter').textContent`)).includes(String(end.coins)), `wallet ${end.coins} / widget "${String(await S.evalJs(`document.getElementById('lootCounter').textContent.replace(/\\s+/g,' ')`)).trim()}"`);
+  check('suns exist in the world around the player', end.lootStats.suns > 0, `${end.lootStats.suns} sun meshes live in ${end.lootStats.sunTiles} tiles`);
+  check('a sun was actually ON SCREEN (projected through the real camera)', firstVisibleAt !== null, firstVisibleAt !== null ? `first seen by t+${firstVisibleAt}s` : 'never framed one');
+  check('suns collected within 60 s of driving (BOAT-PLAN acceptance #1)', firstSunAt !== null && firstSunAt <= 60, firstSunAt === null ? 'none in 95 s' : `first at t+${firstSunAt}s, ${end.suns} total`);
+  check('counter widget shows the same number the wallet holds', String(await S.evalJs(`document.getElementById('lootCounter').textContent`)).includes(String(end.suns)), `wallet ${end.suns} / widget "${String(await S.evalJs(`document.getElementById('lootCounter').textContent.replace(/\\s+/g,' ')`)).trim()}"`);
   check('no NaN anywhere in 95 s of driving', p.nan === 0, `${p.nan} bad frames of ${p.frames}`);
 
-  /* Distance driven, from the samples themselves — coins per KILOMETRE is the number
-   * tools/diag-loot.mjs asserts against (15-45/km on the shipped seed), and coins per minute
+  /* Distance driven, from the samples themselves — suns per KILOMETRE is the number
+   * tools/diag-loot.mjs asserts against (15-45/km on the shipped seed), and suns per minute
    * of a drive that spent half its time stopped is not comparable to anything. */
   let km = 0;
   for (let i = 1; i < p.samples.length; i++) {
@@ -533,36 +533,36 @@ async function testRoad(S, FIX) {
     if (step < 8) km += step; // 0.2 s apart: 8 m is 144 km/h, so anything above it is an R
   }
   km /= 1000;
-  const perKm = end.coins / Math.max(km, 0.001);
-  const coinPerMin = (end.coins / 95) * 60;
-  note(`drove ${km.toFixed(2)} km in 95 s → ${end.coins} coins = ${perKm.toFixed(1)} coins/km (${coinPerMin.toFixed(0)}/min)`);
-  note(`at that rate the 500-coin boat is ${(500 / Math.max(perKm, 0.01)).toFixed(0)} km / ${(500 / Math.max(coinPerMin, 0.01)).toFixed(0)} min away`);
-  /* COLLECTED vs COLLECTABLE, decided rather than guessed. "8.8 coins/km against a placement
+  const perKm = end.suns / Math.max(km, 0.001);
+  const sunPerMin = (end.suns / 95) * 60;
+  note(`drove ${km.toFixed(2)} km in 95 s → ${end.suns} suns = ${perKm.toFixed(1)} suns/km (${sunPerMin.toFixed(0)}/min)`);
+  note(`at that rate the 500-sun boat is ${(500 / Math.max(perKm, 0.01)).toFixed(0)} km / ${(500 / Math.max(sunPerMin, 0.01)).toFixed(0)} min away`);
+  /* COLLECTED vs COLLECTABLE, decided rather than guessed. "8.8 suns/km against a placement
    * that claims 26.4" has two completely different explanations — the route genuinely had few
-   * coins on it, or coins on the route were driven past and missed — and only one of them is a
+   * suns on it, or suns on the route were driven past and missed — and only one of them is a
    * bug. So the SAME pure placement function the renderer uses (src/world/loot.js's
-   * coinsInBox) is asked how many coins lie within the pickup radius of the path that was
+   * sunsInBox) is asked how many suns lie within the pickup radius of the path that was
    * actually driven. */
   const path = p.samples.map((s) => [s.x, s.z]);
   let onPath = 0;
   let placedInBox = 0;
   if (path.length > 2) {
-    const { coinsInBox, COIN_RADIUS: R } = await import('../src/world/loot.js').then((m) => ({ coinsInBox: m.coinsInBox, COIN_RADIUS: 7 }));
+    const { sunsInBox, SUN_RADIUS: R } = await import('../src/world/loot.js').then((m) => ({ sunsInBox: m.sunsInBox, SUN_RADIUS: 7 }));
     const xs = path.map((q) => q[0]);
     const zs = path.map((q) => q[1]);
-    const coins = coinsInBox(Math.min(...xs) - 60, Math.min(...zs) - 60, Math.max(...xs) + 60, Math.max(...zs) + 60, FIX.seed);
-    placedInBox = coins.length;
-    for (const c of coins) {
+    const suns = sunsInBox(Math.min(...xs) - 60, Math.min(...zs) - 60, Math.max(...xs) + 60, Math.max(...zs) + 60, FIX.seed);
+    placedInBox = suns.length;
+    for (const c of suns) {
       for (let i = 0; i < path.length; i++) {
         if (Math.hypot(c.x - path[i][0], c.z - path[i][1]) <= R) { onPath++; break; }
       }
     }
   }
-  note(`along the path actually driven: ${placedInBox} coins in the bounding box, ${onPath} of them within the 7 m pickup radius of the route; ${end.coins} collected`);
-  check('every coin the car drove past was actually picked up', onPath === 0 || end.coins >= onPath - 1, `${end.coins} collected of ${onPath} reachable`);
-  check('coins actually reach the player at the rate the placement claims (diag-loot: 26.4/km)', perKm > 12, `${perKm.toFixed(1)} coins/km collected vs 26.4/km placed`);
+  note(`along the path actually driven: ${placedInBox} suns in the bounding box, ${onPath} of them within the 7 m pickup radius of the route; ${end.suns} collected`);
+  check('every sun the car drove past was actually picked up', onPath === 0 || end.suns >= onPath - 1, `${end.suns} collected of ${onPath} reachable`);
+  check('suns actually reach the player at the rate the placement claims (diag-loot: 26.4/km)', perKm > 12, `${perKm.toFixed(1)} suns/km collected vs 26.4/km placed`);
   note(`toasts: ${p.toasts.map((t) => `${t.t}s "${t.text}"`).join(' | ') || '(none)'}`);
-  return { coinPerMin, perKm, km, coins: end.coins, glyph };
+  return { sunPerMin, perKm, km, suns: end.suns, glyph };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -926,21 +926,21 @@ async function testFoam(S, FIX) {
 
 /* ══════════════════════════════════════════════════════════════════════════
  * THE UNLOCK MOMENT — the one beat of this feature nobody can reach by playing
- * for five minutes. The wallet is nudged to 499 and then the FIVE HUNDREDTH COIN IS DRIVEN
- * OVER: everything after that is the shipped path (Wallet.addCoins crosses BOAT_UNLOCK_COINS,
+ * for five minutes. The wallet is nudged to 499 and then the FIVE HUNDREDTH SUN IS DRIVEN
+ * OVER: everything after that is the shipped path (Wallet.addSuns crosses BOAT_UNLOCK_SUNS,
  * queues its own event, main.js drains it, chime + toast + the counter's own unlocked state).
  * Nothing is called directly and no flag is set — the only thing touched is the running total
  * a player would have got to by driving twenty kilometres.
  * ══════════════════════════════════════════════════════════════════════════ */
 async function testUnlock(S, FIX) {
-  console.log('\n── the five-hundredth coin ────────────────────────────────────────');
+  console.log('\n── the five-hundredth sun ────────────────────────────────────────');
   await boot(S, `${BASE}?intro=off`, { fresh: true });
   if (FIX.dryRoad) await placeCar(S, FIX.dryRoad.x, FIX.dryRoad.z, FIX.dryRoad.heading);
-  await S.evalJs(`(() => { window.WANDEROAD.wallet.coins = 499; return window.WANDEROAD.wallet.coins; })()`);
+  await S.evalJs(`(() => { window.WANDEROAD.wallet.suns = 499; return window.WANDEROAD.wallet.suns; })()`);
   const before = await state(S);
   const w0 = await readWidget(S);
   await S.shot('unlock-0-at-499');
-  check('499 coins is still locked', before.boatUnlocked === false, `unlocked=${before.boatUnlocked}, widget "${(w0.text || '').replace(/\s+/g, ' ')}"`);
+  check('499 suns is still locked', before.boatUnlocked === false, `unlocked=${before.boatUnlocked}, widget "${(w0.text || '').replace(/\s+/g, ' ')}"`);
 
   await mark(S, 'unlock');
   await S.evalJs(AUTOPILOT(70));
@@ -948,17 +948,17 @@ async function testUnlock(S, FIX) {
   for (let i = 0; i < 14 && at === null; i++) {
     await sleep(5000);
     const st = await state(S);
-    if (st.coins >= 500) at = (i + 1) * 5;
+    if (st.suns >= 500) at = (i + 1) * 5;
   }
   await sleep(1200);
   await S.shot('unlock-1-the-moment');
   const p = await probe(S);
   const after = await state(S);
   const w1 = await readWidget(S);
-  note(`coins ${before.coins} → ${after.coins} after ${at === null ? '70 s (never)' : `t+${at}s`}`);
+  note(`suns ${before.suns} → ${after.suns} after ${at === null ? '70 s (never)' : `t+${at}s`}`);
   note(`toasts: ${p.toasts.map((t) => `${t.t}s "${t.text}"`).join(' | ') || '(none)'}`);
   note(`counter now reads "${(w1.text || '').replace(/\s+/g, ' ')}"`);
-  check('the 500th coin unlocks the boat', after.boatUnlocked === true, `coins ${after.coins}, unlocked ${after.boatUnlocked}`);
+  check('the 500th sun unlocks the boat', after.boatUnlocked === true, `suns ${after.suns}, unlocked ${after.boatUnlocked}`);
   check('the unlock says something', p.toasts.some((t) => /boat/i.test(t.text)), p.toasts.map((t) => t.text).join(' | ') || '(none)');
   check('the counter switches to its unlocked state', /boat unlocked/i.test(w1.text || ''), `"${(w1.text || '').replace(/\s+/g, ' ')}"`);
   const persisted = await S.evalJs(`localStorage.getItem('wanderoad.loot.v1')`);

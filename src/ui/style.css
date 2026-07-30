@@ -184,7 +184,7 @@ canvas {
 
 #players {
   position: absolute;
-  /* Below #coinTicker, which now owns the top-right corner. Measured against a real screenshot:
+  /* Below #sunTicker, which now owns the top-right corner. Measured against a real screenshot:
      at 1400x800 the ticker's own box is about 2.6rem tall including its shadow, and the player
      name was printing straight through the middle of it. */
   top: clamp(3.4rem, 8vw, 4.6rem);
@@ -1091,15 +1091,16 @@ canvas {
   transition: opacity 90ms linear;
 }
 
-/* ── THE COINS, TOP RIGHT, PROMINENT ─────────────────────────────────────────
+/* ── THE SUNS, TOP RIGHT, PROMINENT ─────────────────────────────────────────
  * Operator: "we need to re-add the coins ticker to the top right, making it prominent, showing how
- * many coins you have in total". Everything is bought with coins now, so the balance is the single
+ * many coins you have in total" — the currency was renamed to SUNS shortly afterwards (see the
+ * .disc rule below). Everything is bought with them, so the balance is the single
  * most actionable number on the screen and it was a 12 px figure tucked under the player list.
  *
- * `#coinTicker` is its own block above #players rather than a change to #lootCounter, because that
+ * `#sunTicker` is its own block above #players rather than a change to #lootCounter, because that
  * widget's job is the boat progress bar and this one's job is the balance. It bumps and flashes on
  * a gain so earning is felt, which is the other half of "clear what you get". */
-#coinTicker {
+#sunTicker {
   position: absolute;
   top: clamp(0.9rem, 3vw, 1.6rem);
   right: clamp(1rem, 4vw, 3rem);
@@ -1113,14 +1114,96 @@ canvas {
   pointer-events: none;
   z-index: 3;
 }
-#coinTicker .disc {
-  width: 0.86em;
-  height: 0.86em;
+/* ── A SUN, AND IT SHINES ─────────────────────────────────────────────────────
+ * Operator, on the coin disc: "coin looks like the sun not coin -- i like that lets make it
+ * collecting suns -- fun", and then: "make them shine :P".
+ *
+ * A happy accident promoted to the feature. Three layers, all drawn in CSS so nothing is loaded:
+ *
+ *   .disc   the body — a warm radial gradient with a hot centre, so it reads as light rather than
+ *           as metal, plus a real box-shadow bloom that spills onto whatever is behind it.
+ *   ::before  the CORONA: a second, softer glow that breathes. Behind the body (z-index -1) so the
+ *           body's own edge stays crisp while the halo moves.
+ *   ::after   the RAYS: eight of them, from one repeating-conic-gradient masked to a ring, turning
+ *           slowly. One element, one paint, no sprites.
+ *
+ * The spin is deliberately slow — 14 s a turn. A sun that whirls is a loading spinner; a sun that
+ * drifts is warm. */
+#sunTicker .disc {
+  position: relative;
+  width: 1.05em;
+  height: 1.05em;
   border-radius: 50%;
-  background: radial-gradient(circle at 34% 30%, #f0c96a, #8a6b2a);
-  box-shadow: 0 1px 4px rgba(28, 34, 48, 0.5);
+  background: radial-gradient(circle at 42% 36%, #fff6d2 0%, #ffdc6a 34%, #f5a63a 72%, #d9822b 100%);
+  box-shadow:
+    0 0 0.5em rgba(255, 208, 96, 0.9),
+    0 0 1.4em rgba(255, 176, 60, 0.55),
+    0 1px 4px rgba(28, 34, 48, 0.45);
+  isolation: isolate;
 }
-#coinTicker .gain {
+#sunTicker .disc::before {
+  content: '';
+  position: absolute;
+  inset: -55%;
+  border-radius: 50%;
+  z-index: -1;
+  background: radial-gradient(circle, rgba(255, 206, 92, 0.55) 0%, rgba(255, 186, 70, 0.22) 45%, rgba(255, 186, 70, 0) 70%);
+  animation: sunBreathe 3.6s ease-in-out infinite;
+}
+#sunTicker .disc::after {
+  content: '';
+  position: absolute;
+  inset: -62%;
+  z-index: -1;
+  /* Eight rays: a conic gradient of alternating warm/transparent wedges, then masked to a ring so
+     the middle stays clear of the body. */
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(255, 214, 110, 0.85) 0deg 7deg,
+    rgba(255, 214, 110, 0) 7deg 45deg
+  );
+  -webkit-mask: radial-gradient(circle, transparent 0 42%, #000 47% 74%, transparent 78%);
+  mask: radial-gradient(circle, transparent 0 42%, #000 47% 74%, transparent 78%);
+  animation: sunSpin 14s linear infinite;
+}
+@keyframes sunSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes sunBreathe {
+  0%,
+  100% {
+    opacity: 0.65;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+/* Catching one flares the whole thing for a moment — the reward, felt. */
+#sunTicker.bump .disc {
+  animation: sunFlare 0.5s ease-out;
+}
+@keyframes sunFlare {
+  0% {
+    box-shadow:
+      0 0 0.5em rgba(255, 208, 96, 0.9),
+      0 0 1.4em rgba(255, 176, 60, 0.55);
+  }
+  40% {
+    box-shadow:
+      0 0 1.1em rgba(255, 240, 190, 1),
+      0 0 3em rgba(255, 200, 90, 0.85);
+  }
+  100% {
+    box-shadow:
+      0 0 0.5em rgba(255, 208, 96, 0.9),
+      0 0 1.4em rgba(255, 176, 60, 0.55);
+  }
+}
+#sunTicker .gain {
   font-size: 0.5em;
   font-weight: 600;
   opacity: 0;
@@ -1128,14 +1211,14 @@ canvas {
   transform: translateY(0.2em);
   transition: opacity 0.5s ease, transform 0.5s ease;
 }
-#coinTicker .gain.show {
+#sunTicker .gain.show {
   opacity: 1;
   transform: translateY(-0.3em);
 }
-#coinTicker.bump .n {
-  animation: coinBump 0.42s ease-out;
+#sunTicker.bump .n {
+  animation: sunBump 0.42s ease-out;
 }
-@keyframes coinBump {
+@keyframes sunBump {
   0% { transform: scale(1); }
   35% { transform: scale(1.22); }
   100% { transform: scale(1); }

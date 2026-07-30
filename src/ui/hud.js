@@ -59,7 +59,7 @@
 
 import { fmtScore, fmtDistance } from '../game/streak.js';
 import { FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
-import { STREAK_METRES_PER_COIN } from '../game/wallet.js';
+import { STREAK_METRES_PER_SUN } from '../game/wallet.js';
 import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
 
@@ -112,12 +112,12 @@ function el(tag, idOrClass, text) {
  * cadence past 40: 80, 150, 300. Exported so tools/diag-hud.mjs checks the real list rather
  * than a hand-copied one.
  */
-/* Coins shown across the bar at once. Four means each tick is a quarter of the width, which is
+/* Suns shown across the bar at once. Four means each tick is a quarter of the width, which is
  * big enough to read at a glance, and the band repeats — so a long run keeps filling and paying
- * instead of running out of bar. See the COIN TICKS note in the constructor for why the old
+ * instead of running out of bar. See the SUN TICKS note in the constructor for why the old
  * distance milestones (1, 3, 6, 10, 20, 40, 80, 150, 300 km on a log axis) had to go: cars are
- * bought with coins now, so a distance ladder promised something that no longer happens. */
-export const COIN_TICKS = 4;
+ * bought with suns now, so a distance ladder promised something that no longer happens. */
+export const SUN_TICKS = 4;
 
 /* ── the R hint ───────────────────────────────────────────────────────────────
  * Operator, verbatim: "give people the hint that they can click R to get back on road when
@@ -204,7 +204,7 @@ export class Hud {
     this.barMark = el('div', '.mark');
     this.barTrack.appendChild(this.barFill);
     this.barTrack.appendChild(this.barMark);
-    /* ── COIN TICKS, NOT DISTANCE MILESTONES ──────────────────────────────────
+    /* ── SUN TICKS, NOT DISTANCE MILESTONES ──────────────────────────────────
      * Operator, playing the beta: "It's still profoundly unclear, even as the maker of the game,
      * what you're unlocking and how. The bar at the bottom doesn't consistently fill up. There's
      * these things that look like you can unlock something at a certain level, but the bar either
@@ -212,24 +212,24 @@ export class Hud {
      * haven't unlocked it yet. It doesn't seem very congruent to the actual progress."
      *
      * It was not congruent, and the reason is a change made earlier the same day: cars are BOUGHT
-     * WITH COINS at a dealership now, and `unlockAt` no longer grants anything. The bar was still
+     * WITH SUNS at a dealership now, and `unlockAt` no longer grants anything. The bar was still
      * drawing a badge per car at the distance that used to unlock it, so it promised something
      * that does not happen — you drive past the badge and nothing arrives. Meanwhile the dots sat
      * on a log axis running to 300 km, so a normal run moved the fill through the first tenth of
      * the bar and then a break sent it back to nothing.
      *
-     * So the bar now shows the ONE thing that actually happens: a run pays a coin every
-     * STREAK_METRES_PER_COIN. The ticks are those coins, the fill is progress to the NEXT one, and
+     * So the bar now shows the ONE thing that actually happens: a run pays a sun every
+     * STREAK_METRES_PER_SUN. The ticks are those suns, the fill is progress to the NEXT one, and
      * it is linear because the mechanic is linear. It fills, pays, and starts again — every
      * single time, with nothing on it that is not real.
      *
      * The car badges are gone from here entirely. What a car costs belongs next to the money, and
      * it is in the garage panel and at the dealership, which is where you can act on it. */
     this.tickEls = [];
-    for (let k = 1; k <= COIN_TICKS; k++) {
+    for (let k = 1; k <= SUN_TICKS; k++) {
       const d = el('div', '.milestone');
-      d.dataset.coin = String(k);
-      d.style.left = `${((k / COIN_TICKS) * 100).toFixed(2)}%`;
+      d.dataset.sun = String(k);
+      d.style.left = `${((k / SUN_TICKS) * 100).toFixed(2)}%`;
       this.barTrack.appendChild(d);
       this.tickEls.push(d);
     }
@@ -237,9 +237,9 @@ export class Hud {
     this.bar.appendChild(this.barTrack);
     this.root.appendChild(this.bar);
 
-    /* The off-road edge, and the coin balance. Both are new HUD surfaces asked for by the operator
+    /* The off-road edge, and the sun balance. Both are new HUD surfaces asked for by the operator
      * while playing the beta: an immediate red edge ("red off road feedback happens right away")
-     * and a prominent balance ("re-add the coins ticker to the top right, making it prominent").
+     * and a prominent balance ("re-add the suns ticker to the top right, making it prominent").
      * Built here rather than in their own files because neither owns any behaviour — they are a
      * class toggle and a number — and a file each would be two more places to look. */
     this.offroadEdge = el('div', 'offroadEdge');
@@ -247,12 +247,12 @@ export class Hud {
     /** Raw off-road state as last written to the DOM — see the note in update(). */
     this._offNow = false;
 
-    this.coinTicker = el('div', 'coinTicker');
-    this.coinTicker.innerHTML = '<i class="disc"></i><span class="n">0</span><span class="gain"></span>';
-    this.coinN = this.coinTicker.querySelector('.n');
-    this.coinGain = this.coinTicker.querySelector('.gain');
-    this.root.appendChild(this.coinTicker);
-    this._coins = -1;
+    this.sunTicker = el('div', 'sunTicker');
+    this.sunTicker.innerHTML = '<i class="disc"></i><span class="n">0</span><span class="gain"></span>';
+    this.sunN = this.sunTicker.querySelector('.n');
+    this.sunGain = this.sunTicker.querySelector('.gain');
+    this.root.appendChild(this.sunTicker);
+    this._suns = -1;
     this._gainT = 0;
 
     /* The streak block. Built here rather than in index.html so the markup stays a shell and
@@ -492,27 +492,27 @@ export class Hud {
       this.streakPts.textContent = '';
     }
 
-    /* ── the run bar: one coin at a time ───────────────────────────────────
-     * See the COIN TICKS note in the constructor for why this replaced a car-unlock ladder. The
-     * whole widget answers one question — how far to the next coin — and it answers it the same
+    /* ── the run bar: one sun at a time ───────────────────────────────────
+     * See the SUN TICKS note in the constructor for why this replaced a car-unlock ladder. The
+     * whole widget answers one question — how far to the next sun — and it answers it the same
      * way every time.
      *
      * `distance` and not `best`: this is the run you are on. When a run breaks the fill drops to
      * nothing, which is the truth (you lost the run) and is why it now moves congruently instead
      * of creeping along a log axis that ran to 300 km. */
-    const perCoin = STREAK_METRES_PER_COIN;
+    const perSun = STREAK_METRES_PER_SUN;
     const runM = live ? s.distance : 0;
-    const spanM = perCoin * COIN_TICKS;
+    const spanM = perSun * SUN_TICKS;
     const intoSpan = runM % spanM;
-    const coinsThisRun = Math.floor(runM / perCoin);
+    const sunsThisRun = Math.floor(runM / perSun);
     this.bar.classList.toggle('live', live);
     this.barFill.style.width = `${(Math.max(intoSpan / spanM, 0.004) * 100).toFixed(1)}%`;
     this.barMark.classList.remove('on');
 
-    /* Each tick lights as its coin is paid, and the one being worked towards is highlighted. The
-     * ticks are a repeating band of COIN_TICKS coins, so a long run keeps filling and paying
+    /* Each tick lights as its sun is paid, and the one being worked towards is highlighted. The
+     * ticks are a repeating band of SUN_TICKS suns, so a long run keeps filling and paying
      * rather than running out of bar. */
-    const paidInBand = Math.floor(intoSpan / perCoin);
+    const paidInBand = Math.floor(intoSpan / perSun);
     for (let k = 0; k < this.tickEls.length; k++) {
       const passed = k < paidInBand;
       this.tickEls[k].classList.toggle('passed', passed);
@@ -521,10 +521,10 @@ export class Hud {
 
     /* And say it in words, because a bar with no label was the other half of the complaint. The
      * line names the rule, where you are in it, and what this run has earned so far. */
-    const toNext = Math.max(0, perCoin - (runM % perCoin));
+    const toNext = Math.max(0, perSun - (runM % perSun));
     this.barNext.textContent = live
-      ? `stay on the road — 1 coin every ${perCoin} m · next in ${Math.round(toNext)} m · ${coinsThisRun} this run`
-      : `stay on the road — 1 coin every ${perCoin} m`;
+      ? `stay on the road — 1 sun every ${perSun} m · next in ${Math.round(toNext)} m · ${sunsThisRun} this run`
+      : `stay on the road — 1 sun every ${perSun} m`;
 
 
     if (this._blip > 0) {
@@ -586,35 +586,35 @@ export class Hud {
   }
 
   /**
-   * The coin balance, top right. Called every frame from main.js with the wallet.
+   * The sun balance, top right. Called every frame from main.js with the wallet.
    *
-   * Operator: "we need to re-add the coins ticker to the top right, making it prominent, showing
-   * how many coins you have in total". Everything is bought with coins now, so this is the most
+   * Operator: "we need to re-add the suns ticker to the top right, making it prominent, showing
+   * how many suns you have in total". Everything is bought with suns now, so this is the most
    * actionable number on the screen and it was a 12 px figure tucked under the player list.
    *
    * `gained` is what was minted THIS frame, which is the half that makes earning felt: the number
    * bumps and a small green "+1" floats off it. That is the other half of "make it clear what you
    * get for not leaving the road" — the bar says the rule, this says it just happened.
    *
-   * @param {number} dt @param {{coins:number}} wallet @param {number} [gained]
+   * @param {number} dt @param {{suns:number}} wallet @param {number} [gained]
    */
-  coins(dt, wallet, gained = 0) {
-    if (!wallet || !this.coinN) return;
+  suns(dt, wallet, gained = 0) {
+    if (!wallet || !this.sunN) return;
     if (this._gainT > 0) {
       this._gainT -= dt;
-      if (this._gainT <= 0) this.coinGain.classList.remove('show');
+      if (this._gainT <= 0) this.sunGain.classList.remove('show');
     }
     if (gained > 0) {
-      this.coinGain.textContent = `+${gained}`;
-      this.coinGain.classList.add('show');
+      this.sunGain.textContent = `+${gained}`;
+      this.sunGain.classList.add('show');
       this._gainT = 1.1;
-      this.coinTicker.classList.remove('bump');
-      void this.coinTicker.getBoundingClientRect().width; // restart the animation
-      this.coinTicker.classList.add('bump');
+      this.sunTicker.classList.remove('bump');
+      void this.sunTicker.getBoundingClientRect().width; // restart the animation
+      this.sunTicker.classList.add('bump');
     }
-    if (wallet.coins !== this._coins) {
-      this._coins = wallet.coins;
-      this.coinN.textContent = String(wallet.coins);
+    if (wallet.suns !== this._suns) {
+      this._suns = wallet.suns;
+      this.sunN.textContent = String(wallet.suns);
     }
   }
 }
