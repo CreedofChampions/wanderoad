@@ -92,9 +92,14 @@ check(start && start.earned === 0, 'a fresh player has collected nothing', start
 /** Open the garage the way a player does, and report what the car row says. */
 const openGarage = async () => {
   await evalIn(
-    "(() => { const m = document.getElementById('menu'); if (m && m.hidden) { for (const target of [window, document]) target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } return true; })()"
+    "(() => { const m = document.getElementById('menu'); if (m && m.hidden) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); return true; })()"
   );
   await sleep(800);
+  /* ASSERT IT IS ON SCREEN. An earlier version dispatched Escape at BOTH window and document, which
+   * toggled the panel open and shut again in one call — and because show() refills the rows on the
+   * way past, every DOM read below still looked correct while the player would have seen nothing.
+   * A check that passes against a hidden panel is not checking the feature. */
+  if (!(await evalIn("!document.getElementById('menu').hidden"))) throw new Error('the Garage did not open');
   return evalIn(
     "(() => { const row = document.querySelector('#menu [data-group=\"car\"]'); if (!row) return null; return [...row.querySelectorAll('button')].map((b) => ({ id: b.dataset.key, label: b.textContent.trim(), locked: b.classList.contains('locked'), tag: b.dataset.unlock || '' })); })()"
   );

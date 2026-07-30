@@ -161,7 +161,10 @@ export class Menu {
         <h2>Garage</h2>
         <p class="hint">Escape or M to close · everything here is also a URL parameter</p>
 
-        <h3>Car <small>each one drives differently — bought with suns at a dealership</small></h3>
+        <h3>Suns <small>everything you have ever collected, and what it opens next</small></h3>
+        <div data-group="suns"></div>
+
+        <h3>Car <small>each one drives differently — the first three by collecting, the rest at a dealership</small></h3>
         <div class="row" data-group="car"></div>
 
         <h3>Tank <small>a bigger tank for the car you are driving — bought at a dealership</small></h3>
@@ -212,6 +215,7 @@ export class Menu {
     const invite = mountInvite(sheet);
     if (invite) sheet.insertBefore(invite, sheet.querySelector('.foot'));
 
+    this._fillSuns();
     this._fillCars();
     this._fillTank();
     this._fillShop();
@@ -241,6 +245,66 @@ export class Menu {
    * What it costs is now SUNS, not distance (operator: "New cars = suns"), and the label says
    * whether you can afford it right now, because a price you cannot act on is just a number.
    * The greyed ones are still shown and still say what they cost: that is the shop window. */
+  /* ── EVERY SUN YOU HAVE EVER COLLECTED, AND WHAT IT OPENS ────────────────────
+   *
+   * Operator: "We could then say, click escape to see all the suns you've collected, and then have a
+   * progress bar toward unlocks like cars."
+   *
+   * Two numbers, because they are genuinely different and confusing them is how a player concludes
+   * the game took their money: COLLECTED is the odometer and never falls, IN POCKET is what is left
+   * to spend. The odometer is the headline because it is the one that opens the first three cars.
+   *
+   * Then a bar per car still to come, in fleet order, each measured against the ladder that actually
+   * governs it — the earned ones against the odometer, the dealership ones against the balance. A bar
+   * that fills against the wrong number is worse than no bar: it would sit at 100% while the car
+   * stayed locked. `unlockRule` in game/garage.js is the single source of which is which.
+   *
+   * Cars already yours are listed as a plain line rather than dropped, because "what have I got" is
+   * half of what someone opens this panel to find out. */
+  _fillSuns() {
+    const box = this.root.querySelector('[data-group="suns"]');
+    if (!box) return;
+    const wallet = this.hooks.wallet ? this.hooks.wallet() : null;
+    if (!wallet) {
+      box.innerHTML = '';
+      return;
+    }
+    const best = this.hooks.bestStreak ? this.hooks.bestStreak() : 0;
+    const owned = FLEET.filter((c) => isUnlocked(c, best, wallet));
+    const togo = FLEET.filter((c) => !isUnlocked(c, best, wallet));
+
+    const bars = togo
+      .map((c) => {
+        const r = unlockRule(c);
+        const have = r.how === 'earn' ? wallet.sunsEarned : wallet.suns;
+        const pct = r.at > 0 ? Math.max(0, Math.min(1, have / r.at)) : 1;
+        const left = Math.max(0, r.at - have);
+        const how =
+          r.how === 'earn'
+            ? left > 0
+              ? `${left} more to collect`
+              : 'unlocked'
+            : left > 0
+              ? `${left} more, then a dealership`
+              : 'affordable — find a dealership';
+        return `<div class="unlockRow">
+            <div class="unlockTop"><span>${c.label}</span><span>${have} / ${r.at}</span></div>
+            <div class="unlockBar${r.how === 'earn' ? ' earn' : ''}"><i style="width:${(pct * 100).toFixed(1)}%"></i></div>
+            <div class="unlockWhat">${how}</div>
+          </div>`;
+      })
+      .join('');
+
+    box.innerHTML = `
+      <div class="sunTotals">
+        <div><b>${wallet.sunsEarned}</b><span>collected in all</span></div>
+        <div><b>${wallet.suns}</b><span>in your pocket</span></div>
+        <div><b>${owned.length}/${FLEET.length}</b><span>cars</span></div>
+      </div>
+      <p class="ownedList">${owned.map((c) => c.label).join(' · ')}</p>
+      ${bars || '<p class="ownedList">Every car is yours.</p>'}`;
+  }
+
   _fillCars() {
     const best = this.hooks.bestStreak ? this.hooks.bestStreak() : 0;
     const wallet = this.hooks.wallet ? this.hooks.wallet() : null;
@@ -414,6 +478,7 @@ export class Menu {
           return;
         }
         this.hooks.say?.(`${spec.label} is yours`, 3.0);
+        this._fillSuns();
         this._fillCars();
         this._mark();
       }
@@ -519,7 +584,16 @@ export class Menu {
   }
 
   show() {
+    /* REFILL EVERY ROW THAT READS THE WALLET, not just the cars.
+     *
+     * Only `_fillCars` was refreshed here, so the Tank and Shop rows kept whatever balance they were
+     * built with — a photograph of the panel shows "+10% tank · 15 suns / you have 0" next to a
+     * headline reading 75 in your pocket. The panel contradicting itself is worse than it being
+     * absent, and it is the sort of thing that reads as the game having lost your money. */
+    this._fillSuns();
     this._fillCars();
+    this._fillTank();
+    this._fillShop();
     this.refreshSeed();
     this.open = true;
     this.root.hidden = false;

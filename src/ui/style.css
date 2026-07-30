@@ -579,16 +579,37 @@ canvas {
   cursor: not-allowed;
   position: relative;
 }
+/* A HOVER LABEL, NOT A PERMANENT ONE.
+ *
+ * This used to be drawn under every locked button at once. Each caption is far wider than the
+ * button it belongs to and set `nowrap`, so with four locked cars side by side they printed straight
+ * through each other — a photograph of the Garage shows "90 suns at a d…ealership 75 you have 75",
+ * which is not a sentence in any language.
+ *
+ * It is also redundant now: the SUNS section above lists every locked car with its exact numbers and
+ * a bar. So the caption becomes what it always should have been, a tooltip on the one you point at,
+ * with a plate behind it so it can be read over its neighbours. */
 #menu button.locked::after {
   content: attr(data-unlock);
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  bottom: -1.05rem;
-  font-size: 0.62rem;
-  letter-spacing: 0.1em;
+  bottom: -1.35rem;
+  z-index: 3;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
   white-space: nowrap;
-  opacity: 0.75;
+  padding: 0.16rem 0.45rem;
+  border-radius: 7px;
+  background: rgba(38, 46, 60, 0.92);
+  color: #f6ecd8;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+#menu button.locked:hover::after,
+#menu button.locked:focus::after {
+  opacity: 1;
 }
 #menu .row {
   margin-bottom: 0.5rem;
@@ -1362,4 +1383,74 @@ canvas {
   text-align: center;
   font-size: 0.86rem;
   opacity: 0.92;
+}
+
+/* ── the Garage's sun ledger and unlock bars ──────────────────────────────────
+ * Operator: "click escape to see all the suns you've collected, and then have a progress bar
+ * toward unlocks like cars." See ui/menu.js's _fillSuns for what the numbers mean and why the
+ * earned bars are coloured differently from the dealership ones. */
+#menu .sunTotals {
+  display: flex;
+  gap: 1.6rem;
+  flex-wrap: wrap;
+  margin: 0.2rem 0 0.5rem;
+}
+#menu .sunTotals div {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+#menu .sunTotals b {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+#menu .sunTotals span {
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+#menu .ownedList {
+  font-size: 0.82rem;
+  opacity: 0.7;
+  margin: 0 0 0.7rem;
+}
+#menu .unlockRow {
+  margin: 0 0 0.6rem;
+}
+#menu .unlockTop {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.82rem;
+  margin-bottom: 0.18rem;
+}
+#menu .unlockTop span:last-child {
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+#menu .unlockBar {
+  height: 7px;
+  border-radius: 4px;
+  background: rgba(58, 67, 86, 0.14);
+  overflow: hidden;
+}
+#menu .unlockBar i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  /* Teal for a car you must go and BUY, matching the dealership's own fascia in render/props.js;
+   * the warm sun colour for one you can simply collect your way into. The colour is the second
+   * time the panel says which ladder you are on — the words above it are the first. */
+  background: var(--teal);
+  transition: width 0.25s ease;
+}
+#menu .unlockBar.earn i {
+  background: linear-gradient(90deg, #f0b429, #f7d774);
+}
+#menu .unlockWhat {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  opacity: 0.55;
+  margin-top: 0.14rem;
 }
