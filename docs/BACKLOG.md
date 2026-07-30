@@ -39,53 +39,75 @@ every node-side check that was run against it.
 
 ## Now — the failing requirements, worst first
 
-### Junction shape — still wrong, and here is what has been tried
+### Junction shape — MEASURED PROPERLY, and five approaches falsified with numbers
 
-The operator's screenshot `i.imgur.com/oU5myVN.png`: carriageways running side by side with
-their centre lines crossing. Also, on 29 July: "terrain deformation issues around junctions:
-alpine seed 4189486".
+The operator's screenshot `i.imgur.com/oU5myVN.png`: carriageways leaving one point side by side
+with their centre lines crossing. Also, 29 July: "terrain deformation issues around junctions:
+alpine seed 4189486", and "junctions are still a mess".
 
-FIRST, A CORRECTION. An earlier version of this section claimed "a third of all node departures
-leave within 26 degrees of each other, worst 180.0" over three seeds. THAT NUMBER WAS WRONG.
-The script behind it compared the two tangents at a shared node and called them a hairpin when
-they pointed the same way — but for a road passing straight THROUGH a node, that is exactly
-what they do, so every straight road in the world was being counted as a 180-degree hairpin.
-Do not act on that number. `tools/diag-roadmap.mjs` was written because of it: it draws the
-network as an SVG, and a picture cannot be wrong in that particular way.
+THE MEASUREMENT, which is now trustworthy: `tools/diag-junction-spread.mjs`. It identifies each
+node from the edge KEY (`tier:i,j,dir` names both lattice nodes exactly) rather than by rounding
+coordinates into buckets, and reports the angle between the away-tangents of every pair of roads at
+a node. 180 deg is a road passing through, 90 is a clean crossroads arm, ~0 is braided.
 
-WHAT WAS TRIED AND REVERTED — fanning the departures at a node.
+    seed 20260726:  374 nodes,  556 pairs — 185 braided under 26 deg (33.3%), tightest 0 deg
+    seed 7:         444 nodes,  747 pairs — 239 braided (32.0%), tightest 0 deg
+    seed 424242:    355 nodes,  504 pairs — 166 braided (32.9%), tightest 0 deg
 
-`nodeDir()` gives a node ONE shared tangent and every edge leaves along it. That is exactly
-right for a degree-2 node (it is what makes a road pass through a junction as one continuous
-curve) and it is the obvious suspect for a real junction. So: at a node of degree 3+, rotate
-each edge's departure from the shared tangent towards its own chord (FAN_MIX), plus a
-repulsion pass that pushes any two departures closer than 40 degrees apart.
+An earlier version of this number was produced by a script that bucketed by rounded coordinate;
+it was retracted, then re-derived properly and came back at the same magnitude. It is real.
 
-It does not work, and the failure is visible rather than statistical:
+WHY IT HAPPENS, and this is the one finding everything else follows from: `nodeDir()` gives a node
+ONE SHARED TANGENT and every edge meeting there leaves along it. That is deliberate and correct for
+a road passing through — it is what makes a junction one continuous curve instead of two curves
+with a kink — and at a three- or four-way node it means every road leaves along the same line BY
+CONSTRUCTION. The lattice is innocent: with jitter 0.34 the east neighbour sits within ~19 deg of
+due east and the south neighbour within 19 of due south, so no two CHORDS at a node can be closer
+than about 52 deg.
 
-  - FAN_MIX 0.8 straightens the whole network. The roads become near-straight lines between
-    nodes and the game loses the sweeping curves it is built out of. (before.png/after.png,
-    rendered with diag-roadmap at 5 km across, seed 20260726.)
-  - FAN_MIX 0.3 keeps the curves but puts LOOPS and hooks at several junctions — the hermite
-    swings when its end tangent is rotated away from the chord, and TANGENT_BACKOFF cannot
-    rescue it because that only shortens a tangent, it never re-aims one.
-  - The loops come from the blend, not from the repulsion: setting FAN_MIN_SPREAD to 0 leaves
-    them exactly where they were.
+FIVE APPROACHES, ALL MEASURED, ALL REVERTED:
 
-So any future attempt has to re-run the curvature backoff AFTER rotating a tangent, or rotate
-the tangent and move the control point together. Verify with diag-roadmap, not with an angle
-histogram.
+1. Rotate each departure towards its own chord, FAN_MIX 0.8 — straightens the whole network. The
+   roads become near-straight lines between nodes and the game loses the curves it is made of.
+   (Compare renders from diag-roadmap at 5 km across.)
+2. The same at FAN_MIX 0.3 — keeps the curves, puts LOOPS and hooks at several junctions. The
+   hermite swings when its end tangent is re-aimed and the safety search only ever tried SHORTER
+   tangents, never re-aimed ones, so where no length was safe it kept the least-bad and drew a hook.
+3. The same with the FAN AMOUNT searched alongside the tangent length (FAN_BACKOFF ending at 0, so
+   a junction that cannot be fanned safely is not fanned) — this DOES fix the loops. But applied to
+   arterials it moves the trunk network enough to cross ITSELF elsewhere: diag-crosslevel's
+   arterial-x-arterial mid-edge count 9 -> 17 against a regression bar of 10. Restricted to lanes it
+   is safe (9, gradients unchanged) and does almost nothing for the spread: 32.7% vs 32.5%.
+4. Move the NODE instead — pull a braided node's jitter back towards its cell centre, where east is
+   +x and south is +z and no pair can be braided. Changed the measurement by 0.2 percentage points,
+   and that is what proved the chords were never the problem.
+5. SHORTEN the tangent at a junction end (a shorter tangent turns towards the well-spread chord
+   sooner, and nothing is re-aimed so nothing can loop). This one WORKS on the separation and
+   trades it against ROAD GRADIENT one-for-one, which is worse:
 
-WHAT DID WORK, and is shipped: culling lanes that cross an arterial more than 32 degrees from
-square (see the commit "Junctions: a lane that would cross an arterial badly is not built at
-all"). 12 km box, seed 20260726: 175 crossings -> 86, mean 16.48 -> 6.57 degrees, worst
-82.55 -> 24.13, at a cost of 12% of lane length with arterials untouched.
+       shorten   spread (worst seed)   worst grade: meadow / alpine
+        1.00 (off)      32.7%              25.7% / 28.1%   <- shipped
+        0.75            31.0%              27.3% / 28.3%
+        0.60            25.8%              33.3% / 39.0%
+        0.42            17.8%              45.3% / 46.4%
+        0.22             7.3%              71.5% / 63.6%
 
-STILL OPEN: the terrain around junctions. `tools/diag-crosslevel.mjs` has two failures that
-predate all of this work and are the likeliest cause of what the operator is seeing —
-55 of 266 car-sized boxes near spawn contain a crossing whose two roads disagree about the
-ground height, worst 12.91 m at (1448,-1952). Alpine seed 4189486 is the operator's own
-repro. (The cull improved this from 80/316 but did not fix it.)
+   A 71% gradient is not a road. Junction flatness (diag-junction-geom) stayed clean throughout, so
+   the cost is entirely in the longitudinal profile: a short tangent makes the road hug its chord,
+   and the chord does not follow the terrain.
+
+WHAT A SIXTH ATTEMPT SHOULD DO. The separation and the gradient are only in conflict because the
+tangent is doing both jobs. Give the node a SHORT tangent for the first few samples and let the
+profile smooth over a longer window than the geometry does — i.e. decouple the plan view from the
+elevation at a junction, rather than trading one for the other. Verify with diag-junction-spread
+AND diag-relief AND diag-roadmap together; any one of them alone will happily accept a change the
+other two hate. `tools/diag-junction-spread.mjs` is in npm test with its bar set AT today's number,
+so it cannot silently get worse while this is open.
+
+STILL OPEN SEPARATELY: the terrain at crossings. diag-crosslevel has two failures that predate all
+of this — 34 of 260 car boxes near spawn hold a crossing whose two roads disagree about ground
+height, worst 12.91 m. Improved from 55 by the CROSS_EARTHWORK change; not fixed. Alpine seed
+4189486 is the operator's own repro.
 
 ### Severity-first window allocation in squareCrossings — TRIED, REVERTED, with numbers
 
