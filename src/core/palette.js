@@ -237,9 +237,22 @@ export const BIOME_TINT = [
     wet: 0.02,
   },
   {
-    // 2 — Cobalt Highlands: cold ridged rock, pine, snowline. Shadows go blue, air goes thin.
+    /* 2 — Cobalt Highlands: ridged rock, pine, snowline. The AIR is cold and thin (see `haze`);
+     * the GROUND is not, and that distinction is the whole of the fix below.
+     *
+     * Operator, with a photograph: "ground is blue here in highlands". It measured +17.7 blue over
+     * red (`node tools/shot-stats.mjs`) on a sunlit hillside — ground that is literally bluer than it
+     * is red, in daylight, which nothing outdoors is except water and ice.
+     *
+     * Two things were pushing it there and this is one of them: `rock` multiplied the shared rock
+     * stops by [0.9, 0.95, 1.06], cutting red 10% and lifting blue 6% — a 17% relative shift into
+     * blue, applied on exactly the steep faces (rockAmt starts at slope 0.36) that a hillside is made
+     * of. Now a whisper warm instead. The other was the ground ramp; see BIOME_GROUND below.
+     *
+     * What stays blue is `haze`, and it should: aerial perspective really is blue, it is what makes
+     * a far ridge read as far, and it only touches distance. Cold air, warm stone. */
     ground: [0.82, 0.9, 0.98],
-    rock: [0.9, 0.95, 1.06],
+    rock: [1.02, 1.0, 0.97],
     foliage: [0.72, 0.86, 0.86],
     haze: '#9FB6CE',
     hazeMul: 0.72,
@@ -295,16 +308,39 @@ export const BIOME_TINT = [
  * what the sun and the aerial haze already vary by the time it reaches the eye:
  *   STEPPE    gold/straw — the yellow of standing dead grass, the one colour the meadow's
  *             green can never be mistaken for.
- *   HIGHLAND  cold blue-slate. Its old tint was a 0.82/0.90/0.98 multiplier — a slightly
- *             bluer green, i.e. still green, which is why "hills" was one of the three
- *             biomes he could name and "highland" was not one of the five.
+ *   HIGHLAND  BARE WARM STONE, and it is the one biome that separates by being nearly
+ *             ACHROMATIC rather than by hue. Two rounds got this wrong in opposite directions.
+ *             First it was a 0.82/0.90/0.98 multiplier over the green ramp — a slightly bluer
+ *             green, i.e. still green, which is why "hills" was one of three biomes the operator
+ *             could name and "highland" was not one of five. The fix for that overshot into
+ *             '#9FB0B8'/'#748A99'/'#4E6274'/'#36455A', a genuinely blue slate: 33% and 40%
+ *             saturated in the two dark stops, which are the stops a slope facing away from the
+ *             sun is painted with. Result, photographed and then measured with
+ *             `node tools/shot-stats.mjs`: +17.7 blue over red on a sunlit hillside. Ground in
+ *             daylight is never bluer than it is red.
+ *
+ *             So the third answer is neither green nor blue: desaturated LICHEN-GREY rock, about 10%
+ *             saturation, red and green within about three points of each other and blue held below
+ *             both, so it is warm without being warm-hued.
+ *
+ *             That last clause is not fussiness — the first attempt at it ('#C2BCAF'/'#98917F'/
+ *             '#6A665C'/'#4A473F') put red comfortably above green and photographed as a SAND
+ *             hillside, which trades a collision with the wetland for a collision with the dunes and
+ *             is no better. Sand's own mid stop is '#CDA877', red 37 above green; this ramp keeps
+ *             that gap at 3, which is the whole difference between stone and desert. It is still unmistakable next to the other four BECAUSE it is the
+ *             grey one — every other biome here is strongly hued, so "no hue" is itself an
+ *             identity, and it is the honest one for a bare ridge above the treeline.
+ *
+ *             The cold is not lost, it moved to where cold belongs: BIOME_TINT's blue `haze`
+ *             (air), the snow blend above 120 m (terrainMaterial.js), and the snowline grass
+ *             suppression that shares that ramp (render/grass.js).
  *   DUNES     the existing sand stops, promoted out of their special case.
  *   WETLAND   silver-teal peat, desaturated the way standing water and mist desaturate.
  */
 export const BIOME_GROUND = [
   [P.tLit, P.tMid, P.tShade, P.tHollow], // 0 MEADOW — the pen's own valley, untouched
   ['#D7D278', '#A9B84A', '#7F8438', '#57592B'], // 1 STEPPE   — sun-bleached gold
-  ['#9FB0B8', '#748A99', '#4E6274', '#36455A'], // 2 HIGHLAND — cold blue slate
+  ['#BCBCAE', '#8F9280', '#64685A', '#464A3F'], // 2 HIGHLAND — lichen-grey stone (see note below)
   [P.sandLit, P.sandMid, P.sandShade, P.sandHollow], // 3 DUNES — rose-and-ochre sand
   ['#8BBCC2', '#5A939D', '#3B6A7A', '#254550'], // 4 WETLAND  — silver-teal peat
 ];

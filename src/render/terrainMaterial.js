@@ -165,9 +165,18 @@ void main(){
   float snowLine = smoothstep(120.0, 240.0, vWorld.y) * scal.z;
   float snowHold = smoothstep(0.55, 0.16, slope);
   float snow = clamp(snowLine * snowHold * (0.6 + 0.5*grain), 0.0, 1.0);
-  lit   = mix(lit,   vec3(0.95,0.96,0.99), snow);
-  mid   = mix(mid,   vec3(0.80,0.85,0.94), snow);
-  shade = mix(shade, vec3(0.58,0.66,0.82), snow);
+  /* WARMER, because it was reading as blue ground rather than as snow. Operator, with a screenshot
+   * from Highlands: "ground is blue here". Two things made it: a full green lawn was still growing on
+   * top of the snow (fixed in render/grass.js, which now shares this ramp), and these three colours
+   * are cold enough that a partial blend under a warm sky lands on lavender rather than on white.
+   *
+   * Real snow in daylight is not blue; its SHADOWS are, and only slightly. So the lit plate goes
+   * neutral-warm, and the mid and shade plates keep a cool cast but a much smaller one — the blue was
+   * strongest exactly where the plate is darkest, which is the majority of a hillside seen from the
+   * road. */
+  lit   = mix(lit,   vec3(0.97,0.97,0.96), snow);
+  mid   = mix(mid,   vec3(0.88,0.90,0.93), snow);
+  shade = mix(shade, vec3(0.70,0.74,0.83), snow);
 
   // ── the road ──────────────────────────────────────────────────────────────
   float onRoad = vRoad.y;

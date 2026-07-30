@@ -486,8 +486,24 @@ export class Hud {
         saveOffroadHintCount(this._offroadHintCount);
         this.say(OFFROAD_HINT_TEXT, 3.4);
       }
-      this.streakMul.textContent = s.multiplier > 1.02 ? `×${s.multiplier.toFixed(2)}` : '';
-      this.streakPts.textContent = s.score > 5 ? fmtScore(s.score) : '';
+      /* THE MULTIPLIER AND THE POINTS ARE GONE FROM THE SCREEN.
+       *
+       * Operator, reading the HUD: "why does it say 1.2 kmx1.27?" — because the distance and the
+       * multiplier were two separate readouts sitting half a rem apart, so on a phone they ran
+       * together into one meaningless string.
+       *
+       * The spacing was the smaller half of it. The real problem is that neither number MEANS
+       * anything any more. They are left over from the points scoring the suns economy replaced:
+       * `score` and `multiplier` feed nothing — not the payout (that is milestoneReward, per bar),
+       * not the leaderboard (net/board.js ranks on `best`, which is DISTANCE), not the achievements.
+       * Showing someone a number they cannot spend, act on or compare is the same mistake as the car
+       * badges that used to sit on the unlock bar promising an unlock that no longer happened.
+       *
+       * The distance stays, because it is real and it is what the leaderboard ranks. What you EARN is
+       * on the bar underneath, in words. `streak.js` still keeps the score — it costs nothing and the
+       * break event carries it — it simply is not shown. */
+      this.streakMul.textContent = '';
+      this.streakPts.textContent = '';
     } else {
       this._shownKm = 0;
       this.streakEl.classList.remove('grace');

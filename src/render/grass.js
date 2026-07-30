@@ -89,6 +89,14 @@ import { clamp, clamp01, hash3i, rng, smoothstep } from '../core/math.js';
  * frame. Below 1.5 the blade count per steradian rises with distance and the horizon reads
  * as a meadow rather than a green plane; above it, the far field dissolves.
  */
+/* The snow ramp, shared with the shader. render/terrainMaterial.js does
+ * `smoothstep(120.0, 240.0, vWorld.y)`; these are the same two numbers, written here rather than
+ * hard-coded a second time because the one thing that must never happen is the grass and the snow
+ * disagreeing about where the snow line is — that disagreement is exactly the "blue ground" the
+ * operator photographed in Highlands. */
+const SNOW_START_Y = 120;
+const SNOW_FULL_Y = 240;
+
 const K_DENSITY = 4400;
 const DENS_POW = 1.5;
 
@@ -1246,6 +1254,22 @@ export class Grass {
            * dominant weight peaks near 0.5 needs a threshold, not a curve. Grass thins from a
            * quarter dunes and is gone by 0.55, which is a real sand sea. */
           g *= 1 - smoothstep(0.25, 0.55, sand);
+
+          /* AND SNOW SUPPRESSES IT TOO, for exactly the same reason sand does.
+           *
+           * Operator, with a screenshot from Highlands at (7220, 9929): "ground is blue here". The
+           * ground is not blue — it is SNOW. render/terrainMaterial.js blends a snow plate in above
+           * 120 m (smoothstep(120, 240, world.y), held off steep faces), and HIGHLAND has amp 205 on
+           * base 14, so most of a highland sits inside that ramp. The snow itself is right; what made
+           * it read as "blue ground" is that a full green lawn was still growing on top of it, and a
+           * white-blue surface under green blades looks like coloured dirt rather than snow.
+           *
+           * The SAME numbers as the shader, deliberately — if these two ever disagree you get grass
+           * standing in snow again, which is the bug. Slope is not available at this point in the
+           * pass (it is computed in pass 2 below), so this uses the elevation term only: that is the
+           * conservative half, since a steep face holds less snow and would want LESS suppression,
+           * never more. */
+          g *= 1 - smoothstep(SNOW_START_Y, SNOW_FULL_Y, y);
 
           const rc = T.roads.carve(x, z);
           let edge = rc.edge;
