@@ -432,6 +432,11 @@ async function boot() {
    * `deal` flag (world/props.js), so this costs nothing new. */
   const DEAL_RADIUS = 34;
   let dealerWas = false; // latch for the arrival line — see the frame loop
+  /* The cars that open on lifetime suns rather than at a dealership, and the once-each latch for
+   * announcing them. `earnedSeeded` suppresses the very first pass — see the loop for why. */
+  const EARNED_CARS = FLEET.filter((c) => Number.isFinite(c.earnAt) && c.id !== FLEET[0].id);
+  const earnedTold = new Set();
+  let earnedSeeded = false;
 
   /* AT A PUMP, close enough to do business — the same forecourt radius a dealership uses, and the
    * gate for buying a spare fuel can (operator: "make it so you can buy gas cans in the petrol
@@ -1013,6 +1018,25 @@ async function boot() {
         );
       }
     }
+
+    /* A CAR THAT ARRIVES ON ITS OWN HAS TO SAY SO. The first three cars open on TOTAL suns collected
+     * (operator: "the first three cars be total collected") and `wallet.owns` decides that by live
+     * comparison, which is robust but silent — a player would find the car only by opening the garage
+     * for some other reason, which is the same as not getting it. So watch the earned tier and
+     * announce the crossing once each.
+     *
+     * The set is seeded on the first pass rather than empty, so a returning player whose save already
+     * clears the threshold is not told about three cars they have had for a week. */
+    for (const c of EARNED_CARS) {
+      if (earnedTold.has(c.id)) continue;
+      if (!isUnlocked(c, 0, wallet)) continue;
+      earnedTold.add(c.id);
+      if (earnedSeeded) {
+        hud.say(`${c.label} unlocked — ${c.earnAt} suns collected. ESC to drive it`, 4.2);
+        audio.pickup();
+      }
+    }
+    earnedSeeded = true;
 
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {

@@ -21,7 +21,7 @@ globalThis.localStorage = {
 };
 
 const { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX, milestoneLength, milestoneReward } = await import('../src/game/wallet.js');
-const { FLEET, FLEET_BY_ID, priceOf, isUnlocked } = await import('../src/game/garage.js');
+const { FLEET, FLEET_BY_ID, priceOf, isUnlocked, unlockRule } = await import('../src/game/garage.js');
 const { Fuel, TANK_PRICE_BASE, TANK_PRICE_STEP } = await import('../src/game/fuel.js');
 const { stationsInBox, DEAL_SHARE } = await import('../src/world/props.js');
 
@@ -107,6 +107,49 @@ console.log('\n── new cars = suns ──────────────
   // and it survives a reload
   const reloaded = new Wallet({ storageKey: 'bench.econ.cars' });
   check(reloaded.owns(second.id, first.id), 'the purchase survives a reload', reloaded.owns(second.id, first.id), 'true');
+}
+
+/* ── 2b. two ladders: the first three are COLLECTED, the rest are BOUGHT ──── */
+console.log('\n── first three on total collected, the rest at a dealership ───────────────');
+{
+  const w = new Wallet({ storageKey: 'bench.econ.earn' });
+  const earned = FLEET.filter((c) => unlockRule(c).how === 'earn');
+  const bought = FLEET.filter((c) => unlockRule(c).how === 'buy');
+  check(earned.length === 3, 'exactly THREE cars open on total suns collected', earned.length, '3');
+  check(bought.length === FLEET.length - 3, 'and every other car needs a dealership', bought.length, String(FLEET.length - 3));
+
+  const [, two, three] = earned;
+  check(!isUnlocked(two, 0, w), `${two.label} starts locked`, isUnlocked(two, 0, w), 'false');
+
+  /* THE ODOMETER IS NOT THE BALANCE, and this is the check that matters: earn past the threshold,
+   * then spend it all. The car must stay. Anything else means a shop can take a car back off you. */
+  w.addSuns(unlockRule(two).at);
+  check(isUnlocked(two, 0, w), `collecting ${unlockRule(two).at} suns opens ${two.label}`, isUnlocked(two, 0, w), 'true');
+  check(!isUnlocked(three, 0, w), `but not ${three.label}, which wants ${unlockRule(three).at}`, isUnlocked(three, 0, w), 'false');
+
+  const spent = w.spend(w.suns);
+  check(spent && w.suns === 0, 'spend the balance down to nothing', `${w.suns} suns`, '0');
+  check(w.sunsEarned >= unlockRule(two).at, 'the lifetime total does NOT move when you spend', w.sunsEarned, `>= ${unlockRule(two).at}`);
+  check(isUnlocked(two, 0, w), `and ${two.label} is STILL yours after spending`, isUnlocked(two, 0, w), 'true');
+
+  // Reload: the odometer persists, so the car does not evaporate between sessions.
+  const back = new Wallet({ storageKey: 'bench.econ.earn' });
+  check(isUnlocked(two, 0, back), `${two.label} survives a reload with a zero balance`, isUnlocked(two, 0, back), 'true');
+
+  /* A BOUGHT CAR CANNOT BE COLLECTED INTO. Reaching a huge lifetime total must not hand over the
+   * dealership fleet — that would delete the reason to ever find a dealership. */
+  const rich = new Wallet({ storageKey: 'bench.econ.rich' });
+  rich.addSuns(100000);
+  const stillShut = bought.filter((c) => !isUnlocked(c, 0, rich));
+  check(stillShut.length === bought.length, '100000 suns collected opens NO dealership car', `${stillShut.length}/${bought.length} shut`, 'all shut');
+
+  /* MIGRATION: a save written before `sunsEarned` existed has a balance and no odometer. It must
+   * read back as having earned at least what it is holding, or a returning player loses cars. */
+  const KEY = 'bench.econ.legacy';
+  globalThis.localStorage.setItem(KEY, JSON.stringify({ suns: 300, owned: [] }));
+  const legacy = new Wallet({ storageKey: KEY });
+  check(legacy.sunsEarned >= 300, 'an old save without an odometer inherits its balance', legacy.sunsEarned, '>= 300');
+  check(isUnlocked(two, 0, legacy) && isUnlocked(three, 0, legacy), 'so a returning player keeps the earned cars', 'both open', 'both open');
 }
 
 /* ── 3. the gas bonus is bought, per car, and the tank really grows ───────── */

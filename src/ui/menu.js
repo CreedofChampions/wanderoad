@@ -12,7 +12,7 @@
 
 import { CARS, CAR_KEYS } from '../car/loadedCar.js';
 import { TERRAINS } from '../game/presets.js';
-import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, cheatOn, fmtUnlock } from '../game/garage.js';
+import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, unlockRule, cheatOn, fmtUnlock } from '../game/garage.js';
 import { BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
 
@@ -247,8 +247,20 @@ export class Menu {
     const row = this.root.querySelector('[data-group="car"]');
     row.innerHTML = FLEET.map((c) => {
       const open = isUnlocked(c, best, wallet);
+      /* TWO LADDERS, AND THE LABEL HAS TO SAY WHICH ONE YOU ARE ON. Operator: "Maybe we can have
+       * the first three cars be total collected, and then the rest will be find a dealership."
+       *
+       * A locked car that says "45 suns" when the way to get it is to collect seventy in total is
+       * worse than saying nothing — it sends you to a dealership you cannot buy it at. So an EARNED
+       * car names the total and how far off you are, and a BOUGHT car names the price. `unlockRule`
+       * is the single source of that split; the garage does not re-derive it. */
+      const rule = unlockRule(c);
       const price = priceOf(c);
-      const tag = wallet ? `${price} suns${wallet.suns >= price ? '' : ` — you have ${wallet.suns}`}` : fmtUnlock(c.unlockAt);
+      let tag;
+      if (!wallet) tag = fmtUnlock(c.unlockAt);
+      else if (rule.how === 'earn')
+        tag = `collect ${rule.at} suns in all — you have collected ${wallet.sunsEarned}`;
+      else tag = `${price} suns at a dealership${wallet.suns >= price ? '' : ` — you have ${wallet.suns}`}`;
       return `<button data-group="car" data-key="${c.id}" title="${c.blurb}"${
         open ? '' : ` class="locked" data-unlock="${tag}"`
       }>${c.label}</button>`;
@@ -383,6 +395,16 @@ export class Menu {
        * dealership — `canBuy` is main.js's own proximity test — so the garage is where you
        * choose between the cars you own, and a dealership is where the fleet grows. */
       if (spec && !isUnlocked(spec, best, wallet)) {
+        /* An EARNED car cannot be bought at any price, so offering to sell it would be a lie. Say
+         * what actually opens it and how far off it is. */
+        const rule = unlockRule(spec);
+        if (wallet && rule.how === 'earn') {
+          this.hooks.say?.(
+            `${spec.label} opens at ${rule.at} suns collected — you have ${wallet.sunsEarned}`,
+            3.4,
+          );
+          return;
+        }
         if (!wallet || !this.hooks.canBuy?.()) {
           this.hooks.say?.(`${spec.label} costs ${priceOf(spec)} suns — buy it at a dealership`, 3.2);
           return;

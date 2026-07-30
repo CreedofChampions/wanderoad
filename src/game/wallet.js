@@ -115,6 +115,13 @@ export class Wallet {
     /** Car ids bought outright, ever. A Set in memory, an array on disk. The starting car is
      *  not in here — see `owns()`, which always says yes to it: a game that opens with no car
      *  is not a game. */
+    /* EVERY SUN YOU HAVE EVER COLLECTED, which is a different number from the one in your pocket.
+     *
+     * Operator: "Maybe we can have the first three cars be total collected, and then the rest will be
+     * find a dealership." That needs a counter that SPENDING DOES NOT MOVE — otherwise buying a tank
+     * would take a car back off you, which is the kind of thing that makes a shop feel like a trap.
+     * So `suns` is the balance and `sunsEarned` is the odometer: it only ever goes up. */
+    this.sunsEarned = 0;
     this.owned = new Set();
     /** Fuel-capacity upgrades bought, PER CAR: { [carId]: levels }. Per car because capacity
      *  belongs to the car (see game/fuel.js's own note) and so does the money spent on it. */
@@ -149,6 +156,12 @@ export class Wallet {
        * and a rename that quietly zeroed it would be the worst possible way to ship a nicer name.
        * Written back under `suns` on the next save, so this only has to be read once per player. */
       this.suns = Math.max(0, +(d.suns ?? d.coins) || 0);
+      /* MIGRATION, and it has to be generous. `sunsEarned` did not exist before the first-three-cars
+       * unlock, so an existing player has no record of what they have collected. Falling back to the
+       * BALANCE is the only honest floor available — they certainly earned at least what they are
+       * holding — and it errs towards giving a returning player their cars rather than taking
+       * progress away, which is the right way to be wrong. */
+      this.sunsEarned = Math.max(this.suns, +d.sunsEarned || 0);
       this.gems = Math.max(0, +d.gems || 0);
       this.boat = !!d.boat;
       if (Array.isArray(d.owned)) this.owned = new Set(d.owned);
@@ -167,6 +180,7 @@ export class Wallet {
         this.storageKey,
         JSON.stringify({
           suns: this.suns,
+          sunsEarned: this.sunsEarned,
           gems: this.gems,
           boat: this.boat,
           owned: [...this.owned],
@@ -192,9 +206,30 @@ export class Wallet {
     return this.boat || cheatOn();
   }
 
-  /** Does the player own this car? The first car in the fleet is always owned — see `owned`. */
-  owns(carId, freeId = 'estate') {
-    return carId === freeId || this.owned.has(carId) || cheatOn();
+  /**
+   * Does the player own this car?
+   *
+   * Three ways in, and they are deliberately different in kind:
+   *   1. the first car in the fleet, always, from the first frame;
+   *   2. TOTAL SUNS COLLECTED reaching the car's `earnAt` — the first three cars, which arrive just
+   *      by playing and are what teach a new player that suns are worth picking up;
+   *   3. having paid for it at a dealership, which is every car after those.
+   *
+   * Operator: "Maybe we can have the first three cars be total collected, and then the rest will be
+   * find a dealership."
+   *
+   * Route 2 is a LIVE COMPARISON against `sunsEarned` rather than something latched into `owned` at
+   * the moment it is crossed. A latch has to fire on exactly the right frame and be persisted
+   * correctly or the car is silently lost; a comparison cannot miss, cannot double-fire, and is
+   * automatically right for a save written before this rule existed.
+   *
+   * @param {string} carId
+   * @param {string} freeId the fleet's first car
+   * @param {number} [earnAt] lifetime suns this car unlocks at, if it is one of the earned ones
+   */
+  owns(carId, freeId = 'estate', earnAt = Infinity) {
+    if (carId === freeId || this.owned.has(carId) || cheatOn()) return true;
+    return Number.isFinite(earnAt) && this.sunsEarned >= earnAt;
   }
 
   /**
@@ -308,6 +343,8 @@ export class Wallet {
   addSuns(n) {
     if (!n) return;
     this.suns += n;
+    // The odometer, not the balance — see `sunsEarned`. Only gains count; spending never moves it.
+    if (n > 0) this.sunsEarned += n;
     this._dirty = true;
     /* THE BOAT IS NO LONGER GIVEN AWAY HERE. Operator: "making buying a boat and unlock that. It
      * isn't automatic, but something you get at the harbor."

@@ -16,13 +16,23 @@
 import { STEER, TYRE, BRAKE } from '../car/tuning.js';
 
 /**
- * `unlockAt` is metres of BEST streak. `feel` is everything that used to live in a separate
- * preset: how much lateral acceleration full stick asks for, which aid ladder rung, how fast
+ * `unlockAt` is metres of BEST streak — kept for the unlock bar's badges, it grants nothing.
+ *
+ * `earnAt` is TOTAL SUNS EVER COLLECTED, and only the first three cars have one. Operator: "Maybe we
+ * can have the first three cars be total collected, and then the rest will be find a dealership."
+ * That split does real work. The first three arrive just by driving and picking things up, which is
+ * how a new player learns that a sun is worth stopping for; everything after is a reason to go
+ * somewhere, which is what a dealership is for. The thresholds are small on purpose — 25 and 70 —
+ * because these are the tutorial of the economy, not the body of it. The Sedan at 90 suns is where
+ * saving up starts.
+ *
+ * `feel` is everything that used to live in a separate preset: how much lateral acceleration full stick asks for, which aid ladder rung, how fast
  * the keyboard reaches full lock, and the rear grip that decides whether it rotates.
  */
 export const FLEET = [
   {
     id: 'estate',
+    earnAt: 0,
     file: 'estate.glb',
     label: 'Estate',
     blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
@@ -34,6 +44,7 @@ export const FLEET = [
   },
   {
     id: 'hatch',
+    earnAt: 25,
     file: 'hatch.glb',
     label: 'Hatch',
     blurb: 'Light and eager. Turns in more sharply than it has any right to.',
@@ -45,6 +56,7 @@ export const FLEET = [
   },
   {
     id: 'coupe',
+    earnAt: 70,
     file: 'coupe.glb',
     label: 'Coupe',
     blurb: 'The road car. Quick enough to be interesting, calm enough to cruise.',
@@ -146,8 +158,53 @@ export function bestStreak() {
  */
 export function isUnlocked(car, best = bestStreak(), wallet = null) {
   if (cheatOn()) return true;
-  if (wallet) return wallet.owns(car.id, FLEET[0].id);
+  if (wallet) return wallet.owns(car.id, FLEET[0].id, earnAtOf(car));
   return best >= car.unlockAt;
+}
+
+/** Lifetime suns this car unlocks at, or Infinity for the ones that must be bought at a dealership. */
+export function earnAtOf(car) {
+  return car && Number.isFinite(car.earnAt) ? car.earnAt : Infinity;
+}
+
+/**
+ * How this car is obtained, as one word plus the number that goes with it. The garage, the HUD and
+ * any future unlock screen all need to say the same thing, and three copies of this rule would drift.
+ *
+ * @returns {{how: 'earn'|'buy', at: number}}
+ */
+export function unlockRule(car) {
+  /* The starter car is `earnAt: 0` rather than a separate 'free' case, and that is not a technicality
+   * — it is what makes "the first three cars are total collected" literally true when you count them.
+   * Estate at 0 collected, Hatch at 25, Coupe at 70; everything after is bought. */
+  const e = earnAtOf(car);
+  return Number.isFinite(e) ? { how: 'earn', at: e } : { how: 'buy', at: priceOf(car) };
+}
+
+/**
+ * The next car still to come and the progress towards it, walking BOTH ladders in fleet order: the
+ * earned ones against lifetime suns, the bought ones against the balance. This is what an unlock
+ * screen draws a bar from.
+ *
+ * @param {object} wallet
+ * @returns {{car: object, how: string, need: number, have: number, remaining: number, progress: number}|null}
+ */
+export function nextCar(wallet) {
+  if (!wallet || cheatOn()) return null;
+  for (const c of FLEET) {
+    if (isUnlocked(c, 0, wallet)) continue;
+    const r = unlockRule(c);
+    const have = r.how === 'earn' ? wallet.sunsEarned : wallet.suns;
+    return {
+      car: c,
+      how: r.how,
+      need: r.at,
+      have,
+      remaining: Math.max(0, r.at - have),
+      progress: r.at > 0 ? Math.min(1, have / r.at) : 1,
+    };
+  }
+  return null;
 }
 
 /** What this car costs at a dealership, in suns. */
