@@ -204,35 +204,12 @@ export class Hud {
     this.barMark = el('div', '.mark');
     this.barTrack.appendChild(this.barFill);
     this.barTrack.appendChild(this.barMark);
-    /* ── SUN TICKS, NOT DISTANCE MILESTONES ──────────────────────────────────
-     * Operator, playing the beta: "It's still profoundly unclear, even as the maker of the game,
-     * what you're unlocking and how. The bar at the bottom doesn't consistently fill up. There's
-     * these things that look like you can unlock something at a certain level, but the bar either
-     * doesn't move ... or it moves beyond all of them, and then you don't understand why you
-     * haven't unlocked it yet. It doesn't seem very congruent to the actual progress."
-     *
-     * It was not congruent, and the reason is a change made earlier the same day: cars are BOUGHT
-     * WITH SUNS at a dealership now, and `unlockAt` no longer grants anything. The bar was still
-     * drawing a badge per car at the distance that used to unlock it, so it promised something
-     * that does not happen — you drive past the badge and nothing arrives. Meanwhile the dots sat
-     * on a log axis running to 300 km, so a normal run moved the fill through the first tenth of
-     * the bar and then a break sent it back to nothing.
-     *
-     * So the bar now shows the ONE thing that actually happens: a run pays a sun every
-     * STREAK_METRES_PER_SUN. The ticks are those suns, the fill is progress to the NEXT one, and
-     * it is linear because the mechanic is linear. It fills, pays, and starts again — every
-     * single time, with nothing on it that is not real.
-     *
-     * The car badges are gone from here entirely. What a car costs belongs next to the money, and
-     * it is in the garage panel and at the dealership, which is where you can act on it. */
+    /* No ticks. The bar is ONE milestone now (see the note in update()), so there is nothing to
+     * subdivide it with — the previous version drew four of them over a repeating band and the
+     * operator's verdict on a phone was that it "filled up almost instantly" and had "no relationship
+     * established with the unlocks whatsoever". An empty track that fills once and pays is the whole
+     * widget. */
     this.tickEls = [];
-    for (let k = 1; k <= SUN_TICKS; k++) {
-      const d = el('div', '.milestone');
-      d.dataset.sun = String(k);
-      d.style.left = `${((k / SUN_TICKS) * 100).toFixed(2)}%`;
-      this.barTrack.appendChild(d);
-      this.tickEls.push(d);
-    }
     this.bar.appendChild(this.barNext);
     this.bar.appendChild(this.barTrack);
     this.root.appendChild(this.bar);
@@ -384,7 +361,7 @@ export class Hud {
     this.root.style.pointerEvents = on ? 'none' : '';
   }
 
-  update(dt, { car, streak, surface, remotes, netState, myName = '' }) {
+  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null }) {
     // ── speed ──
     const kph = Math.round(car.kph);
     this.kph.textContent = kph;
@@ -492,41 +469,46 @@ export class Hud {
       this.streakPts.textContent = '';
     }
 
-    /* ── the run bar: one sun at a time ───────────────────────────────────
-     * See the SUN TICKS note in the constructor for why this replaced a car-unlock ladder. The
-     * whole widget answers one question — how far to the next sun — and it answers it the same
-     * way every time.
+    /* ── THE BAR IS THE MILESTONE ───────────────────────────────────────────
+     * Operator, after playing on a phone: "The bar filled up almost instantly on mobile. I came to
+     * understand that the bar at the bottom has no relationship established with the unlocks
+     * whatsoever. So I had an idea. What if your first kilometer was the first bar from left to right
+     * of the screen? Your next milestone would be the next bar. And each time you filled it up, it
+     * would give you one sun that would appear on you, and jump onto you, so that it would be very
+     * visually understandable."
      *
-     * `distance` and not `best`: this is the run you are on. When a run breaks the fill drops to
-     * nothing, which is the truth (you lost the run) and is why it now moves congruently instead
-     * of creeping along a log axis that ran to 300 km. */
-    const perSun = STREAK_METRES_PER_SUN;
+     * So the bar is now exactly one thing: the current milestone, left edge to right edge. It fills
+     * once, pays, and the next (longer) one starts. No repeating band, no log axis, no ticks standing
+     * for something that never arrives — the previous version drew four ticks over a repeating 1 km
+     * band and on a phone, where the bar is two hundred pixels wide, that read as filling instantly
+     * and meaninglessly.
+     *
+     * The wallet owns the ladder (game/wallet.js: milestoneLength/milestoneReward) so the number on
+     * screen and the number paid cannot disagree. */
+    const ms = wallet ? wallet.milestone : null;
     const runM = live ? s.distance : 0;
-    const spanM = perSun * SUN_TICKS;
-    const intoSpan = runM % spanM;
-    const sunsThisRun = Math.floor(runM / perSun);
+    const p01 = wallet ? wallet.milestoneProgress(runM) : 0;
+    const toGo = wallet ? wallet.milestoneToGo(runM) : 0;
     this.bar.classList.toggle('live', live);
-    this.barFill.style.width = `${(Math.max(intoSpan / spanM, 0.004) * 100).toFixed(1)}%`;
+    this.barFill.style.width = `${(Math.max(p01, 0.004) * 100).toFixed(1)}%`;
     this.barMark.classList.remove('on');
 
-    /* Each tick lights as its sun is paid, and the one being worked towards is highlighted. The
-     * ticks are a repeating band of SUN_TICKS suns, so a long run keeps filling and paying
-     * rather than running out of bar. */
-    const paidInBand = Math.floor(intoSpan / perSun);
-    for (let k = 0; k < this.tickEls.length; k++) {
-      const passed = k < paidInBand;
-      this.tickEls[k].classList.toggle('passed', passed);
-      this.tickEls[k].classList.toggle('current', k === paidInBand);
+    /* And say it in words, because the whole complaint was that the bar meant nothing. The line names
+     * the bar's length, what finishing it pays, and how far is left — the three things you can act
+     * on. `fmtDistance` so a phone reads "820 m" rather than "0.8 km". */
+    if (ms) {
+      this.barNext.textContent = live
+        ? `${fmtDistance(ms.length)} without leaving the road → ${ms.reward} sun${ms.reward === 1 ? '' : 's'} · ${fmtDistance(toGo)} to go`
+        : `${fmtDistance(ms.length)} without leaving the road → ${ms.reward} sun${ms.reward === 1 ? '' : 's'}`;
     }
 
-    /* And say it in words, because a bar with no label was the other half of the complaint. The
-     * line names the rule, where you are in it, and what this run has earned so far. */
-    const toNext = Math.max(0, perSun - (runM % perSun));
-    this.barNext.textContent = live
-      ? `stay on the road — 1 sun every ${perSun} m · next in ${Math.round(toNext)} m · ${sunsThisRun} this run`
-      : `stay on the road — 1 sun every ${perSun} m`;
-
-
+    /* A FILLED BAR THROWS A SUN AT YOU. `takeFill()` pops the event the wallet recorded when the
+     * milestone completed, so this fires exactly once per fill and cannot be missed by a dropped
+     * frame the way reading a threshold every frame could. */
+    if (wallet) {
+      const fill = wallet.takeFill();
+      if (fill) this.flySun(fill.suns);
+    }
     if (this._blip > 0) {
       this._blip -= dt;
       if (this._blip <= 0) {
@@ -598,6 +580,30 @@ export class Hud {
    *
    * @param {number} dt @param {{suns:number}} wallet @param {number} [gained]
    */
+  /**
+   * Throw a sun from the car up into the balance. Operator: "it would give you one sun that would
+   * appear on you, and jump onto you, so that it would be very visually understandable."
+   *
+   * A DOM element rather than a 3D object, deliberately: it has to travel from where the CAR is to
+   * where the BALANCE is, and one of those two only exists in screen space. It starts just above the
+   * car — which is always the middle-bottom of the screen, since the chase camera keeps it there —
+   * and lands on #sunTicker. Removed on `animationend`, so nothing accumulates however long anyone
+   * plays.
+   *
+   * @param {number} n how many suns this fill paid, shown on the token
+   */
+  flySun(n = 1) {
+    if (!this.root) return;
+    const el2 = document.createElement('div');
+    el2.className = 'flySun';
+    el2.innerHTML = `<i class="disc"></i>${n > 1 ? `<b>${n}</b>` : ''}`;
+    this.root.appendChild(el2);
+    el2.addEventListener('animationend', () => el2.remove(), { once: true });
+    // If the browser never fires it (a hidden tab, say), do not leak the node.
+    setTimeout(() => el2.remove(), 3000);
+    this.say(n > 1 ? `bar filled — ${n} suns` : 'bar filled — a sun', 2.4);
+  }
+
   suns(dt, wallet, gained = 0) {
     if (!wallet || !this.sunN) return;
     if (this._gainT > 0) {

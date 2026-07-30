@@ -42,10 +42,62 @@ const SAVE_INTERVAL = 2;
  *      rather than in garage.js because it is a purchase, and purchases live with the money.
  */
 
-/** Metres of unbroken streak per sun minted. 250 m at 60 km/h is a sun every 15 seconds — a
- *  drip you notice, and about 4 suns a kilometre against the roughly 1 a kilometre the verge
- *  pickups give, so a good run out-earns scavenging without making the pickups pointless. */
-export const STREAK_METRES_PER_SUN = 250;
+/* ── ONE BAR, ONE MILESTONE, ONE SUN ─────────────────────────────────────────
+ *
+ * Operator, after playing on a phone: "The bar filled up almost instantly on mobile. I came to
+ * understand that the bar at the bottom has no relationship established with the unlocks whatsoever.
+ * So I had an idea. What if your first kilometer was the first bar from left to right of the screen?
+ * Your next milestone would be the next bar. And each time you filled it up, it would give you one
+ * sun that would appear on you, and jump onto you, so that it would be very visually understandable.
+ * And then you would keep collecting suns every time you filled up the bar, so people would
+ * understand that they need to fill up the bar. And the more they do it, the more suns they get."
+ *
+ * That is a better design than what was there and it replaces it outright. What was there paid a sun
+ * every fixed 250 m and drew a repeating band of four ticks, so the bar was always somewhere in the
+ * middle of filling and nothing about it said what filling it was FOR — on a phone, where the bar is
+ * a couple of hundred pixels wide, it read as filling instantly and meaninglessly.
+ *
+ * Now: the bar IS the current milestone, left edge to right edge, and finishing it pays. The first
+ * one is a kilometre; each one after that is longer, so the bar keeps its meaning as a run gets
+ * serious instead of flickering past. The payout grows with the ladder, which is the "the more they
+ * do it, the more suns they get" half — a fifth milestone is worth three suns, not one.
+ *
+ * PER RUN, and that is the point of it rather than an accident: leaving the road puts you back on the
+ * first bar. A twelve-kilometre run is worth far more than twelve one-kilometre runs, which is what
+ * makes staying on the road the thing the game is about.
+ */
+export const MILESTONES_M = [1000, 1500, 2000, 3000, 4000, 6000, 8000, 10000];
+/** Metres added per milestone once the table above runs out — the ladder never ends. */
+export const MILESTONE_STEP_M = 5000;
+
+/** How long milestone `i` (0-based) is, in metres. */
+export function milestoneLength(i) {
+  if (i < MILESTONES_M.length) return MILESTONES_M[i];
+  return MILESTONES_M[MILESTONES_M.length - 1] + (i - MILESTONES_M.length + 1) * MILESTONE_STEP_M;
+}
+
+/* Suns for finishing milestone `i` (0-based).
+ *
+ * Proportional to the bar's LENGTH, times a bonus that grows with how deep into the run you are. The
+ * first shape tried was a flat 1, 1, 2, 2, 3, 3 ... and it was measurably backwards: thirty separate
+ * 1 km runs paid 30 suns while one unbroken 30 km run paid 16, because the bars get longer while the
+ * reward barely moved. That is the opposite of "the more they do it, the more suns they get", and it
+ * would have taught players to break their streak on purpose.
+ *
+ * With the length term AND the escalation, a long run is worth more per kilometre as well as in
+ * total — measured below in tools/bench-economy.mjs, which asserts exactly that comparison so the
+ * curve can never quietly invert again. */
+export function milestoneReward(i) {
+  const km = milestoneLength(i) / 1000;
+  return Math.max(1, Math.round(km * (1 + i * 0.15)));
+}
+
+/** Total metres to have finished milestones 0..i-1. */
+export function milestoneStart(i) {
+  let m = 0;
+  for (let k = 0; k < i; k++) m += milestoneLength(k);
+  return m;
+}
 
 /** Suns for one spare fuel can at a pump, and the most you may carry. */
 export const CAN_PRICE = 8;
@@ -67,8 +119,12 @@ export class Wallet {
     /** Fuel-capacity upgrades bought, PER CAR: { [carId]: levels }. Per car because capacity
      *  belongs to the car (see game/fuel.js's own note) and so does the money spent on it. */
     this.tanks = {};
-    /** Streak metres already paid out, so a run that is re-read every frame mints once. */
-    this._paidM = 0;
+    /** Metres of the CURRENT run, and which milestone bar it is on — see mintStreak. Per run, not
+     *  persisted: leaving the road puts you back on the first bar, which is the whole design. */
+    this._runM = 0;
+    this._milestone = 0;
+    /** The most recent milestone fill, for the HUD to fly a sun for. Popped by takeFill(). */
+    this._lastFill = null;
     /** Spare fuel cans in the boot, bought at a pump — see buyCan. */
     this._cans = 0;
     /** The plane, earned with sea diamonds or the pass — see planeUnlocked. */
@@ -191,13 +247,62 @@ export class Wallet {
    */
   mintStreak(distanceM) {
     const m = Math.max(0, distanceM || 0);
-    if (m < this._paidM) this._paidM = m; // the streak broke, or a new run began
-    const owed = Math.floor((m - this._paidM) / STREAK_METRES_PER_SUN);
-    if (owed <= 0) return 0;
-    this._paidM += owed * STREAK_METRES_PER_SUN;
-    this.addSuns(owed);
-    return owed;
+    /* A BROKEN RUN GOES BACK TO THE FIRST BAR. `distance` drops to 0 when the streak breaks, so a
+     * fall is the signal — no separate event to keep in step, and nothing to get out of step with.
+     * You are never paid twice for the same tarmac and never charged for a run you lost. */
+    if (m < this._runM) {
+      this._runM = 0;
+      this._milestone = 0;
+    }
+    this._runM = m;
+
+    let minted = 0;
+    let filled = 0;
+    // A single frame can cross more than one boundary at high speed, so this is a loop, not an if.
+    for (let guard = 0; guard < 64; guard++) {
+      const need = milestoneStart(this._milestone) + milestoneLength(this._milestone);
+      if (m < need) break;
+      const paid = milestoneReward(this._milestone);
+      minted += paid;
+      filled++;
+      this._lastFill = { index: this._milestone, suns: paid, atM: need };
+      this._milestone++;
+    }
+    if (minted > 0) this.addSuns(minted);
+    return minted;
   }
+
+  /** 0..1 across the CURRENT milestone — what the bar draws. */
+  milestoneProgress(distanceM) {
+    const m = Math.max(0, distanceM || 0);
+    const from = milestoneStart(this._milestone);
+    const len = milestoneLength(this._milestone);
+    return Math.max(0, Math.min(1, (m - from) / len));
+  }
+
+  /** Metres still to go on the current milestone. */
+  milestoneToGo(distanceM) {
+    const m = Math.max(0, distanceM || 0);
+    const need = milestoneStart(this._milestone) + milestoneLength(this._milestone);
+    return Math.max(0, need - m);
+  }
+
+  /** Which bar you are on (0-based), how long it is, and what finishing it pays. */
+  get milestone() {
+    return {
+      index: this._milestone,
+      length: milestoneLength(this._milestone),
+      reward: milestoneReward(this._milestone),
+    };
+  }
+
+  /** Pop the most recent milestone fill, or null. What the HUD flies a sun for. */
+  takeFill() {
+    const f = this._lastFill;
+    this._lastFill = null;
+    return f;
+  }
+
 
   /** @param {number} n suns gained this call (0 is a no-op, never a write). */
   addSuns(n) {

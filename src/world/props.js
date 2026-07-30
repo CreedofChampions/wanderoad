@@ -1623,7 +1623,16 @@ const CAN_SLOT = 90;
  * reach without leaving the tarmac is worth roughly double one you cannot, so the number of
  * cans that are USE is not halved with the count. Measured: 2.61 -> 1.30 cans per km of road
  * (tools/bench-props.mjs prints both the density and the reachability). */
-const CAN_SLOT_P = [0.175, 0.21];
+/* HALVED AGAIN, and this is the third time. Operator, in order: "Cans a bit too abundant -- reduce
+ * by 50%", then "too many cans", now — with a second player's report behind it — "Gas cans are still
+ * too abundant". 0.35/0.42 -> 0.175/0.21 -> 0.085/0.10.
+ *
+ * The reason it kept needing another cut is worth writing down: a can is placed per EDGE SLOT, and
+ * the lane network is dense, so halving the probability only ever halves a large number. And the
+ * pressure that cans relieve went away underneath them — the tank is 2.2x bigger than when this was
+ * tuned (START_CAPACITY_MUL) and spare cans can now be bought at a pump and carried, so the roadside
+ * ones are no longer the only answer to a low needle. They should read as a lucky find. */
+const CAN_SLOT_P = [0.085, 0.1];
 /** Metres above the sampled ground the can's origin sits at. A fixed constant — see the
  *  file comment above for exactly what "floating" does and does not mean. */
 export const CAN_HOVER = 0.55;

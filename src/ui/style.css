@@ -1223,3 +1223,59 @@ canvas {
   35% { transform: scale(1.22); }
   100% { transform: scale(1); }
 }
+
+/* ── A SUN JUMPS ONTO YOU WHEN THE BAR FILLS ─────────────────────────────────
+ * Operator: "each time you filled it up, it would give you one sun that would appear on you, and,
+ * like, jump onto you so that it would be very visually understandable."
+ *
+ * It starts just above the car — which is always the middle-bottom of the screen, because the chase
+ * camera keeps it there — arcs up, and lands on the balance in the top-right corner. Screen space
+ * rather than a 3D object on purpose: one end of that journey is a HUD element and only exists here.
+ *
+ * The arc is two transforms in one keyframe set: `left`/`top` carry it across the screen while
+ * `translateY` adds the hop, so it reads as thrown rather than as slid. */
+#hud .flySun {
+  position: absolute;
+  left: 50%;
+  top: 76%;
+  display: flex;
+  align-items: center;
+  gap: 0.15em;
+  font: 700 1.1rem/1 ui-rounded, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: var(--cream);
+  text-shadow: 0 2px 5px rgba(28, 34, 48, 0.7);
+  pointer-events: none;
+  z-index: 6;
+  animation: flySunArc 1.05s cubic-bezier(0.3, 0, 0.5, 1) forwards;
+}
+#hud .flySun .disc {
+  width: 1.5em;
+  height: 1.5em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 42% 36%, #fff6d2 0%, #ffdc6a 34%, #f5a63a 72%, #d9822b 100%);
+  box-shadow:
+    0 0 0.7em rgba(255, 214, 110, 1),
+    0 0 2em rgba(255, 180, 60, 0.7);
+}
+@keyframes flySunArc {
+  0% {
+    left: 50%;
+    top: 76%;
+    transform: translate(-50%, 0) scale(0.5);
+    opacity: 0;
+  }
+  14% {
+    transform: translate(-50%, -1.2em) scale(1.25);
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    /* the balance lives at right: clamp(1rem, 4vw, 3rem), top: clamp(0.9rem, 3vw, 1.6rem) */
+    left: calc(100% - clamp(3.4rem, 8vw, 5.4rem));
+    top: clamp(0.9rem, 3vw, 1.6rem);
+    transform: translate(-50%, 0) scale(0.7);
+    opacity: 0;
+  }
+}

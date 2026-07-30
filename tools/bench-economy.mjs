@@ -20,7 +20,7 @@ globalThis.localStorage = {
   removeItem: (k) => mem.delete(k),
 };
 
-const { Wallet, STREAK_METRES_PER_SUN, BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } = await import('../src/game/wallet.js');
+const { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX, milestoneLength, milestoneReward } = await import('../src/game/wallet.js');
 const { FLEET, FLEET_BY_ID, priceOf, isUnlocked } = await import('../src/game/garage.js');
 const { Fuel, TANK_PRICE_BASE, TANK_PRICE_STEP } = await import('../src/game/fuel.js');
 const { stationsInBox, DEAL_SHARE } = await import('../src/world/props.js');
@@ -33,30 +33,52 @@ const check = (ok, label, got, want) => {
 
 console.log('\nWANDEROAD — SUNS ARE THE WHOLE ECONOMY\n' + '-'.repeat(84));
 
-/* ── 1. a streak mints suns, and a broken streak is not charged for ───────── */
-console.log('\n── streaks pay ────────────────────────────────────────────────────────────');
+/* ── 1. a filled bar pays, and a broken run starts again from the first bar ── */
+console.log('');
+console.log('-- one bar, one milestone, one payout --');
 {
   const w = new Wallet({ storageKey: 'bench.econ.streak' });
   check(w.suns === 0, 'a new wallet is empty', w.suns, '0');
+  check(w.milestone.index === 0, 'and starts on the first bar', w.milestone.index, '0');
+  console.log(`       the ladder: ${[0, 1, 2, 3, 4, 5].map((i) => `${(milestoneLength(i) / 1000)}km->${milestoneReward(i)}`).join('  ')}`);
 
-  // a run, read every frame the way main.js reads it
+  // a run read every 5 m, the way main.js reads it
   let minted = 0;
-  for (let m = 0; m <= 1000; m += 5) minted += w.mintStreak(m);
-  console.log(`       1000 m of streak, read every 5 m: ${minted} suns (one per ${STREAK_METRES_PER_SUN} m)`);
-  check(minted === Math.floor(1000 / STREAK_METRES_PER_SUN), 'a kilometre pays the rate exactly, once', minted, String(Math.floor(1000 / STREAK_METRES_PER_SUN)));
-  check(w.suns === minted, 'and the suns are in the wallet', w.suns, String(minted));
+  for (let m = 0; m <= milestoneLength(0); m += 5) minted += w.mintStreak(m);
+  check(minted === milestoneReward(0), 'finishing the first bar pays its own reward', minted, String(milestoneReward(0)));
+  check(w.milestone.index === 1, 'and moves you onto the second bar', w.milestone.index, '1');
+  check(w.milestone.length > milestoneLength(0), 'which is longer than the first', `${w.milestone.length} m`, `> ${milestoneLength(0)} m`);
 
-  // reading the SAME distance again must not pay again
+  const fill = w.takeFill();
+  check(!!fill && fill.suns === milestoneReward(0), 'and records a fill for the HUD to throw a sun for', fill ? fill.suns : 'none', String(milestoneReward(0)));
+  check(w.takeFill() === null, 'popped exactly once, so the sun cannot double up', 'null', 'null');
+
+  // reading the same distance again must not pay again
   const before = w.suns;
-  for (let i = 0; i < 100; i++) w.mintStreak(1000);
+  for (let i = 0; i < 100; i++) w.mintStreak(milestoneLength(0));
   check(w.suns === before, 'reading the same run again pays nothing', w.suns, String(before));
 
-  // the streak breaks: distance goes to 0, then a new run starts paying from its own metre 1
+  // the run breaks: back to the first bar
   w.mintStreak(0);
-  let second = 0;
-  for (let m = 0; m <= 500; m += 5) second += w.mintStreak(m);
-  console.log(`       streak broke, then 500 m more: ${second} suns`);
-  check(second === Math.floor(500 / STREAK_METRES_PER_SUN), 'a new run pays from its own first metre', second, String(Math.floor(500 / STREAK_METRES_PER_SUN)));
+  check(w.milestone.index === 0, 'leaving the road puts you back on the FIRST bar', w.milestone.index, '0');
+  check(w.milestoneProgress(0) === 0, 'with an empty bar', w.milestoneProgress(0), '0');
+
+  /* AND THE CURVE MUST NOT INVERT. The first shape tried paid a flat 1, 1, 2, 2, 3 ... while the bars
+   * got longer, which measured as thirty separate 1 km runs paying 30 suns against one unbroken 30 km
+   * run paying 16 — the exact opposite of "the more they do it, the more suns they get", and it would
+   * have taught players to break their streak on purpose. This check is here so that can never come
+   * back unnoticed. */
+  const longRun = new Wallet({ storageKey: 'bench.econ.long' });
+  let longPay = 0;
+  for (let m = 0; m <= 25000; m += 10) longPay += longRun.mintStreak(m);
+  const shortRuns = new Wallet({ storageKey: 'bench.econ.short' });
+  let shortPay = 0;
+  for (let r = 0; r < 25; r++) {
+    for (let m = 0; m <= 1000; m += 10) shortPay += shortRuns.mintStreak(m);
+    shortRuns.mintStreak(0);
+  }
+  console.log(`       one unbroken 25 km run pays ${longPay} suns; twenty-five separate 1 km runs pay ${shortPay}`);
+  check(longPay > shortPay, 'ONE LONG RUN BEATS THE SAME DISTANCE IN SHORT ONES', `${longPay} vs ${shortPay}`, 'long wins');
 }
 
 /* ── 2. cars are bought, and stay bought ──────────────────────────────────── */
