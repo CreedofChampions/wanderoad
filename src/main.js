@@ -27,6 +27,7 @@ import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
 import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
+import { resumeFor, saveSession, spotIsSafe, AUTOSAVE_S } from './game/session.js';
 import {
   nearestStation as nearestStationWorld,
   showroomSpots,
@@ -140,8 +141,21 @@ const OFFLINE = params.has('offline');
  * without a second build. They must be applied BEFORE anything reads the tuning tables. */
 const CFG = configFromUrl();
 if (CFG.cheat) setCheat(true);
-/* The car IS the feel. One choice, not two — see src/game/garage.js. */
-const CAR = carFromUrl();
+/* WHERE YOU WERE, AND WHAT YOU WERE IN. Operator: "we need to make it so people can continue were
+ * they left off."
+ *
+ * Read here, at module scope, because the CAR it names has to be chosen before `applyCarFeel` runs
+ * and before the Vehicle is constructed — a car swapped in after the solver exists would be driving
+ * on the previous car's tuning. Returns null for a fresh start, a different seed, or `?fresh=1`.
+ * See game/session.js for what is and is not in the record. */
+const RESUME = resumeFor(SEED);
+
+/* The car IS the feel. One choice, not two — see src/game/garage.js.
+ *
+ * An explicit `?car=` in the URL still wins: someone who asked for a specific car meant it, and the
+ * diagnostics rely on that. Otherwise a resume puts you back in what you were driving. */
+const CAR =
+  (RESUME && !params.get('car') && FLEET_BY_ID[RESUME.car] ? FLEET_BY_ID[RESUME.car] : null) || carFromUrl();
 const FEEL = applyCarFeel(CAR);
 const LAND = applyTerrain(CFG.terrain);
 setBiomeBias(terrainBias(CFG.terrain));
@@ -285,7 +299,17 @@ async function boot() {
   setStat('unloading the car…', 0.52);
   const me = identity();
   const car = new Vehicle({ tier: CAR.tier, terrain: local, preset: FEEL.assist });
-  car.placeAt(spawn.x, spawn.z, spawn.heading);
+  /* BACK WHERE YOU LEFT IT, if the spot is still somewhere a car can be.
+   *
+   * A saved position can outlive what made it valid — a build that moved the water table, or a
+   * player who quit while their car was somewhere the terrain no longer agrees with. Dropping
+   * someone inside a hill or into the sea is a worse welcome than the spawn point, so the record is
+   * checked against the live ground and water before it is trusted, and the spawn is the fallback.
+   * `isDryAt` is the same test findSpawn uses on its own candidates. */
+  const resumeSpot =
+    RESUME && spotIsSafe(RESUME, (x, z) => local.height(x, z), (x, z) => !isDryAt(x, z, SEED)) ? RESUME : null;
+  if (resumeSpot) car.placeAt(resumeSpot.x, resumeSpot.z, resumeSpot.yaw);
+  else car.placeAt(spawn.x, spawn.z, spawn.heading);
   /* Real CC0 bodywork if it loads, the hand-built box if it does not. The fallback matters:
    * a network hiccup on a 180 KB GLB must not cost the player their car. */
   const carKey = CAR.id;
@@ -409,6 +433,14 @@ async function boot() {
      * game/fuel.js's capacityLevel. */
     wallet,
   });
+
+  /* THE TANK YOU PARKED WITH. Without this a resume hands back a full tank, which quietly undoes the
+   * fuel economy — park on fumes outside a petrol station, reload, and you have been given a free
+   * refill. Clamped to the tank's real capacity because that capacity is per-car and per-upgrade, and
+   * the car you resume in may not be the one the number was written for. */
+  if (RESUME && Number.isFinite(RESUME.fuel) && RESUME.fuel > 0) {
+    fuel.seconds = Math.min(RESUME.fuel, fuel.capacity);
+  }
   /* The world's own answer to "where is the nearest station", on a timer. Kept small and cached
    * because it is asked every frame by findStation above: a 900 m radius is far more than the 140 m
    * the forgiveness needs and the 26 m refuelling needs, and re-running it more than about twice a
@@ -633,6 +665,44 @@ async function boot() {
    * the pad's bindings somewhere: it is solved by this line naming the device in your hands.
    *
    * Retitled the moment a pad is picked up or put down (see the frame loop's `padWas` latch). */
+  /* ── SAVING WHERE YOU ARE ────────────────────────────────────────────────
+   * Operator: "we need to make it so people can continue were they left off."
+   *
+   * Only the things no other module already persists — see game/session.js. The wallet, the streak,
+   * the fuel upgrades and the achievements all keep saving themselves, and duplicating any of them
+   * here would create a second opinion about the same number.
+   *
+   * The FUEL LEVEL is saved because arriving back with a full tank quietly undoes the fuel economy:
+   * a player who parked on fumes next to a petrol station would reload with a free refill.
+   *
+   * Never saved while ON FOOT, FLYING or BOATING. All three are modes you are somewhere specific
+   * for, and restoring into one of them from a cold start is how you resume 400 m up with no engine
+   * note and no idea why. The car's own parked position is the honest thing to come back to. */
+  const snapshot = () => ({
+    seed: SEED,
+    x: car.x,
+    z: car.z,
+    yaw: car.yaw,
+    car: carKeyLive,
+    fuel: fuel?.seconds,
+    at: Date.now(),
+  });
+  const persist = () => {
+    if (walker.active || plane.active || boatMode.active) return;
+    if (!Number.isFinite(car.x) || !Number.isFinite(car.z)) return;
+    saveSession(snapshot());
+  };
+
+  /* `pagehide` and a hidden `visibilitychange` are the two that actually fire when a tab is closed,
+   * backgrounded or navigated away from, on desktop AND on mobile. `unload` is unreliable and is
+   * ignored outright on iOS, which is exactly the case — someone closing the game on a phone —
+   * this feature exists for. */
+  addEventListener('pagehide', persist);
+  addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') persist();
+  });
+  let saveClock = 0;
+
   const openHint = document.createElement('div');
   openHint.id = 'openMenu';
   openHint.textContent = 'ESC — garage';
@@ -1271,6 +1341,15 @@ async function boot() {
       } else {
         hallTold = null;
       }
+    }
+
+    /* The autosave. Slow on purpose — this is insurance against a crash or a flat battery, not the
+     * mechanism; the real save happens on the way out. Six seconds costs nothing and bounds the
+     * worst case to a few hundred metres of driving. */
+    saveClock += dt;
+    if (saveClock >= AUTOSAVE_S) {
+      saveClock = 0;
+      persist();
     }
 
     const dealerNow = atDealer();
