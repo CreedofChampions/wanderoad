@@ -38,6 +38,18 @@ const KEYMAP = {
    * one has to be an act you perform AT the car, not a menu row. E was the obvious letter and is
    * already shiftUp; Enter is here because it is what anyone tries when a prompt says "confirm". */
   buyHere: ['KeyX', 'Enter'],
+  /* GET OUT OF THE CAR / GET BACK IN. Operator: "Walk-in showrooms seperate to gas stations (walkable
+   * mode)". One key for both directions, because it is one idea, and a separate "get in" key would be
+   * a control that does nothing 99% of the time.
+   *
+   * IT HAS NO PAD BUTTON OF ITS OWN, and that is a decision rather than an omission: all sixteen
+   * Standard Gamepad buttons are already bound, and the two candidates were both worse. Y is the
+   * panic control (back on the road) and must never do anything else; taking B would cost reverse.
+   * So on a pad this shares X with `buyHere`, which is already the game's one CONTEXTUAL verb —
+   * outside a showroom it means "get out", inside it means "buy the car you are standing at", and
+   * beside your parked car it means "get back in". One button, one idea: interact with what is in
+   * front of you. main.js routes it; see the walk-mode block there. */
+  onFoot: ['KeyZ'],
   /* P for PLANE — take off from where you are, or land and get back in the car. See game/plane.js. */
   fly: ['KeyP'],
   /* The pitch axis, which only the plane reads. I/K rather than the arrows, because the arrows are
@@ -138,6 +150,7 @@ export const PAD_HELP = [
   ['radio', 'D-pad left', 'radio station'],
   ['useCan', 'D-pad up', 'pour in a spare fuel can'],
   ['horn', 'D-pad down', 'horn'],
+  ['onFoot', 'X', 'at a showroom: get out and walk in - X again to get back in'],
   ['fly', 'L3', 'fly, once you have a plane'],
 ];
 

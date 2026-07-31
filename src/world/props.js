@@ -1320,6 +1320,198 @@ function _airfieldForCell(gi, gj, seed, probe = null) {
 }
 
 /** Every airfield whose centre falls in this box. Same shape as stationsInBox. */
+/* ── THE WALK-IN SHOWROOM ────────────────────────────────────────
+ *
+ * Operator: "Walk-in showrooms seperate to gas stations (walkable mode)".
+ *
+ * A dealership is currently a petrol station with a flag — same apron, same canopy, same pumps, with
+ * a row of cars parked on the forecourt. That was the cheap way to get cars for sale into the world
+ * and it worked, but it means a showroom is always something you happen upon while refuelling, and
+ * the whole fleet has to fit on a 19 m apron between the pumps and the posts.
+ *
+ * This is the other thing: a BUILDING, on its own, with no pumps and no canopy. You park outside,
+ * get out, and walk in. That changes what a showroom can be — it can hold the whole fleet, at proper
+ * spacing, indoors, and it gives the game its first reason to be out of the car at all.
+ *
+ * PLACEMENT, and the trade-off is the opposite of the airfield's. An airfield is deliberately hard to
+ * find and 500 m from any road (the operator asked for exactly that, as a mystery). A showroom is a
+ * SHOP: it has to be beside a road, visible from it, and reachable without going off-road, or nobody
+ * will ever walk into one. So:
+ *
+ *   1. One candidate per SHOWROOM_CELL, so they are evenly spread rather than clustered — the same
+ *      one-per-cell discipline every other placed thing here uses.
+ *   2. Set back SHOWROOM_SETBACK from the nearest road, which is close enough to see and to pull off
+ *      into, and far enough that the building is not standing in the carriageway.
+ *   3. FLAT enough for a floor slab. A building is not a runway, so the test is a box rather than a
+ *      strip, and the tolerance is tighter over a much smaller area.
+ *   4. Dry, and not on top of a petrol station — the point of it is that it is somewhere else.
+ *
+ * As everywhere else in this file, a candidate that fails is simply not a showroom. There is no
+ * relocation search, so two clients cannot disagree about where one is.
+ */
+/** One candidate showroom per this many metres of plane, each way. Rarer than a petrol station
+ *  (which is per-road-edge) and commoner than an airfield, because it is a destination you should
+ *  find within a normal drive rather than an event. */
+export const SHOWROOM_CELL = 7000; // measured: 4500 gave 55 halls in a 36 km box, one per 23 km2,
+                                   // which is a roadside furniture rather than a destination. 7000
+                                   // gives roughly one per 49 km2 - findable in a normal drive,
+                                   // still worth driving to. `node tools/diag-halls.mjs`
+/** Metres back from the road's centreline to the front of the building. */
+export const SHOWROOM_SETBACK = 46;
+/** Half the building footprint, metres: a 34 x 22 m hall, which holds the fleet with room to walk. */
+export const SHOWROOM_HALF_W = 17;
+export const SHOWROOM_HALF_D = 11;
+/** Metres of height variation tolerated across the slab. A floor is flat or it is not a floor. */
+export const SHOWROOM_FLAT = 2.6;
+/** How far a petrol station has to be. A showroom next door to a forecourt dealership is the same
+ *  building twice, which is exactly what this feature exists to stop being. */
+export const SHOWROOM_MIN_STATION = 400;
+/** Candidates tried per cell before it gives up — same reasoning as AIRFIELD_TRIES. */
+const SHOWROOM_TRIES = 6;
+const SALT_SHOWROOM = 0x5b0a;
+
+/**
+ * The showroom for one cell, or null. Pure in (gi, gj, seed).
+ *
+ * @param {number} gi @param {number} gj @param {number} seed
+ * @param {{height:(x:number,z:number)=>number, water?:Function}} [probe] without one, the flatness
+ *        and dryness tests are skipped and the candidate comes back unchecked — which is what lets a
+ *        diagnostic ask "where would these be" without a Terrain.
+ */
+/* MEMOISED, and this is not an optimisation — it is the fix for a measured regression.
+ *
+ * Every streamed tile asks for the showrooms in its box, and each candidate calls nearestRoadPoint,
+ * which builds the road network over a 5.2 km box. Six tries a cell, several cells a tile, every
+ * tile: the browser suite's C4 check went from a 45+ km/h run-up to 31 km/h on the same nine seconds
+ * of throttle, because the frame loop was spending its time in here and the fixed-step integrator
+ * simulated less of the wall clock. The same shape of bug as the 11.8 fps harbours regression, and
+ * caught the same way — by a check that measures the GAME rather than this function.
+ *
+ * The result is pure in (gi, gj, seed) once a probe has been applied, so it caches exactly. Keyed
+ * with the probe's presence because a probe-less answer is the unchecked candidate. */
+const _hallCache = new Map();
+export function showroomForCell(gi, gj, seed, probe = null) {
+  const ck = `${gi},${gj},${seed},${probe ? 1 : 0}`;
+  if (_hallCache.has(ck)) return _hallCache.get(ck);
+  const out = _showroomForCell(gi, gj, seed, probe);
+  if (_hallCache.size > 20000) _hallCache.clear();
+  _hallCache.set(ck, out);
+  return out;
+}
+
+function _showroomForCell(gi, gj, seed, probe = null) {
+  for (let k = 0; k < SHOWROOM_TRIES; k++) {
+    // Same 0..1-from-a-hash idiom the rest of this file uses (`hash3i(...) * F32`).
+    const h = hash3i(gi * 7919 + k, gj * 104729, SALT_SHOWROOM, seed);
+    const h2 = hash3i(gj * 7919 - k, gi * 104729, SALT_SHOWROOM ^ 0x2b, seed);
+    const cx = (gi + 0.12 + 0.76 * (h * F32)) * SHOWROOM_CELL;
+    const cz = (gj + 0.12 + 0.76 * (h2 * F32)) * SHOWROOM_CELL;
+    const rp = nearestRoadPoint(cx, cz, seed);
+    if (!rp) continue;
+    /* Set back along the road's NORMAL, on the side the hash picks. Using the normal rather than a
+     * free direction is what puts the frontage square to the road instead of at a random angle. */
+    const side = (h >>> 13) & 1 ? 1 : -1;
+    const nx = -rp.tz;
+    const nz = rp.tx;
+    const x = rp.x + nx * side * SHOWROOM_SETBACK;
+    const z = rp.z + nz * side * SHOWROOM_SETBACK;
+    // Facing the road: the building's local +z points back at the carriageway.
+    const yaw = Math.atan2(-nx * side, -nz * side);
+
+    if (probe && typeof probe.height === 'function') {
+      let lo = Infinity;
+      let hi = -Infinity;
+      let wet = false;
+      for (let sx = -1; sx <= 1; sx++) {
+        for (let sz = -1; sz <= 1; sz++) {
+          const px = x + sx * SHOWROOM_HALF_W * 0.9;
+          const pz = z + sz * SHOWROOM_HALF_D * 0.9;
+          const y = probe.height(px, pz);
+          if (!Number.isFinite(y)) { wet = true; break; }
+          if (y < lo) lo = y;
+          if (y > hi) hi = y;
+          if (typeof probe.wet === 'function' && probe.wet(px, pz)) { wet = true; break; }
+        }
+        if (wet) break;
+      }
+      if (wet || hi - lo > SHOWROOM_FLAT) continue;
+    }
+    // and not beside a forecourt dealership, which would defeat the whole point
+    const st = nearestStation(x, z, seed, SHOWROOM_MIN_STATION);
+    if (st && st.dist < SHOWROOM_MIN_STATION) continue;
+    return { x, z, yaw, key: `hall:${gi},${gj},${k}`, roadX: rp.x, roadZ: rp.z };
+  }
+  return null;
+}
+
+/** Every walk-in showroom whose centre lies in the box. */
+export function showroomsInBox(x0, z0, x1, z1, seed, probe = null) {
+  const out = [];
+  const gi0 = Math.floor((x0 - SHOWROOM_CELL) / SHOWROOM_CELL);
+  const gi1 = Math.floor((x1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  const gj0 = Math.floor((z0 - SHOWROOM_CELL) / SHOWROOM_CELL);
+  const gj1 = Math.floor((z1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) {
+      const r = showroomForCell(gi, gj, seed, probe);
+      if (!r) continue;
+      if (r.x < x0 || r.x >= x1 || r.z < z0 || r.z >= z1) continue;
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+/** Nearest walk-in showroom to a point, or null. */
+export function nearestShowroom(x, z, seed, radius = 9000, probe = null) {
+  const list = showroomsInBox(x - radius, z - radius, x + radius, z + radius, seed, probe);
+  let best = null;
+  let bd = Infinity;
+  for (const r of list) {
+    const d = Math.hypot(r.x - x, r.z - z);
+    if (d < bd) {
+      bd = d;
+      best = r;
+    }
+  }
+  return best ? { ...best, dist: bd } : null;
+}
+
+/**
+ * Where the cars stand INSIDE the hall, in its local frame, and where the door is.
+ *
+ * Eight bays in two rows of four, which is the whole fleet with a 6 m aisle down the middle to walk
+ * along. Unlike the forecourt's SHOWROOM_SLOTS this does not have to dodge pumps and canopy posts,
+ * which is exactly why the building exists — the constraint on the apron was the reason only four
+ * cars could ever be on show there.
+ */
+export const HALL_BAYS = (() => {
+  const out = [];
+  for (let row = 0; row < 2; row++)
+    for (let i = 0; i < 4; i++)
+      out.push({ dx: -12.6 + i * 8.4, dz: row === 0 ? -5.6 : 5.6, faceIn: row === 0 ? 1 : -1 });
+  return out;
+})();
+
+/** The doorway, in the hall's local frame: on the road-facing wall, in the middle. */
+export const HALL_DOOR = { dx: 0, dz: SHOWROOM_HALF_D, w: 5.2 };
+
+/** How close you have to stand to a bay for it to be the car you are looking at, metres. */
+export const HALL_REACH = 3.4;
+
+/** Where a hall's display cars actually are, in world space. */
+export function hallSpots(hall) {
+  if (!hall) return [];
+  const ca = Math.cos(hall.yaw);
+  const sa = Math.sin(hall.yaw);
+  return HALL_BAYS.map((b, i) => ({
+    slot: i,
+    x: hall.x + b.dx * ca - b.dz * sa,
+    z: hall.z + b.dx * sa + b.dz * ca,
+    yaw: hall.yaw + (b.faceIn > 0 ? 0 : Math.PI),
+  }));
+}
+
 export function airfieldsInBox(x0, z0, x1, z1, seed, probe = null) {
   const out = [];
   const gi0 = Math.floor((x0 - AIRFIELD_CELL) / AIRFIELD_CELL);

@@ -27,7 +27,15 @@ import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
 import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
-import { nearestStation as nearestStationWorld, showroomSpots, SHOWROOM_REACH } from './world/props.js';
+import {
+  nearestStation as nearestStationWorld,
+  showroomSpots,
+  SHOWROOM_REACH,
+  hallSpots,
+  HALL_REACH,
+  SHOWROOM_HALF_W,
+} from './world/props.js';
+import { Walker, EYE, ENTER_R, LEASH } from './game/walk.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
@@ -440,6 +448,14 @@ async function boot() {
   /* Which display car the forecourt prompt last named, so nosing along the row says each car once
    * instead of every frame. Cleared the moment you are not beside one. */
   let showroomTold = null;
+  /* ON FOOT. Operator: "Walk-in showrooms seperate to gas stations (walkable mode)."
+   *
+   * The walker owns nothing the car owns — see game/walk.js for why it is kinematic rather than a
+   * second physics body. main.js only decides WHEN you may be out of the car, which is: beside a
+   * walk-in showroom, and not while flying, boating, auto-driving or in the Garage. */
+  const walker = new Walker();
+  let hallTold = null;
+  let hallWas = false;
   /* THE CONTROLLER INTRODUCES ITSELF, ONCE.
    *
    * Operator: "KNOW how to do that and get hints at tirght times". A pad that silently starts working
@@ -493,6 +509,29 @@ async function boot() {
   let harbourWas = false;
   let airfieldWas = false; // latch for the airfield line — see the frame loop
   const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
+
+  /**
+   * The nearest walk-in showroom THE TILER HAS ACTUALLY BUILT, with its distance.
+   *
+   * Reading `props.halls` rather than re-deriving from the seed is not fussiness — it is the exact
+   * shape of the station-forgiveness bug, where a pure world function said a station was here while
+   * the renderer's own list said it was not, and the rule that trusted the wrong one looked broken
+   * for a week. If it is not built, you cannot walk into it, so it does not count.
+   */
+  const nearestBuiltHall = (x, z) => {
+    const list = props && props.halls ? props.halls : null;
+    if (!list || !list.length) return null;
+    let best = null;
+    let bd = Infinity;
+    for (const h of list) {
+      const d = Math.hypot(h.x - x, h.z - z);
+      if (d < bd) {
+        bd = d;
+        best = h;
+      }
+    }
+    return best ? { ...best, dist: bd } : null;
+  };
   const fuelGauge = new FuelGauge(hud.root);
 
   /* Suns along the road, gems on open water — src/render/loot.js. `wallet`
@@ -891,6 +930,36 @@ async function boot() {
         );
     }
 
+    /* ── WALK IN, WALK OUT ───────────────────────────────────────────────────
+     * The nearest hall the TILER ACTUALLY BUILT, not a re-derivation from the seed. That distinction
+     * is the whole of the station-forgiveness bug: a pure world function said there was a station
+     * here while the renderer's list said there was not, and the rule that read the wrong one looked
+     * broken for a week. `props.halls` is what exists. */
+    const hallNow = nearestBuiltHall(car.x, car.z);
+    const atHall = !!hallNow && hallNow.dist < SHOWROOM_HALF_W + 26;
+    if (atHall !== hallWas) {
+      hallWas = atHall;
+      if (atHall && !walker.active)
+        hud.say(`a showroom — park up and press ${input.label('onFoot') || 'X'} to walk in`, 4.0);
+    }
+    if ((input.tapped('onFoot') || (input.tapped('buyHere') && !walker.active && atHall && !atDealer())) &&
+        !plane.active && !boatMode.active && !auto.on && !menu.open) {
+      if (walker.active) {
+        // Back in the car, but only if you are standing beside it.
+        if (walker.toCar <= ENTER_R) {
+          walker.leave();
+          hud.say('back in the car', 2.0);
+        } else {
+          hud.say(`your car is ${Math.round(walker.toCar)} m away`, 2.6);
+        }
+      } else if (atHall && Math.abs(car.speed || 0) < 3) {
+        walker.enter(car, (x, z) => car.terrain.height(x, z));
+        hud.say(`out of the car — walk in, ${input.label('onFoot') || 'X'} to get back in`, 4.2);
+      } else if (atHall) {
+        hud.say('stop the car first', 2.2);
+      }
+    }
+
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
     if (input.tapped('reverse')) car.reverse = !car.reverse;
     if (input.tapped('nextCar')) {
@@ -982,7 +1051,9 @@ async function boot() {
      * own header for the whole state machine, including why `surf` is sampled here rather
      * than reused from a stale value. */
     const wasBoating = boatMode.active;
-    if (!menu.open && !boatMode.active) car.update(dt, gated);
+    // The car is PARKED while you are out of it. A car that rolls away while you are inside a
+    // showroom is a bug wearing a feature's clothes.
+    if (!menu.open && !boatMode.active && !walker.active) car.update(dt, gated);
     if (!menu.open) boatMode.update(dt, car, car.terrain.surface(car.x, car.z), gated);
     if (!wasBoating && boatMode.active) audio.thump(0.4); // the splash — boat.js's own "Enter" note
 
@@ -1126,6 +1197,72 @@ async function boot() {
     }
     earnedSeeded = true;
 
+    /* THE WALK STEP. Kinematic, over the same ground and against the same solids the car uses — see
+     * game/walk.js. The car is frozen while you are out of it: it is parked, and a parked car that
+     * rolls away while you are looking at a showroom is a bug, not a feature. */
+    if (walker.active) {
+      walker.update(dt, cmd, (x, z) => car.terrain.height(x, z), solids);
+      /* A LEASH, because the world outside a showroom is 40 km wide and walking across it at 2.6 m/s
+       * is not a game. Past it, the game simply walks you back — no failure state, no message that
+       * blames you. */
+      if (walker.toCar > LEASH) {
+        walker.x = walker.carX;
+        walker.z = walker.carZ;
+        walker.y = car.terrain.height(walker.x, walker.z);
+        hud.say('too far from the car — walked you back', 3.0);
+      }
+
+      /* BUYING INDOORS. The same act as the forecourt, at the hall's own bays: stand at a car, it
+       * names itself, press the button. `hallSpots` is the one source of where those cars are — the
+       * renderer draws from the same table, so the plaque you are reading and the car you buy cannot
+       * be different cars. */
+      const hall = hallNow && hallNow.dist < 90 ? hallNow : null;
+      let near = null;
+      if (hall) {
+        const spots = hallSpots(hall);
+        for (const sp of spots) {
+          const d = Math.hypot(walker.x - sp.x, walker.z - sp.z);
+          if (d <= HALL_REACH && (!near || d < near.d)) near = { d, spec: FLEET[sp.slot] };
+        }
+      }
+      if (near && near.spec) {
+        const spec = near.spec;
+        const mine = isUnlocked(spec, 0, wallet);
+        const price = priceOf(spec);
+        const rule = unlockRule(spec);
+        if (hallTold !== spec.id) {
+          hallTold = spec.id;
+          const key = input.label('buyHere');
+          hud.say(
+            mine
+              ? `${spec.label} — yours. ${key} to make it your car`
+              : rule.how === 'earn'
+                ? `${spec.label} — opens at ${rule.at} suns collected. You have ${wallet.sunsEarned}`
+                : `${spec.label} — ${price} suns. You have ${wallet.suns}. ${key} to buy`,
+            4.0
+          );
+        }
+        if (input.tapped('buyHere')) {
+          if (mine) {
+            hud.say(`${spec.label} it is`, 2.4);
+            menu.setCurrent({ car: spec.id });
+            swapCar(spec.id);
+          } else if (rule.how === 'earn') {
+            hud.say(`${spec.label} is not for sale — collect ${rule.at} suns`, 3.2);
+          } else if (wallet.buyCar(spec.id, price)) {
+            hud.say(`${spec.label} is yours — ${wallet.suns} suns left`, 3.4);
+            audio.pickup();
+            menu.setCurrent({ car: spec.id });
+            swapCar(spec.id);
+          } else {
+            hud.say(`${spec.label} costs ${price} suns — you have ${wallet.suns}`, 3.2);
+          }
+        }
+      } else {
+        hallTold = null;
+      }
+    }
+
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {
       dealerWas = dealerNow;
@@ -1258,7 +1395,39 @@ async function boot() {
         cine.skip();
       cine.update(dt, car);
     }
-    if (!cine.active) sNorm = chase.update(car, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });
+    /* THE CAMERA ON FOOT.
+     *
+     * The chase camera takes anything with x/z/yaw/speed, so walking gets the SAME camera the car
+     * uses rather than a second one to tune — it just follows a different thing. That is worth more
+     * than a bespoke first-person view: the framing, the terrain-aware height and the easing are
+     * already right, and a mode that looks like the rest of the game is the point.
+     *
+     * `EYE` is added to the target height so the camera is looking at a head rather than at a pair
+     * of shoes, and the drift flag is off because a walker has no drift to show. */
+    if (!cine.active) {
+      const subject = walker.active
+        ? { x: walker.x, z: walker.z, yaw: walker.yaw, speed: walker.speed, terrain: car.terrain }
+        : car;
+      if (walker.active) {
+        /* ON FOOT THE CAMERA IS FIRST-PERSON, and that is not a style choice — it is the only view
+         * that works indoors. The chase rig sits 8 m behind its subject and knows nothing about
+         * walls, so the moment you step into a showroom it ends up outside the building or buried in
+         * the floor slab. Photographed: the first interior shot was a screenful of terrain from a
+         * camera under the ground.
+         *
+         * A head is also the right place to look at a car from. The chase camera stays exactly as it
+         * is for driving; this branch simply does not use it. */
+        camera.position.set(walker.x, walker.y + EYE, walker.z);
+        camera.lookAt(
+          walker.x + Math.sin(walker.yaw) * 10,
+          walker.y + EYE - 0.8,
+          walker.z + Math.cos(walker.yaw) * 10
+        );
+        sNorm = 0;
+      } else {
+        sNorm = chase.update(subject, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });
+      }
+    }
 
     /* shared uniforms */
     U.uTime.value = now / 1000;
@@ -1415,6 +1584,9 @@ async function boot() {
      * frame, which is birds.stats.drawn — not a flag, and not the number that exist. */
     birds,
     fuel,
+    /* The walker, for the same reason `wallet` and `props` are here: the only honest answer to "am I
+     * out of the car" is the object the frame loop is actually stepping. See tools/diag-walkin.mjs. */
+    walker,
     /* Here so a browser check can read the off-road dust cue's own live counts (`spray.count`,
      * `spray.spawned`) at a real coordinate instead of trying to infer an emitter's existence
      * from a scene census — which is exactly how the last audit had to establish it did not

@@ -35,6 +35,7 @@ import {
   warmOne,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
   SHOWROOM_SLOTS,
+  showroomsInBox, hallSpots, HALL_BAYS, HALL_DOOR, SHOWROOM_HALF_W, SHOWROOM_HALF_D,
 } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
 // The same freeboard the drawn road ribbon floats at, imported rather than copied: the access
@@ -1368,7 +1369,7 @@ export const SHOWROOM_CARS = [
  * @param {number} len the car's real length in metres
  * @param {number[]} colour linear paint colour
  */
-function showroomCar(M, px, pz, len, colour) {
+function showroomCar(M, px, pz, len, colour, face = 1) {
   /* pbox TAKES HALF-EXTENTS, and getting that wrong is visible from space: the first version passed
    * a full 1.82 m width into the half-width slot and produced four 3.6 m-wide slabs standing on the
    * forecourt like shipping containers. Every number below is a HALF.
@@ -1386,18 +1387,101 @@ function showroomCar(M, px, pz, len, colour) {
   /* The cabin sits ON the body rather than overlapping it, and the glass band is BETWEEN the two —
    * body, glass, roof. Drawn as one flat lozenge the first time, the row photographed as four trays
    * on plinths; the horizontal break at window height is the whole of what makes a box a car. */
-  pbox(M, px, 0.94, pz - len * 0.06, HW - 0.07, 0.11, hl * 0.5, 0, GLASSC, MAT.GLASS);
-  pbox(M, px, 1.15, pz - len * 0.06, HW - 0.12, 0.11, hl * 0.46, 0, colour, MAT.MATTE);
+  pbox(M, px, 0.94, pz - face * len * 0.06, HW - 0.07, 0.11, hl * 0.5, 0, GLASSC, MAT.GLASS);
+  pbox(M, px, 1.15, pz - face * len * 0.06, HW - 0.12, 0.11, hl * 0.46, 0, colour, MAT.MATTE);
   for (const wx of [-1, 1])
     for (const wz of [-1, 1]) {
       const cx = px + wx * (HW - 0.06);
       const cz = pz + wz * hl * 0.62;
       pcyl(M, [cx - 0.1, 0.3, cz], [cx + 0.1, 0.3, cz], 0.3, 0.3, 8, TYRE, MAT.MATTE, false, false);
     }
-  // the plaque, on a short post at the front bumper, in the dealership's own teal
-  pcyl(M, [px, 0, pz + hl + 0.5], [px, 0.72, pz + hl + 0.5], 0.05, 0.05, 6, INK, MAT.MATTE, false, false);
-  pbox(M, px, 0.86, pz + hl + 0.5, 0.34, 0.11, 0.03, 0, SIGN_DEAL, MAT.MATTE);
+  /* The plaque stands at the car's FRONT bumper, and `face` says which way that is: the forecourt row
+   * all noses one way, but the hall's two rows face each other across the aisle, so a fixed sign
+   * would leave half of them advertising to the back wall. */
+  const pz2 = pz + face * (hl + 0.5);
+  pcyl(M, [px, 0, pz2], [px, 0.72, pz2], 0.05, 0.05, 6, INK, MAT.MATTE, false, false);
+  pbox(M, px, 0.86, pz2, 0.34, 0.11, 0.03, 0, SIGN_DEAL, MAT.MATTE);
 }
+
+
+/* ── THE WALK-IN SHOWROOM ─────────────────────────────────────────
+ *
+ * Operator: "Walk-in showrooms seperate to gas stations (walkable mode)".
+ *
+ * A glazed hall, 34 x 22 m, with the whole fleet inside in two rows and an aisle down the middle.
+ * The frontage faces the road; the doorway is a gap in that wall rather than a door object, because
+ * a door you have to open is a door that can trap someone in a game with no interact-with-door verb.
+ *
+ * It is built from the same primitives as the petrol station and blitted the same way, so it costs
+ * one prop and streams out with its tile. What it does NOT have is a canopy, pumps or a beacon —
+ * those are what make a forecourt read as a forecourt, and the entire point of this building is that
+ * it is not one.
+ */
+const HALL_H = 6.4; // eaves height: tall enough to read as a hall rather than a garage
+const HALL_GLASS_BASE = 1.0; // a solid plinth under the glazing, as every real showroom has
+
+export function buildShowroomHall(M, r, skirt) {
+  const W = SHOWROOM_HALF_W;
+  const D = SHOWROOM_HALF_D;
+
+  // floor slab, with a skirt so it never floats over sloping ground
+  pbox(M, 0, -skirt * 0.5 + 0.08, 0, W, skirt * 0.5 + 0.08, D, 0, CREAM, MAT.MATTE);
+
+  /* Walls. The FRONT wall (local +z, facing the road) is glass either side of the doorway; the other
+   * three are solid, which is what stops the interior reading as an open shed from every angle. */
+  const doorH = HALL_DOOR.w * 0.5;
+  for (const s of [-1, 1]) {
+    const half = (W - doorH) * 0.5;
+    const cx = s * (doorH + half);
+    pbox(M, cx, HALL_GLASS_BASE * 0.5, D - 0.15, half, HALL_GLASS_BASE * 0.5, 0.15, 0, CREAM, MAT.MATTE);
+    pbox(M, cx, (HALL_GLASS_BASE + HALL_H) * 0.5, D - 0.15, half, (HALL_H - HALL_GLASS_BASE) * 0.5, 0.12, 0, GLASSC, MAT.GLASS);
+  }
+  // a header over the doorway, so the opening reads as a doorway and not a missing wall
+  pbox(M, 0, HALL_H - 0.55, D - 0.15, doorH, 0.55, 0.15, 0, SIGN_DEAL, MAT.MATTE);
+
+  // back and sides: solid, with a band of clerestory glass high up to let the interior light read
+  pbox(M, 0, HALL_H * 0.5, -D + 0.15, W, HALL_H * 0.5, 0.15, 0, CREAM, MAT.MATTE);
+  for (const s of [-1, 1]) {
+    pbox(M, s * (W - 0.15), HALL_H * 0.5, 0, 0.15, HALL_H * 0.5, D, 0, CREAM, MAT.MATTE);
+    pbox(M, s * (W - 0.12), HALL_H - 1.0, 0, 0.06, 0.5, D - 1.2, 0, GLASSC, MAT.GLASS);
+  }
+
+  // roof, and a lit ceiling plane so the inside glows at dusk the way a real showroom does
+  pbox(M, 0, HALL_H + 0.18, 0, W + 0.5, 0.18, D + 0.5, 0, SIGN_DEAL, MAT.MATTE);
+  pbox(M, 0, HALL_H - 0.22, 0, W - 1.4, 0.05, D - 1.4, 0, GLOW, MAT.EMIT);
+
+  // the fascia sign, above the doorway on the outside, in the dealership's own teal
+  pbox(M, 0, HALL_H + 0.75, D + 0.1, W * 0.55, 0.5, 0.06, 0, SIGN_DEAL, MAT.MATTE);
+
+  /* THE FLEET, INDOORS. Eight bays, and unlike the forecourt row this can show every car in the game
+   * because there are no pumps or canopy posts to dodge — which is precisely the limitation the
+   * operator's "separate to gas stations" removes. The two rows face each other across the aisle, so
+   * walking down the middle you see fronts on both sides. */
+  HALL_BAYS.forEach((b, i) => {
+    const c = HALL_CARS[i];
+    if (!c) return;
+    // a low plinth under each, and the car itself, nose toward the aisle
+    showroomCar(M, b.dx, b.dz + b.faceIn * 0.0, c.length, c.colour, b.faceIn);
+  });
+
+  // and a strip of floor marking down the aisle, so the walk-through has a direction
+  pbox(M, 0, 0.1, 0, W - 3.0, 0.02, 0.28, 0, SIGN_DEAL, MAT.MATTE);
+}
+
+/* Every car in the fleet, for the hall. The forecourt's SHOWROOM_CARS is the four you cannot collect;
+ * a walk-in showroom shows the LOT, because that is what a showroom is. Same hard-coded-table
+ * reasoning as SHOWROOM_CARS — this module is loaded by the tile worker and must not pull the game's
+ * own modules in behind it — and bench-props asserts it matches the fleet. */
+export const HALL_CARS = [
+  { id: 'estate', length: 4.6, colour: LC('paintD') },
+  { id: 'hatch', length: 4.0, colour: LC('paintB') },
+  { id: 'coupe', length: 4.3, colour: LC('paintA') },
+  { id: 'sedan', length: 4.5, colour: LC('paintC') },
+  { id: 'rally', length: 4.2, colour: VERMILION },
+  { id: 'taxi', length: 4.5, colour: AMBER },
+  { id: 'pickup', length: 5.91, colour: CREAM },
+  { id: 'patrol', length: 4.6, colour: TEAL },
+];
 
 export function buildStation(M, r, skirt, deal = false) {
   // Single source of truth in src/world/props.js — the access spur, the collision hitboxes
@@ -1737,6 +1821,46 @@ const KERB_R = 1.05;
  *  ambient props — see STATION_HITBOXES' own comment for what is and is not included.
  *  `height`, when the caller has a real ground probe (the tiler always does), adds the apron
  *  edge itself — see the section comment above. */
+/* Collision for a walk-in showroom.
+ *
+ * The WALLS are built as overlapping cylinders rather than boxes, because collide.js's narrow phase
+ * is swept against circles — the same reason the kerbs in this file are a run of cylinders and not a
+ * quad. A gap between two of them is a gap a car can be teleported through at speed, so they are
+ * spaced closer than their radius.
+ *
+ * THE DOORWAY IS LEFT OPEN, which is the whole feature: you walk in through it. It is 5.2 m wide, so
+ * a car cannot fit either, which is the intended answer to "can I drive into the showroom".
+ */
+export function hallSolids(halls) {
+  const out = [];
+  const R = 0.9;
+  const STEP = 1.2;
+  for (const h of halls || []) {
+    const ca = Math.cos(h.yaw);
+    const sa = Math.sin(h.yaw);
+    const y = h.padY ?? h.y ?? 0;
+    const push = (dx, dz, r, hh) =>
+      out.push({ x: h.x + dx * ca - dz * sa, z: h.x === undefined ? 0 : h.z + dx * sa + dz * ca, y, r, h: hh, solid: true });
+    const W = SHOWROOM_HALF_W;
+    const D = SHOWROOM_HALF_D;
+    // back wall and the two sides, end to end
+    for (let dx = -W; dx <= W; dx += STEP) push(dx, -D, R, 6.5);
+    for (let dz = -D; dz <= D; dz += STEP) {
+      push(-W, dz, R, 6.5);
+      push(W, dz, R, 6.5);
+    }
+    // the frontage, but not the doorway
+    const door = HALL_DOOR.w * 0.5;
+    for (let dx = -W; dx <= W; dx += STEP) {
+      if (Math.abs(dx) < door + 0.4) continue;
+      push(dx, D, R, 6.5);
+    }
+    // and the cars on show, so you walk around them rather than through them
+    for (const b of HALL_BAYS) push(b.dx, b.dz, 1.35, 1.5);
+  }
+  return out;
+}
+
 export function stationSolids(stations, height = null) {
   const out = [];
   for (const s of stations) {
@@ -1957,6 +2081,10 @@ export class Props {
     this._lastCz = Infinity;
     /** Every station in a tile that is currently loaded. */
     this.stations = [];
+    /* Every walk-in showroom the tiler has actually built, so the game can ask "is there one near
+     * me" against what EXISTS rather than re-deriving it — the same reasoning `stations` above uses,
+     * and the same reason the station-forgiveness bug took a week to find when the two disagreed. */
+    this.halls = [];
     /* Every station this session has ever loaded, whether or not its tile is still live.
      * Stations are a pure function of the seed, so remembering one is not a cache that can go
      * stale — and it matters: they sit about 2.9 km apart along arterials while this window
@@ -2310,6 +2438,18 @@ export class Props {
         });
         job.phase = 6;
         return;
+      case 6:
+        /* WALK-IN SHOWROOMS, in their own phase for the same reason airfields and harbours have one:
+         * the flatness test wants the tile's real ground probe, and doing it in the same frame as the
+         * stations is how a tile bake goes over budget. This is also where the tile's BOX is in
+         * scope — the first version of this ran the query inside _bake(), which destructures the job
+         * and has no ox/oz at all, so it referenced undefined names and every tile silently baked
+         * zero showrooms. Caught by tools/diag-walkin.mjs's first check ("the tiler actually built a
+         * showroom": 0), which is precisely why that check asks the RENDERER's list and not the
+         * seed's. */
+        job.halls = showroomsInBox(ox, oz, ox + size, oz + size, this.seed, { height: job.probe.height });
+        job.phase = 7;
+        return;
       default:
         this._bake(job);
         this._job = null;
@@ -2318,7 +2458,7 @@ export class Props {
 
   /** Turn one tile's queried props into one geometry, one mesh and one solids block. */
   _bake(job) {
-    const { key, props, stations, cans, airfields, harbours } = job;
+    const { key, props, stations, cans, airfields, harbours, halls } = job;
     const height = job.probe.height;
     const M = PB();
     for (const p of props) {
@@ -2368,6 +2508,33 @@ export class Props {
       }
       buildAirfield(L2, rng(hash3i(Math.round(f.x), Math.round(f.z), 0x41f1, this.seed)), f, f.y - lo + 0.5);
       blit(M, L2, f.x, f.y, f.z, f.heading, 1);
+    }
+
+    /* WALK-IN SHOWROOMS. Same shape of work as a station: find the ones whose centre lands in this
+     * tile, level the slab onto the highest ground under its footprint, build, blit. The slab is
+     * levelled to the HIGHEST corner rather than the centre for the reason stationPad's own note
+     * gives — a floor that sinks into a rise is a floor you fall through. */
+    const tileHalls = [];
+    for (const hall of halls || []) {
+      let hi = -Infinity;
+      let lo = Infinity;
+      for (let sx = -1; sx <= 1; sx++)
+        for (let sz = -1; sz <= 1; sz++) {
+          const y = height
+            ? height(hall.x + sx * SHOWROOM_HALF_W * 0.95, hall.z + sz * SHOWROOM_HALF_D * 0.95)
+            : 0;
+          if (Number.isFinite(y)) {
+            if (y > hi) hi = y;
+            if (y < lo) lo = y;
+          }
+        }
+      if (!Number.isFinite(hi)) continue;
+      const L3 = PB();
+      buildShowroomHall(L3, rng(hash3i(Math.round(hall.x), Math.round(hall.z), 0x5b0a, this.seed)), Math.max(0.5, hi - lo + 0.6));
+      blit(M, L3, hall.x, hi, hall.z, hall.yaw, 1);
+      hall.padY = hi;
+      tileHalls.push(hall);
+      this.halls.push(hall);
     }
 
     for (const s of stations) {
@@ -2453,7 +2620,9 @@ export class Props {
     if (this.solids) {
       // With the tile's real ground probe, so the forecourt's own raised EDGE gets colliders
       // as well as the buildings standing on it — see stationSolids' section comment.
-      const list = propSolids(props).concat(stationSolids(stations, height));
+      // The showroom halls collide too — walls you cannot drive through, an open doorway you can
+      // walk through, and the cars indoors. See hallSolids.
+      const list = propSolids(props).concat(stationSolids(stations, height), hallSolids(tileHalls));
       if (list.length) this.solids.addChunk(`prop:${key}`, list);
     }
     for (const s of stations) {
