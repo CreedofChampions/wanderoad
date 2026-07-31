@@ -137,6 +137,11 @@ export const SUN_TICKS = 4;
  *  0.61 m is two feet; the streak's own half-second grace is the other half of the same idea. */
 export const OFFROAD_WARN_M = 0.61;
 
+/** Seconds the red screen-edge ring stays up after you leave the road. The red FIGURES stay red the
+ *  whole time you are off it — see the note where this is used. Operator: "stop whole screen red for
+ *  more than 1 sec offroad just the numbers should be red." */
+export const OFFROAD_EDGE_S = 1.0;
+
 export const OFFROAD_HINT_KEY = 'wanderoad.hint.offroad.v1';
 export const OFFROAD_HINT_MAX = 10;
 export const OFFROAD_HINT_TEXT = 'off the road — press R to get back on';
@@ -464,7 +469,22 @@ export class Hud {
       if (offNow !== this._offNow) {
         this._offNow = offNow;
         this.streakEl.classList.toggle('offroad', offNow);
-        this.offroadEdge.classList.toggle('on', offNow);
+        /* THE RED RING IS A FLASH, NOT A STATE. Operator: "stop whole screen red for more than 1 sec
+         * offroad just the numbers should be red."
+         *
+         * He is right, and the reason is that the ring and the figures answer different questions.
+         * The ring answers "something just changed" — it has to be unmissable for the moment you
+         * leave the tarmac, and then it has done its job. The FIGURES answer "what is true now", and
+         * that can stay red for as long as it is true without being oppressive. Held red across a
+         * long off-road stretch the ring stops reading as a warning and starts reading as a broken
+         * screen, which is what he is describing.
+         *
+         * So: the ring shows for OFFROAD_EDGE_S from the moment you go off, then fades on its own
+         * even while you are still off the road. `#streak.offroad` below is untouched and stays red
+         * the whole time. Re-arms when you get back on, so every excursion flashes once. */
+        if (offNow) this._offEdgeFor = (this._offEdgeFor ?? 0) + dt;
+        else this._offEdgeFor = 0;
+        this.offroadEdge.classList.toggle('on', offNow && this._offEdgeFor <= OFFROAD_EDGE_S);
       }
 
       /* The R hint. Fires on the CONFIRMED off-road transition — `this._capKey` only just

@@ -50,7 +50,7 @@ import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
 import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
-import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf } from './game/garage.js';
+import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam } from './game/garage.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
 import { BoatMode } from './game/boat.js';
@@ -587,6 +587,16 @@ async function boot() {
       console.error('[car] swap failed', err?.message ?? err);
       hud.say('that one would not load', 2.5);
     }
+  }
+
+  /* `?unlock=123` — the operator's own hack. Applied before the Garage is built so the fleet is
+   * already open the first time it draws, and it opens the PLANE and the BOAT as well as the cars:
+   * "unlock all" that leaves two things locked is not unlock all. See game/garage.js's UNLOCK_PASS. */
+  if (applyUnlockParam()) {
+    wallet.boat = true;
+    wallet.plane = true;
+    wallet.save();
+    hud.say('everything unlocked', 3.0);
   }
 
   const menu = new Menu({

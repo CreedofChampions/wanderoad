@@ -1767,6 +1767,69 @@ function sharesNode(a, b) {
  * is a perfect right-angle junction. The angle comes from a dot product of unit vectors, which
  * has no notion of handedness or "which side is left", so it cannot be bitten by gotcha 1.
  */
+/* ── WHERE ROADS MEET, AS OPPOSED TO WHERE THEY CROSS ───────────────────────
+ *
+ * Operator, four times now: "junctions still overlapping roads not t splits and 4 ways -- many
+ * issues."
+ *
+ * THIS IS WHY, and it is not the thing five previous attempts went after. `findCrossings` below
+ * deliberately SKIPS every pair of edges that shares a lattice node (see `sharesNode`), and it is
+ * right to: those pairs are the network CONTINUING, and counting them as crossings swamped the angle
+ * census 8 to 1. But render/road.js builds its junction geometry from `findCrossings` and from
+ * nothing else. So a T-split or a four-way at a lattice node — which is what almost every junction
+ * in this world actually is — got NO junction patch at all. The ribbons simply ran over each other,
+ * which is precisely "overlapping roads, not T splits and 4 ways", and being coplanar is also what
+ * made them flash.
+ *
+ * Five plan-view fixes were falsified against the braid (docs/BACKLOG.md) — fan mixes, node jitter,
+ * shorter junction tangents, crossing-angle knobs. Every one of them was trying to change where the
+ * roads GO. None of them could have worked, because the roads were never the problem: the junction
+ * was missing from the picture.
+ *
+ * So: group live edges by the node they share, keep the nodes where three or more meet, and hand
+ * back one record per NODE for the renderer to lay an apron over. `findCrossings` is left exactly as
+ * it is — the census depends on it, and a "crossing point" at a shared node is degenerate anyway.
+ *
+ * @param {Array} edges as `edgesInBox` returns them
+ * @param {number} seed
+ * @returns {Array<{nodeKey:string, x:number, z:number, tier:number, legs:Array, radius:number}>}
+ */
+export function findNodeJunctions(edges, seed) {
+  const byNode = new Map();
+  for (const e of edges) {
+    for (const k of edgeNodeKeys(e)) {
+      let list = byNode.get(k);
+      if (!list) byNode.set(k, (list = []));
+      list.push(e);
+    }
+  }
+  const out = [];
+  const pos = [0, 0];
+  for (const [nodeKey, legs] of byNode) {
+    /* THREE IS THE DEFINITION OF A JUNCTION. Two edges at a node is the road carrying on — nodeDir
+     * gives them one shared tangent, so they are a straight or a bend, and laying an apron over
+     * every bend in the network would be both wrong and enormously expensive. */
+    if (legs.length < 3) continue;
+    const [tier, rest] = nodeKey.split(':');
+    const [i, j] = rest.split(',').map(Number);
+    nodePos(i, j, Number(tier), seed, pos);
+    let width = 0;
+    for (const e of legs) width = Math.max(width, e.width || 6);
+    out.push({
+      nodeKey,
+      x: pos[0],
+      z: pos[1],
+      tier: Number(tier),
+      legs,
+      /* An apron a little wider than the widest leg's half-width. 1.6x covers the corner fillets
+       * where two legs leave at an angle without throwing tarmac out into the fields — about 6.9 m
+       * on an arterial, against the ~80 m the braid currently smears across. */
+      radius: (width / 2) * 1.6,
+    });
+  }
+  return out;
+}
+
 export function findCrossings(edges) {
   const out = [];
   for (let ai = 0; ai < edges.length; ai++) {

@@ -143,6 +143,32 @@ export const FIRST_CAR = FLEET[0].id;
 
 const KEY = 'wanderoad.unlocks.v1';
 
+/* ── ONE PASSWORD OPENS EVERYTHING ─────────────────────────────────────
+ *
+ * Operator: "give me a hack to unlock the planes and use password for unlock all 123".
+ *
+ * `?unlock=123` opens the whole game — every car, the boat, and the plane — and latches it, so it
+ * survives the reload the URL parameter would otherwise be lost to. The same string the plane already
+ * used as its own pass (game/plane.js's PLANE_PASS), because two different passwords for two
+ * different unlocks is a thing to remember for no reason.
+ *
+ * It is a HACK and it is meant to be: it exists so the operator can reach anything instantly when
+ * testing, without grinding the economy that the rest of the game is about. */
+export const UNLOCK_PASS = '123';
+
+/** Did the player arrive with `?unlock=123`? Latches into the same store `cheatOn` reads. */
+export function applyUnlockParam() {
+  try {
+    if (new URLSearchParams(location.search).get('unlock') === UNLOCK_PASS) {
+      setCheat(true);
+      return true;
+    }
+  } catch {
+    /* no `location` (a node harness) — nothing to apply, same stance cheatOn takes */
+  }
+  return false;
+}
+
 /** Cheat mode: everything open, for testing and for anyone who just wants to drive. */
 export function cheatOn() {
   try {
