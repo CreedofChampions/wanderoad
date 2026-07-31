@@ -100,6 +100,32 @@ export const FLEET = [
     feel: { comfortG: 7.6, assist: 'cruise', rearGrip: 1.04, buildRate: 2.4, brakeMul: 1.2 },
   },
   {
+    /* THE PICKUP. Operator: "Add ford f150 to game".
+     *
+     * The one genuinely different SHAPE in the fleet — everything else is a car, this is a truck, and
+     * at 5.91 m it is a metre and a quarter longer than anything beside it on a forecourt. Its model
+     * is built by tools/make-truck.mjs from this repository's own geometry rather than downloaded:
+     * every CC0 pickup available is a single-material texture-atlas model, and this game paints a car
+     * by reading separated material names. That note lives in full at the top of make-truck.mjs.
+     *
+     * "Ford" and "F-150" are Ford's trademarks. This is a generic full-size pickup at F-150
+     * proportions; the label below is the only place the name appears, so renaming it is one word.
+     *
+     * It DRIVES like a truck, which is the point of adding one rather than another saloon: the lowest
+     * cornering limit in the fleet, the slowest steering build, and the only positive `offRoad` bonus
+     * besides the Rally's — a pickup should be the thing you take off the tarmac when the Rally is
+     * still out of reach. The tank is the fleet's biggest, in tuning.js, for the same reason. */
+    id: 'pickup',
+    file: 'pickup.glb',
+    label: 'Ford F150',
+    blurb: 'A full-size pickup. Slow to turn, hard to stop, and happy in the dirt.',
+    unlockAt: 60000,
+    price: 260,
+    tier: 'gt',
+    length: 5.91,
+    feel: { comfortG: 7.4, assist: 'cruise', rearGrip: 1.08, buildRate: 2.1, brakeMul: 0.92, offRoad: 1.2 },
+  },
+  {
     id: 'patrol',
     file: 'patrol.glb',
     label: 'Patrol',

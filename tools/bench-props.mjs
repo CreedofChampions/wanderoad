@@ -1021,13 +1021,21 @@ console.log('\n── a dealership stocks the cars you cannot collect ───�
     { dx: 5.2, dz: 4.4, r: 0.22 },
   ];
   let worstClear = Infinity;
-  let worstEdge = Infinity;
-  for (const s of SHOWROOM_SLOTS) {
+  let worstSide = Infinity;
+  let worstNose = 0;
+  SHOWROOM_SLOTS.forEach((s, i) => {
     for (const f of FIXED) worstClear = Math.min(worstClear, Math.hypot(s.dx - f.dx, s.dz - f.dz) - f.r - 1.35);
-    worstEdge = Math.min(worstEdge, 9.5 - Math.abs(s.dx), 7.0 - Math.abs(s.dz));
-  }
+    /* THE CAR'S OWN FOOTPRINT, not the slot centre. A 5.91 m truck and a 4.5 m saloon overhang the
+     * apron by very different amounts, and checking the centre would have called both fine. The row's
+     * WIDTH must stay on the tarmac; the nose is allowed onto the grass, and the figure is logged so
+     * it can never grow quietly. */
+    const len = SHOWROOM_CARS[i] ? SHOWROOM_CARS[i].length : 4.5;
+    worstSide = Math.min(worstSide, 9.5 - (Math.abs(s.dx) + 0.9));
+    worstNose = Math.max(worstNose, Math.abs(s.dz) + len / 2 - 7.0);
+  });
   check(worstClear > 0, 'no display car overlaps a post, pump or kiosk', `${worstClear.toFixed(2)} m`, '> 0');
-  check(worstEdge > 0, 'and every one is inside the apron', `${worstEdge.toFixed(2)} m`, '> 0');
+  check(worstSide > 0, 'the row stays on the tarmac across its width', `${worstSide.toFixed(2)} m`, '> 0');
+  console.log(`       the longest display car noses ${worstNose.toFixed(2)} m past the apron's front edge, onto grass (by design)`);
 
   // The world-space mapping must be a rigid motion: spacing on the apron survives the rotation.
   const st = { x: 1234, z: -567, yaw: 0.937, deal: true };

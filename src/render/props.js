@@ -1349,6 +1349,9 @@ export const SHOWROOM_CARS = [
   { id: 'sedan', length: 4.5, colour: LC('paintC') }, // slate blue
   { id: 'rally', length: 4.2, colour: VERMILION }, // rally red
   { id: 'taxi', length: 4.5, colour: AMBER }, // and a taxi is amber, obviously
+  // The pickup, and it is the only one on the row you can pick out by its OUTLINE — 5.91 m against
+  // the saloons' 4.5, which is the whole reason a truck is worth adding to a fleet of cars.
+  { id: 'pickup', length: 5.91, colour: CREAM },
   { id: 'patrol', length: 4.6, colour: TEAL },
 ];
 

@@ -664,15 +664,26 @@ export const STATION_RADIUS = 11;
  *
  * The geometry is dictated by what is already on the apron. The canopy posts stand at local
  * z = +4.4 and x = ±5.2; the pumps are at z = +1.0; the kiosk is at z = -4.8 beside the driveway
- * mouth (measured, `node tools/probe-station-frame.mjs`). So z = +5.9 is the one clear strip
- * that is still inside the apron's 7.0 m half-depth, and ±6.4 / ±2.2 keeps every car clear of a
- * post and leaves a 2 m aisle between neighbours to walk the car through.
+ * mouth (measured, `node tools/probe-station-frame.mjs`). So z = +5.9 is the one clear strip that
+ * keeps a display car clear of every post, and ±8.0 / ±4.0 / 0 spaces five of them 4 m apart across
+ * a 19 m apron with a 0.35 m margin at the tightest post.
+ *
+ * FIVE, not four, because the Ford F150 joined the dealership fleet and bench-props asserts that the
+ * row IS the fleet, in order. That check earned its place immediately: adding the truck turned it red
+ * on the same commit rather than shipping a forecourt that silently sold a car it did not display.
+ *
+ * A display car's NOSE overhangs the apron's front edge onto the grass — 2.2 m for the saloons, 2.8 m
+ * for the truck. That is deliberate rather than unnoticed: pulling the row back to fit would put it
+ * inside the canopy posts, and a forecourt display facing the open field is what a real one looks
+ * like. What must stay inside the apron is the row's WIDTH, and bench-props checks that against each
+ * car's real half-width rather than against the slot centre.
  */
 export const SHOWROOM_SLOTS = [
-  { dx: -6.4, dz: 5.9 },
-  { dx: -2.2, dz: 5.9 },
-  { dx: 2.2, dz: 5.9 },
-  { dx: 6.4, dz: 5.9 },
+  { dx: -8.0, dz: 5.9 },
+  { dx: -4.0, dz: 5.9 },
+  { dx: 0.0, dz: 5.9 },
+  { dx: 4.0, dz: 5.9 },
+  { dx: 8.0, dz: 5.9 },
 ];
 
 /** How close you have to be to a display car for it to be the one you are looking at, in metres. */
