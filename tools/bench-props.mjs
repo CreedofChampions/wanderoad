@@ -296,7 +296,13 @@ console.log('\n── rarity, clearance and seating (a 4 x 4 km sweep) ───
    * 3.9 it replaces — it fails if the halving is ever quietly undone — while the floor keeps
    * the same proportional headroom the 601-seed sweep above earned. */
   check(canPerKm > 0.45 && canPerKm < 2.0, 'cans per km of road', canPerKm.toFixed(2), '0.45 .. 2.0 (half the old density, on purpose)');
-  check(cans.length > 20, 'sample size', cans.length, '> 20');
+  /* B11: this absolute floor was `> 20`, set against the PRE-HALVING density (canPerKm's own
+   * floor was 0.9 then) and never brought down when CAN_SLOT_P was halved for "cans a bit too
+   * abundant". The ratio check just above was halved with it (0.9 -> 0.45); this one was not,
+   * so it now fails on a correctly-functioning halved spawn rate — measured 18 cans at 0.50/km,
+   * squarely inside the passing ratio band. Halved by the same factor as the density it is
+   * guarding, same as the ratio check's own comment above describes doing. */
+  check(cans.length > 10, 'sample size', cans.length, '> 10');
 
   let canOnRoad = 0;
   let canWorstClear = Infinity;

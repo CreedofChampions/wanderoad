@@ -77,7 +77,7 @@ import { GL_WIND, windUniforms } from './wind.js';
 import { Terrain } from '../world/terrain.js';
 import { BIOME, BIOME_COUNT, BIOME_SCATTER, waterLevelAt } from '../world/biomes.js';
 import { canopyShade } from '../world/scatter.js';
-import { stationsInBox, STATION_RADIUS } from '../world/props.js';
+import { stationsInBox, STATION_RADIUS, showroomsInBox, SHOWROOM_HALF_W, SHOWROOM_HALF_D } from '../world/props.js';
 import { clamp, clamp01, hash3i, rng, smoothstep } from '../core/math.js';
 
 /* ── the density law ─────────────────────────────────────────────────────────
@@ -195,6 +195,16 @@ const GRASS_WATER_FREEBOARD = 0.05;
  * `stationForEdge` grades flat and `_bake` (render/props.js) actually builds. */
 const STATION_GRASS_RADIUS = STATION_RADIUS;
 
+/* B12: "grass grows through a showroom's floor slab" — the hall's floor is prop geometry laid
+ * over terrain (render/props.js's showroom builder), and everything above knows only about
+ * roads and station aprons, nothing about it. Same fix shape as STATION_GRASS_RADIUS: a
+ * bounding CIRCLE around the rectangular 34x22 m footprint (SHOWROOM_HALF_W/D, world/props.js —
+ * the single source of truth the floor slab itself is built from), radius = the rectangle's own
+ * half-diagonal so the circle fully covers it regardless of the hall's yaw. Slightly
+ * over-excludes at the four corners rather than under-excluding — the same trade STATION_GRASS_
+ * RADIUS already makes. */
+const HALL_GRASS_RADIUS = Math.hypot(SHOWROOM_HALF_W, SHOWROOM_HALF_D);
+
 /* One `Terrain` serves every ring. Its box has to contain the far ring's outermost chunk
  * corner (4.5 chunks of 160 m = 800 m) plus however far the car may drive before the box is
  * rebuilt. The constructor is atomic — it builds a climate lattice and a road network in one
@@ -217,6 +227,12 @@ const REGION_DRIFT = 100;
  * about 14x coarser than the Terrain region's, i.e. once every ~53 s at a realistic cruise. */
 const STATION_REGION_HALF = 2200;
 const STATION_REGION_DRIFT = 1400;
+
+/* Halls, same coarse-cadence reasoning as stations just above — showroomsInBox walks the same
+ * road network (nearestRoadPoint per candidate) and is not cheap either. Reused verbatim rather
+ * than re-derived. */
+const HALL_REGION_HALF = STATION_REGION_HALF;
+const HALL_REGION_DRIFT = STATION_REGION_DRIFT;
 
 /* Wall-clock JS the rebuild queue may spend per frame. A ring that took 200 ms would pop
  * in visibly at 90 m/s; at this budget the queue keeps up with 90 m/s with ~20% to spare
@@ -796,6 +812,11 @@ export class Grass {
     this._stations = [];
     this._stationRegionX = Infinity;
     this._stationRegionZ = Infinity;
+    /** Walk-in showroom halls within reach, same cadence reasoning as `_stations` — see B12's
+     *  note by HALL_GRASS_RADIUS. */
+    this._halls = [];
+    this._hallRegionX = Infinity;
+    this._hallRegionZ = Infinity;
 
     this.stats = { chunks: 0, dirty: 0, drawn: 0, built: 0, extended: 0, buildMs: 0, bytes: 0 };
     this._rings = RINGS.map((R, i) => this._buildRing(R, i));
@@ -966,6 +987,7 @@ export class Grass {
       this._regionZ = camZ;
     }
     this._ensureStations(camX, camZ);
+    this._ensureHalls(camX, camZ);
   }
 
   /**
@@ -989,6 +1011,22 @@ export class Grass {
     );
     this._stationRegionX = camX;
     this._stationRegionZ = camZ;
+  }
+
+  /** Halls, fetched on their own coarse cadence — see HALL_REGION_HALF/DRIFT's comment. */
+  _ensureHalls(camX, camZ) {
+    if (this._hallRegionX !== Infinity && Math.abs(camX - this._hallRegionX) < HALL_REGION_DRIFT && Math.abs(camZ - this._hallRegionZ) < HALL_REGION_DRIFT) {
+      return;
+    }
+    this._halls = showroomsInBox(
+      camX - HALL_REGION_HALF - HALL_GRASS_RADIUS,
+      camZ - HALL_REGION_HALF - HALL_GRASS_RADIUS,
+      camX + HALL_REGION_HALF + HALL_GRASS_RADIUS,
+      camZ + HALL_REGION_HALF + HALL_GRASS_RADIUS,
+      this.seed
+    );
+    this._hallRegionX = camX;
+    this._hallRegionZ = camZ;
   }
 
   /**
@@ -1186,6 +1224,22 @@ export class Grass {
       }
     }
 
+    // B12: showroom halls this chunk could overlap, filtered from `this._halls` down to the
+    // handful in reach — same shape as the `stations` filter just above.
+    const regionHalls = this._halls;
+    const halls = [];
+    for (let hi = 0; hi < regionHalls.length; hi++) {
+      const h = regionHalls[hi];
+      if (
+        h.x >= x0 - HALL_GRASS_RADIUS &&
+        h.x <= x0 + cs + HALL_GRASS_RADIUS &&
+        h.z >= z0 - HALL_GRASS_RADIUS &&
+        h.z <= z0 + cs + HALL_GRASS_RADIUS
+      ) {
+        halls.push(h);
+      }
+    }
+
     // Needed by pass 3 on EVERY call (not just a lattice rebuild): the lattice cell's own
     // diagonal, i.e. the largest gap a road narrower than the lattice could hide inside
     // without touching any of the four corners it interpolates between.
@@ -1297,9 +1351,20 @@ export class Grass {
               break;
             }
           }
+          // No grass under a showroom's floor slab (B12) — see HALL_GRASS_RADIUS's comment.
+          let inHall = false;
+          for (let hi = 0; hi < halls.length; hi++) {
+            const h = halls[hi];
+            const hdx = x - h.x;
+            const hdz = z - h.z;
+            if (hdx * hdx + hdz * hdz < HALL_GRASS_RADIUS * HALL_GRASS_RADIUS) {
+              inHall = true;
+              break;
+            }
+          }
           const k = (j * N + i) * 7;
           lat[k] = y;
-          lat[k + 1] = submerged || inApron ? 0 : g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
+          lat[k + 1] = submerged || inApron || inHall ? 0 : g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
           lat[k + 2] = dry;
           lat[k + 3] = snow;
           lat[k + 4] = wet;
@@ -1410,7 +1475,7 @@ export class Grass {
         clr01 = lat[k01 + 6],
         clr11 = lat[k11 + 6];
       const nearRoad = Math.min(clr00, clr10, clr01, clr11) < cellDiag;
-      const needsBladePos = stations.length > 0 || nearRoad || wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11;
+      const needsBladePos = stations.length > 0 || halls.length > 0 || nearRoad || wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11;
       const bx = needsBladePos ? x0 + ux * INV_U16 * cs : 0;
       const bz = needsBladePos ? z0 + uz * INV_U16 * cs : 0;
       if (wet00 !== wet10 || wet00 !== wet01 || wet00 !== wet11) {
@@ -1455,6 +1520,23 @@ export class Grass {
           }
         }
         if (onApron) continue;
+      }
+
+      /* EXACT hall-slab re-check (B12), same reasoning as the station apron above — the far
+       * ring's node spacing can exceed the hall's own half-diagonal (HALL_GRASS_RADIUS), so a
+       * bilinear cell can sit entirely inside the footprint without touching a corner. */
+      if (halls.length) {
+        let onSlab = false;
+        for (let hi = 0; hi < halls.length; hi++) {
+          const h = halls[hi];
+          const hdx = bx - h.x;
+          const hdz = bz - h.z;
+          if (hdx * hdx + hdz * hdz < HALL_GRASS_RADIUS * HALL_GRASS_RADIUS) {
+            onSlab = true;
+            break;
+          }
+        }
+        if (onSlab) continue;
       }
 
       // The coin is hashed from (chunk, template index), never from the world position the

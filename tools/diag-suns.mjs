@@ -108,40 +108,82 @@ await sleep(400);
 
 /* DRIVE IT DOWN THE ROAD, WITH STEERING. Holding W alone leaves the carriageway at the first
  * bend, which measures the terrain rather than the economy — the first version of this file did
- * exactly that and banked 19 m. This is browser-test.mjs's own roadRunUp steering, verbatim in
- * shape: real KeyboardEvents, only ever A, D or neither, aiming at the centreline a second or so
- * up the road. try/FINALLY so a thrown terrain rebuild cannot leave W held down. */
-const drive = (ms) => evalJs(`(async () => { const W = window.WANDEROAD; const c = W.car;
-  const K = (code, type) => window.dispatchEvent(new KeyboardEvent(type, { code, bubbles: true, cancelable: true }));
-  let cur = 0;
-  const set = (s) => { if (s === cur) return;
-    if (cur === 1) K('KeyA','keyup'); else if (cur === -1) K('KeyD','keyup');
-    if (s === 1) K('KeyA','keydown'); else if (s === -1) K('KeyD','keydown');
-    cur = s; };
-  const q0 = c.terrain.roads.query(c.x, c.z);
-  if (isFinite(q0.d)) c.placeAt(q0.qx, q0.qz, Math.atan2(q0.tx, q0.tz));
-  let best = 0, suns = W.wallet.suns;
-  K('KeyW','keydown');
-  try {
-    const t0 = performance.now();
-    while (performance.now() - t0 < ${ms}) {
-      await new Promise(r => { let done = false; const f = () => { if (!done) { done = true; r(); } };
-        requestAnimationFrame(f); setTimeout(f, 50); });
-      const L = Math.min(34, Math.max(10, 8 + Math.abs(c.speed) * 0.75));
-      const q = c.terrain.roads.query(c.x + Math.sin(c.yaw)*L, c.z + Math.cos(c.yaw)*L);
-      if (!isFinite(q.d)) { set(0); continue; }
-      let e = Math.atan2(q.qx - c.x, q.qz - c.z) - c.yaw;
-      while (e > Math.PI) e -= Math.PI*2; while (e <= -Math.PI) e += Math.PI*2;
-      set(e > 0.02 ? 1 : e < -0.02 ? -1 : 0);
+ * exactly that and banked 19 m.
+ *
+ * PORTED FROM `DRIVE_BY_HAND` in tools/browser-test.mjs (the law `diag-manual-streak.mjs` already
+ * trusts offline, "proves it banks on five different roads" — see that file's own header). The
+ * PREVIOUS version of this function was a cruder ancestor of that law: heading-only steering, no
+ * lateral term, and — critically — no speed cap, so it held W all the way to 86 km/h and could not
+ * keep up with a real curve at that speed. Measured live: leg 5 went from 86 km/h to 0 and stayed
+ * there for legs 6-8, the streak dead for the rest of the run. `DRIVE_BY_HAND` adds the lateral
+ * term, a speed cap that tightens in a turn (36 vs 45 km/h), a brake once over cap+15, and one
+ * budgeted R-rescue if it does still get lost — KEEP IN STEP WITH both those files if the law
+ * changes again. */
+const drive = (ms) => evalJs(`(() => new Promise((done) => {
+  const W = window.WANDEROAD, c = W.car;
+  const send = (code, type) => window.dispatchEvent(
+    new KeyboardEvent(type, { code, bubbles: true, cancelable: true }));
+  const held = new Set();
+  const set = (code, want) => {
+    if (want && !held.has(code)) { held.add(code); send(code, 'keydown'); }
+    else if (!want && held.has(code)) { held.delete(code); send(code, 'keyup'); }
+  };
+  let best = 0, suns = W.wallet.suns, rescues = 0, lost = 0;
+  const t0 = performance.now();
+  const id = setInterval(() => {
+    const since = performance.now() - t0;
+    try {
+      const q = c.terrain.roads.query(c.x, c.z);
+      const kph = Math.abs(c.kph);
+      const off = !isFinite(q.d) || q.d > q.width * 0.5 + 1.5;
+      lost = off ? lost + 0.04 : 0;
+      if (lost >= 0.6 && rescues < 1 && since < ${ms} - 10000) {
+        send('KeyR', 'keydown'); send('KeyR', 'keyup');
+        rescues++; lost = 0;
+        set('KeyA', false); set('KeyD', false); set('KeyS', false); set('KeyW', true);
+      } else if (isFinite(q.d)) {
+        let tx = q.tx, tz = q.tz;
+        const fx = Math.sin(c.yaw), fz = Math.cos(c.yaw);
+        if (fx * tx + fz * tz < 0) { tx = -tx; tz = -tz; }
+        const lateral = (c.x - q.qx) * tz - (c.z - q.qz) * tx;
+        let head = Math.atan2(tx, tz) - c.yaw;
+        while (head > Math.PI) head -= Math.PI * 2;
+        while (head < -Math.PI) head += Math.PI * 2;
+        const want = -lateral * 0.30 + head * 2.4;
+        set('KeyA', want > 0.16);
+        set('KeyD', want < -0.16);
+        const cap = Math.abs(lateral) > 1.6 ? 36 : 45;
+        set('KeyW', kph < cap);
+        set('KeyS', kph > cap + 15);
+      } else {
+        set('KeyA', false); set('KeyD', false); set('KeyS', false); set('KeyW', kph < 40);
+      }
       best = Math.max(best, W.streak.state.distance);
       suns = W.wallet.suns;
+    } catch (e) { /* one bad frame must not leave the keys jammed down */ }
+    if (since >= ${ms}) {
+      clearInterval(id);
+      for (const code of Array.from(held)) set(code, false);
+      done({ best, suns, rescues, kph: +c.kph.toFixed(1) });
     }
-  } finally { set(0); K('KeyW','keyup'); }
-  return { best, suns, kph: +c.kph.toFixed(1) }; })()`);
+  }, 40);
+}))()`);
+
+/* MILESTONES_M/milestoneReward, not a flat STREAK_METRES_PER_SUN: the economy was rewritten to
+ * "ONE BAR, ONE MILESTONE, ONE SUN" (wallet.js's own header) — the first bar is a full 1000 m,
+ * not a flat few-hundred-metre rate, so this needs enough road to actually finish one. `wallet.js`
+ * stopped exporting STREAK_METRES_PER_SUN when that landed and this file was never updated to
+ * match — it was failing on every run, always reporting "rate: one per undefined m", regardless
+ * of the drive. Caught running the mandated testing cycle after an unrelated change. */
+const { MILESTONES_M, milestoneLength, milestoneReward } = await import('../src/game/wallet.js');
 
 let best = 0;
 let suns = start.suns;
-for (let leg = 0; leg < 4 && suns < start.suns + 2; leg++) {
+// Up to 20 legs (300 s): the first 1000 m milestone is real road, and this seed's own network
+// has at least one spot (measured: ~850-900 m in) the ported DRIVE_BY_HAND steering still loses
+// once in a while — its own budgeted R-rescue recovers it, but that resets the streak, so the
+// run needs enough legs left afterward to rebuild past 1000 m rather than a shorter first bar.
+for (let leg = 0; leg < 20 && suns < start.suns + 2 && best < MILESTONES_M[0] * 1.2; leg++) {
   const r = await drive(15000);
   if (!r) continue;
   best = Math.max(best, r.best);
@@ -149,11 +191,17 @@ for (let leg = 0; leg < 4 && suns < start.suns + 2; leg++) {
   console.log(`       leg ${leg + 1}: ${r.kph} km/h, best streak this leg ${r.best.toFixed(0)} m, ${r.suns} suns`);
 }
 
-const { STREAK_METRES_PER_SUN } = await import('../src/game/wallet.js');
 const earned = suns - start.suns;
-const expect = Math.floor(best / STREAK_METRES_PER_SUN);
-console.log(`       banked ${best.toFixed(0)} m of streak and earned ${earned} sun(s) (rate: one per ${STREAK_METRES_PER_SUN} m)`);
-check(best > STREAK_METRES_PER_SUN, 'the drive actually banked a streak worth paying for', `${best.toFixed(0)} m`, `> ${STREAK_METRES_PER_SUN} m`);
+// Suns owed for every milestone actually finished, walking the real ladder rather than a flat
+// rate — same arithmetic bench-economy.mjs already asserts, just fed this run's own `best`.
+let expect = 0;
+let cum = 0;
+for (let i = 0; cum + milestoneLength(i) <= best; i++) {
+  expect += milestoneReward(i);
+  cum += milestoneLength(i);
+}
+console.log(`       banked ${best.toFixed(0)} m of streak and earned ${earned} sun(s) (first milestone: ${MILESTONES_M[0]} m for ${milestoneReward(0)} sun)`);
+check(best > MILESTONES_M[0], 'the drive actually banked a streak worth paying for', `${best.toFixed(0)} m`, `> ${MILESTONES_M[0]} m (the first milestone)`);
 check(earned >= 1, 'DRIVING WELL PAYS SUNS in the built game', earned, '>= 1');
 check(earned <= expect + 1, 'and it pays the rate, not a random number', earned, `<= ${expect + 1}`);
 

@@ -59,7 +59,6 @@
 
 import { fmtScore, fmtDistance } from '../game/streak.js';
 import { FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
-import { STREAK_METRES_PER_SUN } from '../game/wallet.js';
 import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
 

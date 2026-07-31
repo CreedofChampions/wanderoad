@@ -1763,14 +1763,34 @@ export function airfieldCellsWarm(x0, z0, x1, z1, seed) {
   return true;
 }
 
+/* B11: showroom halls paid the exact same cold-cell cost as harbours/airfields did before THIS
+ * warm-gate existed for them — measured live with tools/bench-props.mjs: `_showroomForCell`'s
+ * up-to-6 `nearestRoadPoint` calls (each an ~800 m-radius `edgesInBox`, 20-360 ms cold) landing
+ * synchronously inside render/props.js's phase 6 pushed one tile bake to 2295.9 ms, another to
+ * 1427.0 ms, in a budget that assumes 12 ms worst case. Same fix, same shape: warm one cell a
+ * frame off the critical path (`warmOne` below), and phase 6 only builds halls for a box every
+ * cell of which is already resolved — see this section's own header comment just above. */
+export function showroomCellsWarm(x0, z0, x1, z1, seed) {
+  const gi0 = Math.floor((x0 - SHOWROOM_CELL) / SHOWROOM_CELL);
+  const gi1 = Math.floor((x1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  const gj0 = Math.floor((z0 - SHOWROOM_CELL) / SHOWROOM_CELL);
+  const gj1 = Math.floor((z1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) if (!_hallCache.has(`${gi},${gj},${seed},1`)) return false;
+  }
+  return true;
+}
+
 /**
  * Resolve at most ONE unresolved cell near (x,z), nearest first. Returns true if it did any work, so
- * a caller can stop after one per frame. Harbours before airfields: the boat is the earlier unlock.
+ * a caller can stop after one per frame. Harbours before airfields before showrooms: the boat and the
+ * plane are both game unlocks, a showroom is not.
  */
 export function warmOne(x, z, seed, probe, radiusCells = 1) {
   for (const [cell, cache, fn] of [
     [HARBOUR_CELL, _hbCache, harbourForCell],
     [AIRFIELD_CELL, _afCache, airfieldForCell],
+    [SHOWROOM_CELL, _hallCache, showroomForCell],
   ]) {
     const ci = Math.floor(x / cell);
     const cj = Math.floor(z / cell);

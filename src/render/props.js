@@ -32,6 +32,7 @@ import {
   harboursInBox,
   harbourCellsWarm,
   airfieldCellsWarm,
+  showroomCellsWarm,
   warmOne,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
   SHOWROOM_SLOTS,
@@ -2446,8 +2447,16 @@ export class Props {
          * and has no ox/oz at all, so it referenced undefined names and every tile silently baked
          * zero showrooms. Caught by tools/diag-walkin.mjs's first check ("the tiler actually built a
          * showroom": 0), which is precisely why that check asks the RENDERER's list and not the
-         * seed's. */
-        job.halls = showroomsInBox(ox, oz, ox + size, oz + size, this.seed, { height: job.probe.height });
+         * seed's.
+         *
+         * B11: gated on `showroomCellsWarm` for exactly the reason phases 4 and 5 are — a cold
+         * cell's `nearestRoadPoint` calls measured 20-360 ms EACH, up to 6 of them per candidate
+         * cell, and paying that synchronously here put one tile bake at 2295.9 ms against a 12 ms
+         * budget (tools/bench-props.mjs). An unwarmed tile simply gets no showroom and picks one up
+         * once `update()`'s own `warmOne` has resolved it, same as an airfield or harbour. */
+        job.halls = showroomCellsWarm(ox, oz, ox + size, oz + size, this.seed)
+          ? showroomsInBox(ox, oz, ox + size, oz + size, this.seed, { height: job.probe.height })
+          : [];
         job.phase = 7;
         return;
       default:
