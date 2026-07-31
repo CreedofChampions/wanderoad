@@ -196,7 +196,24 @@ void main(){
   float r = length(vC);
   if(!(r <= 1.02)) discard;
   vec2 tile = vec2(mod(floor(vSeed*4.0), 2.0), mod(floor(vSeed*2.0), 2.0));
-  vec4 prof = texture(uPuff, (clamp(vC,-1.0,1.0)*0.5 + 0.5)*0.5 + tile*0.5);
+  /* MIRROR EACH PUFF, RATHER THAN ROTATE IT.
+   *
+   * Operator, with a photograph: "seems like people ate bits out of the right of the cloud -- the
+   * left is how it should be though." The right edge was a hard staircase; the left was soft.
+   *
+   * That was the cost of removing the per-puff spin. There are only FOUR baked profiles in the
+   * atlas, and with the rotation gone every puff drew its profile at the SAME orientation — so the
+   * straight segments in a scalloped edge all landed at the same angle and stacked, one on top of
+   * the next, into a flight of steps. The old spin hid it, at the price of the hard rotated edges
+   * and broken-up silhouettes he complained about first. Both complaints are the same underlying
+   * shortage: not enough distinct silhouettes.
+   *
+   * Mirroring gives four orientations per profile — sixteen silhouettes in all — WITHOUT rotating
+   * anything. A mirrored axis-aligned quad is still axis-aligned, so no puff gains a hard diagonal
+   * edge against its neighbour, and no two adjacent puffs share the same flat any more. */
+  vec2 flip = vec2(mod(floor(vSeed*8.0), 2.0), mod(floor(vSeed*16.0), 2.0)) * 2.0 - 1.0;
+  vec2 pc = clamp(vC, -1.0, 1.0) * flip;
+  vec4 prof = texture(uPuff, (pc*0.5 + 0.5)*0.5 + tile*0.5);
   // An analytic radial falloff multiplies the baked profile: it softens the silhouette, and
   // it makes a hard-edged opaque quad structurally impossible even if the atlas is missing.
   float a = prof.r * smoothstep(1.02, 0.60, r);
