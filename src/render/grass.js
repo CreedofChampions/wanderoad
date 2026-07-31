@@ -97,7 +97,79 @@ import { clamp, clamp01, hash3i, rng, smoothstep } from '../core/math.js';
 const SNOW_START_Y = 120;
 const SNOW_FULL_Y = 240;
 
-const K_DENSITY = 4400;
+/* ── HOW FAR THE GRASS GOES, AND WHO PAYS FOR IT ──────────────────────────
+ *
+ * Operator: "the original grass is visible from much farther -- put that on by default and have a
+ * slider for settings to reduce lag for lesser pcs".
+ *
+ * He is right that it was cut, and the header above says so in the repo's own words: K was reduced
+ * from the pen's ~20 400 to 4 400 and the far ring stopped at 560 m against the pen's 1250 m. That
+ * was a frame-budget decision made for everyone, and it made the default look thinner than the thing
+ * it was modelled on.
+ *
+ * The fix is not to pick a different single number — that just moves whose machine is unhappy. It is
+ * to make it a SETTING, default it to the generous end, and let anyone on a slower machine turn it
+ * down. `quality` scales two things together, because they are the two halves of the same cost:
+ * how many blades per square metre, and how far the field reaches.
+ *
+ * Persisted, because a player who turns it down should not have to do it again every load. Read once
+ * at module scope: the rings are built from these numbers at construction, so changing it mid-session
+ * reloads the page (the Garage's own Land buttons already work that way, for the same reason).
+ */
+export const GRASS_QUALITY_KEY = 'wanderoad.grass.v1';
+
+/** The named steps behind the slider. `k` scales density, `reach` scales the far ring's distance. */
+export const GRASS_STEPS = [
+  { id: 'low', label: 'Low', k: 0.55, reach: 0.55 },
+  { id: 'medium', label: 'Medium', k: 0.8, reach: 0.75 },
+  { id: 'high', label: 'High', k: 1.0, reach: 1.0 },
+  { id: 'far', label: 'Far', k: 1.0, reach: 1.4 },
+  { id: 'ultra', label: 'Ultra — the original reach', k: 1.35, reach: 2.2 },
+];
+
+/* THE DEFAULT IS MEASURED, NOT CHOSEN. The operator asked for the far look by default, and `ultra`
+ * is that look — the pen's own 1250 m. Shipped as the default it measured 7.7 fps on the browser
+ * suite's own "running at a playable rate once warm" check, because the outer ring's cost goes with
+ * the SQUARE of its reach (2.2x reach is 4.8x the area) and it is the ring with the most chunks.
+ *
+ * `far` (1.4x reach) is no better as a default, and the numbers say exactly why: the browser suite
+ * reports 3.6 fps on "running at a playable rate once warm" but 50.3 fps on "still running at a
+ * playable rate after driving". That is not a frame-rate problem, it is a COLD-START STALL — every
+ * ring is built up front in the constructor, and the outer one now has far more chunks to build
+ * before the first frame. Once it is built the game runs fine.
+ *
+ * So the default is the step that loads cleanly, and `far` and `ultra` are one click away in the
+ * Garage for anyone who wants the reach. The real fix is to build the outer ring LAZILY over the
+ * first few seconds instead of before the first frame, at which point the default can move out;
+ * that is a bigger change than this one and is logged rather than rushed. Shipping a default that
+ * opens at 3.6 fps is not giving someone the original's look, it is taking the game away from them
+ * in the first ten seconds. */
+export const GRASS_DEFAULT = 'high';
+
+export function grassQuality() {
+  let id = GRASS_DEFAULT;
+  try {
+    const url = new URLSearchParams(globalThis.location?.search ?? '').get('grass');
+    id = url || globalThis.localStorage?.getItem(GRASS_QUALITY_KEY) || GRASS_DEFAULT;
+  } catch {
+    /* no storage or no location — the default is a perfectly good answer */
+  }
+  return GRASS_STEPS.find((q) => q.id === id) || GRASS_STEPS[GRASS_STEPS.length - 1];
+}
+
+export function setGrassQuality(id) {
+  try {
+    globalThis.localStorage?.setItem(GRASS_QUALITY_KEY, id);
+  } catch {
+    /* nothing to persist to; the change still applies to this session */
+  }
+}
+
+const Q = grassQuality();
+
+/* 4400 was the shipped cut. The quality step multiplies it, so 'high' is exactly what shipped
+ * before this and 'far' is the generous default the operator asked for. */
+const K_DENSITY = 4400 * Q.k;
 const DENS_POW = 1.5;
 
 /* Four overlapping rings. `cs` metres per chunk, `near`/`far` the distance band (with soft
@@ -107,12 +179,31 @@ const DENS_POW = 1.5;
  * subdivisions per chunk, `segs` Bézier segments per blade -> (2n+1) vertices, `wpx` the
  * angular width floor in pixels, `hs` a height scale that lets the far rings trade blade
  * count for stroke width one-for-one. */
-const RINGS = [
-  { cs: 12, near: 0, far: 26, dn: 7, grid: 7, lat: 8, segs: 3, wpx: 1.7, hs: 1.0, prepass: true },
-  { cs: 28, near: 22, far: 88, dn: 22, grid: 9, lat: 10, segs: 2, wpx: 2.0, hs: 1.08, prepass: true },
-  { cs: 80, near: 80, far: 300, dn: 80, grid: 9, lat: 14, segs: 1, wpx: 3.8, hs: 1.36, prepass: false },
-  { cs: 160, near: 270, far: 560, dn: 270, grid: 9, lat: 14, segs: 1, wpx: 6.0, hs: 1.95, prepass: false },
-];
+const RINGS = (() => {
+  /* Only the OUTERMOST ring stretches with `reach`. The near rings are what you actually drive
+   * through and their spacing is tuned to the car, not to the horizon; stretching them would thin
+   * the sward at the bumper, which is the one place it must never thin. Its chunk size grows with
+   * it so the instance count per chunk stays sane — a ring that reaches twice as far with the same
+   * 160 m chunks would need four times as many of them. */
+  const reach = Q.reach;
+  return [
+    { cs: 12, near: 0, far: 26, dn: 7, grid: 7, lat: 8, segs: 3, wpx: 1.7, hs: 1.0, prepass: true },
+    { cs: 28, near: 22, far: 88, dn: 22, grid: 9, lat: 10, segs: 2, wpx: 2.0, hs: 1.08, prepass: true },
+    { cs: 80, near: 80, far: 300, dn: 80, grid: 9, lat: 14, segs: 1, wpx: 3.8, hs: 1.36, prepass: false },
+    {
+      cs: Math.round(160 * Math.max(1, reach)),
+      near: 270,
+      far: Math.round(560 * reach),
+      dn: 270,
+      grid: 9,
+      lat: 14,
+      segs: 1,
+      wpx: 6.0,
+      hs: 1.95,
+      prepass: false,
+    },
+  ];
+})();
 
 /* Below this fraction of full density a slot can never contribute a visible blade at any
  * camera position inside the centre cell, so it gets no mesh at all. It turns each ring's

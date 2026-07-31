@@ -335,14 +335,25 @@ export const BIOME_TINT = [
  *             (air), the snow blend above 120 m (terrainMaterial.js), and the snowline grass
  *             suppression that shares that ramp (render/grass.js).
  *   DUNES     the existing sand stops, promoted out of their special case.
- *   WETLAND   silver-teal peat, desaturated the way standing water and mist desaturate.
+ *   WETLAND   SEDGE GREEN. It was '#8BBCC2'/'#5A939D'/'#3B6A7A'/'#254550' — "silver-teal peat" —
+ *             and the operator caught it exactly as he caught the highlands: "wetland at -3000
+ *             +10,000 is blue land/grass (should be green)". Those four stops run +55 to +67 blue
+ *             over red; ground in daylight is never bluer than it is red, and a marsh is not an
+ *             exception — a marsh is GREEN, and greener than dry land, because it never dries out.
+ *
+ *             This is the SECOND biome to make the same mistake (highlands was the first, fixed the
+ *             same way with the same tool), and both came from the same good intention: separating
+ *             the biomes by hue. The lesson is that the hue budget only runs from warm to cool
+ *             through green and gold — it does not extend to blue, because blue is water. Wetland now
+ *             separates from the meadow by being LESS YELLOW and darker (b-r -24 against the meadow's
+ *             -58) rather than by being cool, which keeps them apart without either going blue.
  */
 export const BIOME_GROUND = [
   [P.tLit, P.tMid, P.tShade, P.tHollow], // 0 MEADOW — the pen's own valley, untouched
   ['#D7D278', '#A9B84A', '#7F8438', '#57592B'], // 1 STEPPE   — sun-bleached gold
   ['#BCBCAE', '#8F9280', '#64685A', '#464A3F'], // 2 HIGHLAND — lichen-grey stone (see note below)
   [P.sandLit, P.sandMid, P.sandShade, P.sandHollow], // 3 DUNES — rose-and-ochre sand
-  ['#8BBCC2', '#5A939D', '#3B6A7A', '#254550'], // 4 WETLAND  — silver-teal peat
+  ['#9CBB84', '#6C9163', '#456A4F', '#2E4838'], // 4 WETLAND  — sedge green (see the note below)
 ];
 
 /* How hard the ground palette snaps to the dominant biome, as one exponent.

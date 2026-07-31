@@ -16,6 +16,7 @@ import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, unlockRule, cheatOn, fmtUnlock
 import { BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
 import { PAD_HELP } from '../car/input.js';
+import { GRASS_STEPS, grassQuality, setGrassQuality } from '../render/grass.js';
 
 
 /* ── the seed ────────────────────────────────────────────────────────────────
@@ -185,6 +186,9 @@ export class Menu {
         <h3>Shop <small>a boat at a harbour, spare fuel cans at a petrol station</small></h3>
         <div class="row" data-group="shop"></div>
 
+        <h3>Grass <small>how far the meadow reaches — turn it down if the game runs slowly</small></h3>
+        <div class="row" data-group="grass"></div>
+
         <h3>Land <small>reloads the world</small></h3>
         <div class="row" data-group="terrain"></div>
 
@@ -228,6 +232,7 @@ export class Menu {
     if (invite) sheet.insertBefore(invite, sheet.querySelector('.foot'));
 
     this._fillSuns();
+    this._fillGrass();
     this._fillCars();
     this._fillTank();
     this._fillShop();
@@ -277,6 +282,21 @@ export class Menu {
    *
    * Cars already yours are listed as a plain line rather than dropped, because "what have I got" is
    * half of what someone opens this panel to find out. */
+  /* THE GRASS SLIDER. Operator: "the original grass is visible from much farther -- put that on by
+   * default and have a slider for settings to reduce lag for lesser pcs."
+   *
+   * A reload, like the Land buttons beside it and for the same honest reason: the grass rings are
+   * built from these numbers when the field is constructed, and pretending otherwise would mean
+   * tearing down and rebuilding four instanced meshes mid-frame. The button says "reloads". */
+  _fillGrass() {
+    const row = this.root.querySelector('[data-group="grass"]');
+    if (!row) return;
+    const now = grassQuality().id;
+    row.innerHTML = GRASS_STEPS.map(
+      (q) => `<button data-group="grass" data-key="${q.id}"${q.id === now ? ' class="on"' : ''}>${q.label}</button>`
+    ).join('');
+  }
+
   _fillSuns() {
     const box = this.root.querySelector('[data-group="suns"]');
     if (!box) return;
@@ -478,6 +498,14 @@ export class Menu {
       return;
     }
     if (act === 'seedGo') return this.applySeed();
+
+    if (group === 'grass') {
+      setGrassQuality(key);
+      this._fillGrass();
+      this.hooks.say?.('reloading with the new grass…', 2.0);
+      setTimeout(() => location.reload(), 350);
+      return;
+    }
 
     if (group === 'car') {
       const spec = FLEET_BY_ID[key];

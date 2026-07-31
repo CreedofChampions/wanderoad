@@ -27,7 +27,16 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const CHROME = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const args = process.argv.slice(2);
-const URL_UNDER_TEST = args.find((a) => a.startsWith('http')) || 'http://localhost:5173/';
+/* ALWAYS A NEW PLAYER. This suite reuses one Chrome profile (`.chrome-test` below), so localStorage
+ * survives between runs — which was harmless until the game learned to resume where you left off.
+ * After that, every run started wherever the PREVIOUS run had parked, in whatever biome that was:
+ * R1 reported a rock-solid "7 points buried, worst 0.89 m" (the same saved spot, every time), O2's
+ * off-road speed swung with the biome it happened to resume into, and the sample counts moved run to
+ * run. None of that was the game; all of it was the harness measuring a returning player while
+ * claiming to measure a fresh one. `?fresh=1` is the game's own switch for exactly this, and
+ * tools/diag-resume.mjs asserts it still works. */
+const RAW_URL = args.find((a) => a.startsWith('http')) || 'http://localhost:5173/';
+const URL_UNDER_TEST = RAW_URL + (RAW_URL.includes('?') ? '&' : '?') + 'fresh=1';
 const SHOTS = resolve('shots/test');
 const PORT = 9800 + (process.pid % 300);
 

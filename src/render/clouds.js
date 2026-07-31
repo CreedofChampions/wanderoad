@@ -164,9 +164,17 @@ void main(){
   vFwd   = normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]));
 
   float rad = pdata.x * mix(0.80, 1.06, op);
-  float ra = pdata.y*2.399963;                    // golden-angle spin per puff
-  float cr = cos(ra), sr = sin(ra);
-  vec2 rc = vec2(corner.x*cr - corner.y*sr, corner.x*sr + corner.y*cr);
+  /* NO PER-PUFF SPIN. Operator: "the original clouds dont have the odd roatations and breaks in
+   * them -- stay closer to those."
+   *
+   * Each puff used to be rotated by a golden-angle multiple of its own seed. The intent was to stop
+   * a repeated sprite reading as a repeated sprite — but a billboard rotated about the VIEW axis
+   * turns its own soft edge into a hard one against its neighbours, and a bank of puffs at different
+   * angles stops reading as one cloud and starts reading as a pile of discs. That is the "odd
+   * rotations and breaks". The puffs stay upright now, which is what the original does; the variety
+   * still comes from radius, opacity and the noise in the fragment shader, none of which chop the
+   * silhouette up. */
+  vec2 rc = corner;
   vec3 wp = wc + vRight*(rc.x*rad) + vUp*(rc.y*rad*0.86);
   vC = rc; vSeed = pdata.y; vHF = pdata.z; vW = wp;
   gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
