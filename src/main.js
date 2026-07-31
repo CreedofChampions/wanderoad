@@ -1071,7 +1071,7 @@ async function boot() {
         car.placeAt(plane.x, plane.z, plane.yaw);
         hud.say('back in the car', 2.4);
       } else if (!plane.unlocked) {
-        hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} from the sea`, 3.4);
+        hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} away`, 3.4);
       } else {
         plane.start(car, false);
       }

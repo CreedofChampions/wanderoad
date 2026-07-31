@@ -161,7 +161,7 @@ export class Plane {
    */
   start(car, inAir = false) {
     if (!this.unlocked) {
-      this.say(`the plane needs ${this.gemsToGo} more diamond${this.gemsToGo === 1 ? '' : 's'} from the sea`, 3.4);
+      this.say(`the plane needs ${this.gemsToGo} more diamond${this.gemsToGo === 1 ? '' : 's'} away`, 3.4);
       return false;
     }
     const t = this.terrain?.();
