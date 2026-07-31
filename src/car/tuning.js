@@ -167,6 +167,63 @@ export const TIERS = {
     wheelRadius: 0.35,
     drive: 'awd',
   },
+  /* ── THE TRUCK ──────────────────────────────────────────────────────────────
+   * Operator: "Slow cars like truck right now cant go up mountains -- should be the best at it"
+   * and "Truck should do better offroad too".
+   *
+   * A tier, not a `feel`, because `feel` reaches the steering and the tyres and NOTHING in the
+   * drivetrain — and the drivetrain is what a gradient is decided by. Measured: the pickup and the
+   * starter Estate were byte-identical in every equation that sets a climbing limit, which is why
+   * the truck was no better on a hill than the shopping car.
+   *
+   * The numbers are chosen from the standing-start limit, which is the honest test of "can it climb
+   * a mountain": drive force at idle rpm is peakTorque x 0.573 (the torque curve at idle) x
+   * ratios[0] x finalDrive / wheelRadius x 0.88 (driveloss). Here that is
+   * 105 x 0.573 x (5.2 x 12.5) / 0.40 x 0.88 = 8607 N against m*g = 20601 N, so it restarts from a
+   * dead stop on about a 28-degree, 53% grade. The Estate's equivalent is 18 degrees / 32%.
+   *
+   * `drive: 'awd'` is the single biggest lever and the reason a real truck climbs: it puts the whole
+   * weight under the driven wheels instead of the rear share alone.
+   *
+   * NOTE wheelRadius DIVIDES the drive force, so the bigger tyre a truck should have is paid for in
+   * the ratio rather than given away. Slow on the flat, unstoppable on a hill — which is the trade
+   * the operator asked for. */
+  truck: {
+    name: 'Truck',
+    mass: 2100,
+    izz: 4200,
+    /* 3.15, not the real F-150's 3.68. A long wheelbase is most of what makes a truck turn badly, and
+     * with the Ford as the STARTER car that stopped being flavour and became a wall: the browser
+     * suite's C3 ("you can stop and turn around") fell to 92 degrees of a required 100 — a new player
+     * literally could not three-point-turn out of a dead end. Still the longest in the fleet by half a
+     * metre, so it corners like a truck; just not like one that cannot be parked. */
+    wheelbase: 3.15,
+    track: 1.72,
+    cgHeight: 0.62,
+    weightRear: 0.42,
+    power: 250,
+    /* 128, not 105. At 105 the truck restarts on a 23.8-degree (44%) slope, which beats the old
+     * starter car's 17.1 degrees but LOSES to the sports tier's 26.7 — and the operator asked for the
+     * truck to be the best climber in the game, not merely better than a shopping car. 128 puts it at
+     * 29.7 degrees / 57% grade, clear of everything a player will meet. Held under ~130 deliberately:
+     * past that it climbs anything at all up to where grip fades, and a truck that cannot be stopped
+     * by a hill is as dull as one that cannot climb. */
+    peakTorque: 128,
+    redline: 5200,
+    cdA: 1.35,
+    rollPerG: 4.6,
+    /* THE TURN-AROUND IS A SPEED PROBLEM, not a steering one. `minRadius` (7 m) is global, so the
+     * truck's turning circle is the same as everyone's — but yaw rate is v/R, so a car that is slow
+     * off the line simply sweeps less arc in the same seconds, and the browser suite's C3 measures
+     * exactly that. 9.5 s to 60 was also just wrong for the vehicle: a real F-150 does it in about
+     * 6.5. Faster off the line, still the lowest top speed in the fleet. */
+    topSpeed: 78,
+    zeroTo60: 6.8,
+    ratios: [5.2, 3.1, 2.0, 1.42, 1.05, 0.84],
+    finalDrive: 12.5,
+    wheelRadius: 0.40,
+    drive: 'awd',
+  },
 };
 
 /* ── tyres ───────────────────────────────────────────────────────────────
@@ -334,6 +391,12 @@ export const BRAKE = {
  * taper over the last `taperBand` m/s, the exact technique the forward `vMax` governor in
  * vehicle.js already uses, so reverse tops out the same honest way forward top speed does. */
 export const REVERSE = {
+  /** Newtons of push per unit of brake pedal, and the scale applied after. Lifted out of a literal
+   *  in vehicle.js so reverse is tunable like every other part of the drivetrain. Raised from an
+   *  effective 1300 N because 0-20 km/h took 7.6 s against 5.4 s for 0-60 FORWARD — see the note at
+   *  the use site. The top speed is set by `maxSpeed`/`taperBand` below and is untouched. */
+  force: 5400,
+  scale: 0.5,
   maxSpeed: 8, // m/s, ~29 km/h — a real reverse gear, not a sprint
   taperBand: 3, // m/s over which the force eases out approaching maxSpeed
   // How close to a standstill the car must be, moving FORWARDS, before holding the brake

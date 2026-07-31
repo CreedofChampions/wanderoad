@@ -15,6 +15,9 @@
 
 import { STEER, TYRE, BRAKE } from '../car/tuning.js';
 
+/** The stock mechanical turning floor, captured before any car overwrites it. */
+const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
+
 /**
  * `unlockAt` is metres of BEST streak — kept for the unlock bar's badges, it grants nothing.
  *
@@ -31,13 +34,49 @@ import { STEER, TYRE, BRAKE } from '../car/tuning.js';
  */
 export const FLEET = [
   {
-    id: 'estate',
+    /* THE PICKUP. Operator: "Add ford f150 to game".
+     *
+     * The one genuinely different SHAPE in the fleet — everything else is a car, this is a truck, and
+     * at 5.91 m it is a metre and a quarter longer than anything beside it on a forecourt. Its model
+     * is built by tools/make-truck.mjs from this repository's own geometry rather than downloaded:
+     * every CC0 pickup available is a single-material texture-atlas model, and this game paints a car
+     * by reading separated material names. That note lives in full at the top of make-truck.mjs.
+     *
+     * "Ford" and "F-150" are Ford's trademarks. This is a generic full-size pickup at F-150
+     * proportions; the label below is the only place the name appears, so renaming it is one word.
+     *
+     * It DRIVES like a truck, which is the point of adding one rather than another saloon: the lowest
+     * cornering limit in the fleet, the slowest steering build, and the only positive `offRoad` bonus
+     * besides the Rally's — a pickup should be the thing you take off the tarmac when the Rally is
+     * still out of reach. The tank is the fleet's biggest, in tuning.js, for the same reason. */
+    id: 'pickup',
+    file: 'pickup.glb',
+    label: 'Ford F150',
+    blurb: 'A full-size pickup. Slow to turn, hard to stop, and happy in the dirt.',
+    unlockAt: 0,
     earnAt: 0,
+    price: 0, // the car you start in — operator: "Starter car cant go up many hills -- replace with ford"
+    tier: 'truck',
+    length: 5.91,
+    /* buildRate 3.0, not 2.1. `buildRate` is how fast the KEYBOARD winds on to full lock, and at 2.1
+     * — the slowest in the fleet — the truck spent most of a seven-second turn still winding on.
+     * A truck's laziness belongs in `comfortG` (how much cornering it will ask for at all), which is
+     * still the lowest here; making the driver wait for the wheel to arrive just feels broken. */
+    /* comfortG 8.4 and rearGrip 0.98. The truck still would not come round: 94 degrees of a required
+     * 100 on the browser suite's turn-around check. `rearGrip` above 1 is extra grip at the BACK,
+     * which is understeer — the nose washes wide and the car refuses to rotate — and 1.08 was the
+     * most understeery number in the fleet on the heaviest car. A truck should feel lazy and lean,
+     * which it does through its mass, its roll and its low limits; it should not be unable to turn
+     * round in a dead end, which is what a new player will try in the first minute. */
+    feel: { comfortG: 8.4, assist: 'cruise', rearGrip: 0.98, buildRate: 3.0, brakeMul: 0.92, offRoad: 1.35, minRadius: 5.2 },
+  },
+  {
+    id: 'estate',
     file: 'estate.glb',
     label: 'Estate',
     blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
-    unlockAt: 0,
-    price: 0, // the car you start in
+    unlockAt: 1000,
+    price: 30,
     tier: 'gt',
     length: 4.6,
     feel: { comfortG: 7.0, assist: 'cruise', rearGrip: 1.06, buildRate: 2.6, brakeMul: 1.15 },
@@ -98,32 +137,6 @@ export const FLEET = [
     tier: 'gt',
     length: 4.5,
     feel: { comfortG: 7.6, assist: 'cruise', rearGrip: 1.04, buildRate: 2.4, brakeMul: 1.2 },
-  },
-  {
-    /* THE PICKUP. Operator: "Add ford f150 to game".
-     *
-     * The one genuinely different SHAPE in the fleet — everything else is a car, this is a truck, and
-     * at 5.91 m it is a metre and a quarter longer than anything beside it on a forecourt. Its model
-     * is built by tools/make-truck.mjs from this repository's own geometry rather than downloaded:
-     * every CC0 pickup available is a single-material texture-atlas model, and this game paints a car
-     * by reading separated material names. That note lives in full at the top of make-truck.mjs.
-     *
-     * "Ford" and "F-150" are Ford's trademarks. This is a generic full-size pickup at F-150
-     * proportions; the label below is the only place the name appears, so renaming it is one word.
-     *
-     * It DRIVES like a truck, which is the point of adding one rather than another saloon: the lowest
-     * cornering limit in the fleet, the slowest steering build, and the only positive `offRoad` bonus
-     * besides the Rally's — a pickup should be the thing you take off the tarmac when the Rally is
-     * still out of reach. The tank is the fleet's biggest, in tuning.js, for the same reason. */
-    id: 'pickup',
-    file: 'pickup.glb',
-    label: 'Ford F150',
-    blurb: 'A full-size pickup. Slow to turn, hard to stop, and happy in the dirt.',
-    unlockAt: 60000,
-    price: 260,
-    tier: 'gt',
-    length: 5.91,
-    feel: { comfortG: 7.4, assist: 'cruise', rearGrip: 1.08, buildRate: 2.1, brakeMul: 0.92, offRoad: 1.2 },
   },
   {
     id: 'patrol',
@@ -284,6 +297,20 @@ export function applyCarFeel(car) {
   /* Each car's brakes. This was declared in the fleet and then never applied — the Patrol's
    * "strongest brakes in the fleet" and the Estate's forgiving ones were the same brakes. */
   BRAKE.torque = BRAKE.baseTorque * (f.brakeMul || 1);
+  /* THE MECHANICAL TURNING FLOOR, per car. `STEER.minRadius` is the radius below which the comfort
+   * limiter stops shrinking the lock and the rack simply takes over — it is what decides a parking
+   * manoeuvre, because a lateral-acceleration cap says nothing at walking pace.
+   *
+   * It was one global number, and that was fine while every car was a similar size. With the Ford as
+   * the STARTER car it stopped being fine: yaw rate is v/R, the truck is the slowest thing in the
+   * fleet, and the browser suite's C3 ("you can stop and turn around") sat at 87-94 degrees of a
+   * required 100 — a new player could not three-point-turn out of a dead end, which is something they
+   * will try in the first minute. Four tuning guesses at grip, wheelbase, steering ramp and
+   * acceleration all missed because none of them is the thing that sets a parking circle.
+   *
+   * A tighter floor for the truck is also what a real pickup has relative to its size: a big lock at
+   * the rack, used up quickly by the long body. */
+  STEER.minRadius = f.minRadius || STEER_MIN_RADIUS_DEFAULT;
   /* The Rally's `offRoad: 1.35` was the same story a second time — declared above ("the only
    * one that is genuinely happy off the tarmac") and read nowhere. car/vehicle.js's dunes
    * sand-bog severity now divides by this, so the Rally takes proportionally longer to bog

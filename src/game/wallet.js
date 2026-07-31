@@ -15,7 +15,7 @@
  * cheat mode on mid-drive should not fire the same toast a real 500-sun drive earns.
  */
 
-import { cheatOn } from './garage.js';
+import { cheatOn, FIRST_CAR } from './garage.js';
 
 /** Suns needed to earn the boat outright. */
 /* 50, not 500. Suns are now ~1 per kilometre (see world/loot.js), so 500 was a 500 km
@@ -227,7 +227,13 @@ export class Wallet {
    * @param {string} freeId the fleet's first car
    * @param {number} [earnAt] lifetime suns this car unlocks at, if it is one of the earned ones
    */
-  owns(carId, freeId = 'estate', earnAt = Infinity) {
+  /* THE DEFAULT COMES FROM THE FLEET, NOT FROM A STRING. It was `'estate'`, and the moment the
+   * operator asked for the Ford to be the starter car ("Starter car cant go up many hills -- replace
+   * with ford") that literal made the Estate free forever AND made it unbuyable — `buyCar` calls
+   * `owns()` with the default, saw true, and refused to take the money. Caught by bench-economy's
+   * "paying for Estate works" going red. `FIRST_CAR` is `FLEET[0].id`, so the free car is whichever
+   * car the fleet starts with, and reordering the fleet can never desynchronise the two again. */
+  owns(carId, freeId = FIRST_CAR, earnAt = Infinity) {
     if (carId === freeId || this.owned.has(carId) || cheatOn()) return true;
     return Number.isFinite(earnAt) && this.sunsEarned >= earnAt;
   }

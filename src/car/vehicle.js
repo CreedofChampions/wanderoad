@@ -72,6 +72,9 @@ const OFF_ROAD_AT = 0.5;
 /** m/s below which a braked car is held still rather than allowed to creep — see the static-hold
  *  block at the end of _step. About 4 km/h: fast enough to catch the end of a stop, slow enough that
  *  it can never interfere with driving. */
+/** Under this, a car that is not being asked to move is PARKED — 3 km/h, the operator's own
+ *  number. STATIC_HOLD_SPEED below is the wider, brake-held band and is unchanged. */
+const STOP_SPEED = 0.833;
 const STATIC_HOLD_SPEED = 1.1;
 /** 1/s at full brake. 9 kills a slow creep inside a couple of tenths without snapping the car. */
 const STATIC_HOLD_RATE = 9;
@@ -849,7 +852,24 @@ export class Vehicle {
         // downhill hairpin feel like a car instead of a sledge.
         const bogging = this.rpm < GEARBOX.idleRpm + GEARBOX.downshiftHysteresis * 0.9;
         const coasting = this.throttle < 0.05 && rpmIfDown < S.redline * 0.7;
-        if (rpmIfDown < S.redline * 0.92 && (bogging || coasting)) {
+        /* KICKDOWN, and this is what "the car cannot go up hills" actually was.
+         *
+         * Operator: "Starter car cant go up many hills" and "Slow cars like truck right now cant go
+         * up mountains -- should be the best at it."
+         *
+         * The two triggers above are BOGGING (the engine has fallen off the bottom) and COASTING
+         * (the driver lifted off). Neither fires on a hill with the throttle pinned. Traced: the
+         * Estate entering an 18-degree tarmac climb at 66 km/h HOLDS SIXTH for six full seconds
+         * while bleeding to 23 km/h, making 1697-1905 N against 4383 N of gravity, and only drops a
+         * gear at 7.5 s. It never bogs, because sixth at 23 km/h is still 2110 rpm — above the
+         * 1710 rpm floor. So the car simply grinds to a halt in the wrong gear with the pedal flat.
+         *
+         * A real automatic kicks down when you ask for everything and it is losing ground. That is
+         * exactly this test: full throttle, and either actually decelerating or on a real slope.
+         * Nothing else about the box changes. */
+        const kickdown =
+          this.throttle > 0.8 && (this.longAccel < -0.3 || slopeLong < -1.0) && rpmIfDown < S.redline * 0.95;
+        if (rpmIfDown < S.redline * 0.92 && (bogging || coasting || kickdown)) {
           this.gear--;
           this._shiftTimer = GEARBOX.shiftTimeAuto;
           this._shiftHold = 0.5;
@@ -936,7 +956,18 @@ export class Vehicle {
     }
     if (this.reverse) {
       // In reverse the brake IS the accelerator, and reverse is deliberately slow.
-      let rev = Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
+      /* REVERSE PUSH. Operator: "Going in reverse is super slow."
+       *
+       * Measured before this change: 1300 N flat against 1520 kg is 0.86 m/s2, so 0-20 km/h took
+       * 7.6 seconds — the same car does 0-60 km/h FORWARD in 5.4 s. Reverse was 3.5x weaker off the
+       * line. The old figure had no gearing, no torque curve and no car in it at all; it was a
+       * literal, and `Math.abs(driveForce)` is always 0 here because reversing means the throttle is
+       * shut, so the Math.max never chose it.
+       *
+       * REVERSE.force/scale live in tuning.js now, so the reverse "engine" is tunable like the rest.
+       * This raises the push, NOT the top speed: the ~26.7 km/h terminal is set by the taper below,
+       * and is left exactly where it was. */
+      let rev = Math.max(Math.abs(driveForce), this.brake * REVERSE.force) * REVERSE.scale;
       /* THE BUG THIS ONCE WAS: reverse engaged (the flag went true) but the car barely
        * moved — "just go in reverse gear" rather than actually reversing. Measured with a
        * scripted hold-S trace: engine braking alone is ~1666 N at idle rpm in a low gear,
@@ -1087,14 +1118,19 @@ export class Vehicle {
      * the rule is met
      * on every site and the car can still be driven off the tarmac on purpose — which it has
      * to be, because petrol-station forecourts are off-road surfaces. */
-    let crr = lerp(0.236, 0.014, clamp01(onRoad));
+    /* THE CAR'S OWN OFF-ROAD ABILITY, which until now reached the grip model and nothing else.
+     * Operator: "Truck should do better offroad too". Rolling resistance off the tarmac is 3519 N
+     * against 4594 N of drive — it eats 77% of the engine — so a car that is "good off-road" has to
+     * be given relief HERE or the badge means nothing. 1 for every car that has no `offRoad`. */
+    const offMul = TYRE.offRoadMul || 1;
+    let crr = lerp(0.236 / offMul, 0.014, clamp01(onRoad));
     // Dunes: piled sand in front of the wheels, not just a looser surface. See SAND above.
     // Deliberately small next to vDrag below — a constant force alone cannot bleed off a fast
     // ENTRY speed within a few metres, it can only stop the car from creeping once it is
     // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
     // drive at speed" part.
     if (bogHere > 0) crr = lerp(crr, SAND.crrBogged, bogHere); // bogHere, not sandBog — see the note by offCap
-    let vDrag = lerp(18.7, 1.4, clamp01(onRoad));
+    let vDrag = lerp(18.7 / offMul, 1.4, clamp01(onRoad));
     /* The speed-proportional half of off-road resistance is what a car arriving off the
      * tarmac at speed actually decelerates against — the constant term above is too small at
      * 19 m/s to matter (a few tenths of a m/s²) and only bites once the car is already slow.
@@ -1343,7 +1379,37 @@ export class Vehicle {
      * far worse bug than the one being fixed. */
     {
       const held = Math.max(this.brake || 0, this.handbrake || 0);
-      const wantsGo = (this.throttle || 0) > 0.02;
+      /* THE REVERSE PEDAL COUNTS AS WANTING TO GO. Without this the stop below would pin the car at
+       * a standstill the instant it tried to reverse, because reversing IS holding the brake. */
+      const wantsGo = (this.throttle || 0) > 0.02 || (this.reverse && (this.brake || 0) > 0.05);
+
+      /* BELOW 3 KM/H, STOP. Operator: "Stopping means you side down hill or sideways -- below 3 km =
+       * stop moving."
+       *
+       * The hold below this only ran when the brake or handbrake was DOWN (`held > 0.3`), so a
+       * player who simply lifted off and rolled to a stop got no static friction at all — there is
+       * none anywhere else in the solver, by its own admission. What actually held a parked car was
+       * engine braking, by accident, and on a slope that is not enough: gravity along the hill keeps
+       * injecting acceleration and the car creeps or crabs away.
+       *
+       * So this is unconditional on input: if you are not asking to move and you are under 3 km/h,
+       * you are parked. Both components and the yaw rate, because a car that stops but keeps rotating
+       * is worse than one that rolls. The braked case stays STRONGER (rate scaled by `held`), so
+       * nothing about braking got weaker. */
+      const creeping = !wantsGo && Math.hypot(vLong, vLat) < STOP_SPEED;
+      if (creeping) {
+        const k = Math.exp(-STATIC_HOLD_RATE * dt);
+        /* TRANSLATION ONLY. The first version damped `yawRate` here too, on the reasoning that a car
+         * which stops but keeps rotating is worse than one that rolls — and it broke turning round:
+         * the browser suite's C3 fell to 92 degrees of a required 100, because a three-point turn
+         * happens almost entirely below 3 km/h and this was quietly eating the rotation the driver
+         * was asking for. The complaint was that a stopped car SLIDES, which is about where it is,
+         * not about which way it faces. */
+        vLong *= k;
+        vLat *= k;
+        if (Math.abs(vLong) < 0.02) vLong = 0;
+        if (Math.abs(vLat) < 0.02) vLat = 0;
+      }
       if (held > 0.3 && !wantsGo && Math.hypot(vLong, vLat) < STATIC_HOLD_SPEED) {
         const k = Math.exp(-STATIC_HOLD_RATE * held * dt);
         /* LATERAL ALWAYS, longitudinal only when not reversing — and the split is the whole point.
