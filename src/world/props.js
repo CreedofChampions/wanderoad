@@ -1771,10 +1771,21 @@ export function airfieldCellsWarm(x0, z0, x1, z1, seed) {
  * frame off the critical path (`warmOne` below), and phase 6 only builds halls for a box every
  * cell of which is already resolved — see this section's own header comment just above. */
 export function showroomCellsWarm(x0, z0, x1, z1, seed) {
-  const gi0 = Math.floor((x0 - SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gi1 = Math.floor((x1 + SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gj0 = Math.floor((z0 - SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gj1 = Math.floor((z1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  /* ONLY THE CELLS THAT CAN HOLD A CENTRE IN THIS BOX.
+   *
+   * This padded by a whole SHOWROOM_CELL on every side, which meant a tile could not place a
+   * showroom until a 21 km block of 7 km cells was ALL resolved — and `warmOne` resolves one cell
+   * per frame, only on frames with no tile job in flight. Measured: parked 20 m from a showroom the
+   * pure world function says is there, `props.halls` stayed empty for 40 seconds while stations
+   * built normally, and diag-walkin fell from 10/10 to 3/10.
+   *
+   * The padding was never needed. `showroomsInBox` keeps only halls whose CENTRE lands inside the
+   * box, so a cell that does not overlap the box cannot contribute one — waiting on it is waiting on
+   * a cell whose answer is discarded. */
+  const gi0 = Math.floor(x0 / SHOWROOM_CELL);
+  const gi1 = Math.floor(x1 / SHOWROOM_CELL);
+  const gj0 = Math.floor(z0 / SHOWROOM_CELL);
+  const gj1 = Math.floor(z1 / SHOWROOM_CELL);
   for (let gj = gj0; gj <= gj1; gj++) {
     for (let gi = gi0; gi <= gi1; gi++) if (!_hallCache.has(`${gi},${gj},${seed},1`)) return false;
   }
@@ -1786,12 +1797,29 @@ export function showroomCellsWarm(x0, z0, x1, z1, seed) {
  * a caller can stop after one per frame. Harbours before airfields before showrooms: the boat and the
  * plane are both game unlocks, a showroom is not.
  */
+let _warmTurn = 0;
+
 export function warmOne(x, z, seed, probe, radiusCells = 1) {
-  for (const [cell, cache, fn] of [
+  /* ROUND-ROBIN, NOT A FIXED ORDER, and this is a bug fix rather than a tidy-up.
+   *
+   * This walked harbours, then airfields, then showrooms, and RETURNED as soon as it warmed one
+   * cell. So showrooms only ever got a turn when there was no uncached harbour or airfield cell
+   * anywhere within reach — and as the camera moves there almost always is one. Measured: halls
+   * never appeared at all in 40 seconds parked 20 m from a showroom that the pure world function
+   * says is there, while stations built normally. `tools/diag-walkin.mjs` went from 10/10 to 3/10
+   * with "the tiler actually built a showroom: 0".
+   *
+   * Starting the sweep at a rotating offset gives each system its turn regardless of what the others
+   * still owe. Still exactly one cell warmed per call, so the frame budget this gate exists to
+   * protect is unchanged. */
+  const systems = [
     [HARBOUR_CELL, _hbCache, harbourForCell],
     [AIRFIELD_CELL, _afCache, airfieldForCell],
     [SHOWROOM_CELL, _hallCache, showroomForCell],
-  ]) {
+  ];
+  const start = _warmTurn++ % systems.length;
+  for (let k = 0; k < systems.length; k++) {
+    const [cell, cache, fn] = systems[(start + k) % systems.length];
     const ci = Math.floor(x / cell);
     const cj = Math.floor(z / cell);
     for (let ring = 0; ring <= radiusCells; ring++) {

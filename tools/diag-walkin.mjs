@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { showroomsInBox, hallSpots, SHOWROOM_HALF_D } from '../src/world/props.js';
+import { FLEET, unlockRule } from '../src/game/garage.js';
 import { landHeight } from '../src/world/terrain.js';
 
 const SEED = 20260726;
@@ -104,7 +105,16 @@ const parkZ = hall.z + (SHOWROOM_HALF_D + 9) * ca;
 await evalIn(
   `(() => { const c = window.WANDEROAD.car; c.placeAt(${parkX}, ${parkZ}, ${hall.yaw + Math.PI}); c.vx = 0; c.vz = 0; c.speed = 0; return true; })()`
 );
-await sleep(4000);
+/* WAIT FOR THE CELL TO WARM. Showroom placement is gated on `showroomCellsWarm` for the frame
+ * budget — a cold cell's road queries cost hundreds of milliseconds each, so an unwarmed tile gets
+ * no showroom and picks one up once `warmOne` has resolved it, exactly as airfields and harbours do.
+ * A fixed sleep therefore measures the warm-up, not the feature: this polls instead. */
+for (let i = 0; i < 40; i++) {
+  await sleep(1000);
+  const n = await evalIn('(window.WANDEROAD.props && window.WANDEROAD.props.halls || []).length');
+  if (n > 0) break;
+}
+await sleep(1500);
 
 /* THE TILER MUST HAVE BUILT IT. `props.halls` is what the game can walk into; a hall that only
  * exists in the seed is not a building. */
@@ -157,24 +167,30 @@ check(
 );
 
 // Stand at a bay and buy the car there.
-/* Bay 4 is the SEDAN — a car you can only buy, never collect. Bay 2 is the Hatch, which a wallet
- * with 4000 suns collected already owns, so "pressing X takes it" there would prove nothing about
- * buying. It still proves the PROMPT, which is what bay 2 is used for above. */
-const target = spots[3];
+/* THE FIRST BAY HOLDING A CAR YOU CAN ONLY BUY, found by rule rather than by index.
+ *
+ * This used to hard-code bay 4 and the name "Sedan". Bays are filled in FLEET order, so the moment
+ * the hatch became the starter car the order shifted and bay 4 held the Coupe — the check went red
+ * with nothing wrong. A wallet with 4000 suns collected already owns every `earn` car, so only a
+ * `buy` car can prove that pressing X actually BUYS something. */
+const buyIdx = FLEET.findIndex((c) => unlockRule(c).how === 'buy');
+const buyCar = FLEET[buyIdx];
+const target = spots[buyIdx];
+console.log(`       bay ${buyIdx + 1} holds the ${buyCar.label}, which can only be bought`);
 await evalIn(`(() => { const w = window.WANDEROAD.walker; w.x = ${target.x}; w.z = ${target.z + 2.4}; return true; })()`);
 await evalIn("(() => { window.__says = []; const el = document.getElementById('toast'); new MutationObserver(() => { const t = (el.textContent || '').trim(); if (t && window.__says[window.__says.length - 1] !== t) window.__says.push(t); }).observe(el, { childList: true, characterData: true, subtree: true }); return true; })()");
 await sleep(2200);
 const says = JSON.parse((await evalIn('JSON.stringify(window.__says || [])')) || '[]');
-const named = says.find((l) => /Sedan/i.test(l)) || '';
-check(!!named, 'standing at a bay names the car on it', `"${named.slice(0, 28) || says.join('|').slice(0, 28)}"`, 'names Sedan');
+const named = says.find((l) => new RegExp(buyCar.label, 'i').test(l)) || '';
+check(!!named, 'standing at a bay names the car on it', `"${named.slice(0, 28) || says.join('|').slice(0, 28)}"`, `names ${buyCar.label}`);
 
 await key('KeyX', 88, 'x');
 await sleep(3000);
 const after = await evalIn(
-  "(() => ({ owns: window.WANDEROAD.wallet.owns('sedan', 'estate'), car: window.WANDEROAD.model && window.WANDEROAD.model.source, suns: window.WANDEROAD.wallet.suns }))()"
+  `(() => ({ owns: window.WANDEROAD.wallet.owns('${buyCar.id}', '${FLEET[0].id}'), car: window.WANDEROAD.model && window.WANDEROAD.model.source, suns: window.WANDEROAD.wallet.suns }))()`
 );
 check(after && after.owns === true, 'and pressing X in the showroom BUYS it', after && after.owns, 'true');
-check(after && after.car === 'sedan', 'and puts you in it', after && after.car, 'sedan');
+check(after && after.car === buyCar.id, 'and puts you in it', after && after.car, buyCar.id);
 
 /* GETTING BACK IN HAS TO NEED YOU TO BE THERE. Otherwise the car is a teleport, not a car. */
 await evalIn(`(() => { const w = window.WANDEROAD.walker; w.x = w.carX + 60; w.z = w.carZ + 60; return true; })()`);
