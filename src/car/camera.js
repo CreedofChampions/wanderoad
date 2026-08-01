@@ -221,7 +221,8 @@ export class ChaseCamera {
    * @param {Vehicle} car
    * @param {number} dt
    * @param {(x:number,z:number)=>number} groundAt  used to keep the camera out of the hill
-   * @param {{drift?: boolean}} [opts] drift = the car is driving itself, so wander a bit
+   * @param {{drift?: boolean, scale?: number}} [opts] drift = the car is driving itself, so wander a
+   *        bit; scale = widen the rig for a subject bigger than a car (the aeroplane)
    */
   update(car, dt, groundAt, opts = null) {
     const C = CAMERA[this.mode] || CAMERA.sport;
@@ -364,8 +365,13 @@ export class ChaseCamera {
     const lookUp = dw * DRIFT.lookUpA * Math.sin((ct / DRIFT.lookUpP) * TAU) + shotUp;
 
     /* ── rest pose ────────────────────────────────────────────────────── */
-    const behind = C.behind + (C.stretch || 0) * sNorm + boom;
-    const above = C.above + (C.rise || 0) * sNorm + lift;
+    /* `opts.scale` widens the whole rig for a bigger subject. The rest pose is tuned for a ~4.5 m
+     * car, and the aeroplane is 7.6 m long with a 9 m span — at the car's distance the camera sits
+     * INSIDE the wing, which is exactly what the first flight looked like. One multiplier rather
+     * than a second camera, so every shot in the list still works and there is nothing new to tune. */
+    const scale = (opts && opts.scale) || 1;
+    const behind = (C.behind + (C.stretch || 0) * sNorm + boom) * scale;
+    const above = (C.above + (C.rise || 0) * sNorm + lift) * scale;
     /* The RIG yaw, not the camera's tracking yaw: the orbit swings the boom around the car
      * while the lens stays on it. Everything downstream that resolves a left/right — the
      * lateral clamp, the look offset — uses these two, which is what keeps the clamp inert

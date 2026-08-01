@@ -19,6 +19,11 @@ import { Post } from './render/post.js';
 import { Water } from './render/water.js';
 import { Ships, buildPlayerBoat } from './render/ships.js';
 import { FuelHelper } from './render/helper.js';
+import { buildPlane } from './render/plane.js';
+import { Vector3 as _V3 } from 'three';
+
+/** Reused axis for the flight camera's roll — allocating a Vector3 per frame is a per-frame alloc. */
+const UP_Y = new _V3(0, 1, 0);
 import { Birds } from './render/birds.js';
 import { Clouds } from './render/clouds.js';
 import { Flora } from './render/trees.js';
@@ -592,6 +597,11 @@ async function boot() {
   const boatMode = new BoatMode({ wallet, say: (t, s) => hud.say(t, s), terrain: () => car.terrain });
   const boatMesh = buildPlayerBoat(ships.material);
   boatMesh.visible = false;
+  /* THE AEROPLANE, which did not exist until now — see render/plane.js. Flying used to drag the
+   * CAR's mesh to the plane's x and z, ignoring its height, pitch and roll, so taking off looked
+   * like nothing happening. */
+  const planeMesh = buildPlane(ships.material);
+  scene.add(planeMesh);
   scene.add(boatMesh);
 
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
@@ -1165,7 +1175,13 @@ async function boot() {
     const wasBoating = boatMode.active;
     // The car is PARKED while you are out of it. A car that rolls away while you are inside a
     // showroom is a bug wearing a feature's clothes.
-    if (!menu.open && !boatMode.active && !walker.active) car.update(dt, gated);
+    /* AND NOT WHILE FLYING. The plane sets `car.placeAt(plane.x, plane.z, ...)` every frame so the
+     * two agree about where the player is — but the car solver was still running afterwards and
+     * driving the car off on its own, so the car (and the chase camera bolted to it) stayed on the
+     * runway while the aeroplane flew away. Measured: 199 m between the camera and the plane after
+     * a seven-second climb. Same reasoning as `boatMode` and `walker` beside it — while another mode
+     * owns the player, the car is a passenger. */
+    if (!menu.open && !boatMode.active && !walker.active && !plane.active) car.update(dt, gated);
     if (!menu.open) boatMode.update(dt, car, car.terrain.surface(car.x, car.z), gated);
     if (!wasBoating && boatMode.active) audio.thump(0.4); // the splash — boat.js's own "Enter" note
 
@@ -1481,7 +1497,17 @@ async function boot() {
     /* place the model — the car, or, while boat.js has the wheel, the boat. Exactly one of
      * the two is ever visible; the other's transform is simply not touched this frame, which
      * is cheaper than hiding-and-showing an idle mesh and leaves it wherever it last was. */
-    if (boatMode.active) {
+    if (plane.active) {
+      /* IN THE AIR THE PLANE IS THE BODY. All three angles, and the real height — which is the whole
+       * of what was missing. The plane's own frame is the same forward-is-+Z convention every
+       * vehicle here uses, so the yaw goes straight on. */
+      model.group.visible = false;
+      boatMesh.visible = false;
+      planeMesh.visible = true;
+      planeMesh.position.set(plane.x, plane.y, plane.z);
+      planeMesh.rotation.set(plane.pitch, plane.yaw, plane.roll, 'YXZ');
+    } else if (boatMode.active) {
+      planeMesh.visible = false;
       model.group.visible = false;
       boatMesh.visible = true;
       // car.y is already the water surface plus boat.js's own bob (see its _stepActive) — no
@@ -1490,6 +1516,7 @@ async function boot() {
       boatMesh.position.set(car.x, car.y, car.z);
       boatMesh.rotation.set(0, car.yaw, boatMode.roll);
     } else {
+      planeMesh.visible = false;
       boatMesh.visible = false;
       model.group.visible = true;
       /* car.roll and car.pitch are the whole body attitude now — the ground under the four
@@ -1558,6 +1585,25 @@ async function boot() {
           walker.z + Math.cos(walker.yaw) * 10
         );
         sNorm = 0;
+      } else if (plane.active) {
+        /* THE AIR CAMERA IS SET DIRECTLY, not through the chase rig.
+         *
+         * The rig was tried first and would not take an aeroplane. Instrumented: the branch ran for
+         * 436 frames while the camera sat at the spawn point 193 m behind the plane, with every
+         * field it reads supplied. It carries smoothing and terrain-clamping tuned around a car that
+         * never leaves the ground, and an aircraft climbing away at 22 m/s is simply not that.
+         *
+         * So flying gets its own three lines, the same stance walk mode takes: sit behind and above
+         * the aircraft in its OWN frame — so a bank rolls the horizon, which is most of what makes
+         * flying feel like flying — and look slightly ahead of it. */
+        const cy = Math.cos(plane.yaw);
+        const sy = Math.sin(plane.yaw);
+        const back = 24;
+        const up = 7;
+        camera.position.set(plane.x - sy * back, plane.y + up, plane.z - cy * back);
+        camera.up.set(Math.sin(plane.roll), Math.cos(plane.roll), 0).applyAxisAngle(UP_Y, plane.yaw);
+        camera.lookAt(plane.x + sy * 30, plane.y + plane.pitch * 30, plane.z + cy * 30);
+        sNorm = Math.min(1, Math.hypot(plane.vx, plane.vz) / 90);
       } else {
         sNorm = chase.update(subject, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });
       }
@@ -1718,6 +1764,9 @@ async function boot() {
      * frame, which is birds.stats.drawn — not a flag, and not the number that exist. */
     birds,
     fuel,
+    /* The aeroplane, so a diagnostic can ask whether it is flying and how high — the same reason
+     * every other live object is on this handle. */
+    plane,
     /* The walker, for the same reason `wallet` and `props` are here: the only honest answer to "am I
      * out of the car" is the object the frame loop is actually stepping. See tools/diag-walkin.mjs. */
     walker,
