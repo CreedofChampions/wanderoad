@@ -18,6 +18,7 @@ import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
 import { Water } from './render/water.js';
 import { Ships, buildPlayerBoat } from './render/ships.js';
+import { FuelHelper } from './render/helper.js';
 import { Birds } from './render/birds.js';
 import { Clouds } from './render/clouds.js';
 import { Flora } from './render/trees.js';
@@ -387,7 +388,12 @@ async function boot() {
 
   /* The off-road dust cue. Owns one InstancedMesh and nothing else; see src/game/spray.js. */
   const spray = new Spray({ scene });
+  /* The little cloud that brings you fuel — see render/helper.js. Created before the Fuel so it can
+   * be handed in as the rescue hook; it decides nothing, it only shows up. */
+  const helper = new FuelHelper(scene, props?.material || null);
+
   const fuel = new Fuel({
+    onRescue: () => helper.visit(car, (x, z) => car.terrain.height(x, z)),
     /* WHERE IS THE NEAREST STATION, and it has to be right rather than merely available.
      *
      * This used to be `props.nearestStation` alone, which reports out of the tiles the renderer has
@@ -480,6 +486,8 @@ async function boot() {
   /* Which display car the forecourt prompt last named, so nosing along the row says each car once
    * instead of every frame. Cleared the moment you are not beside one. */
   let showroomTold = null;
+  /** Seconds since the last 'ouch', so a crash cannot shout twice in the same second. */
+  let ouchClock = 99;
   /* ON FOOT. Operator: "Walk-in showrooms seperate to gas stations (walkable mode)."
    *
    * The walker owns nothing the car owns — see game/walk.js for why it is kinematic rather than a
@@ -1040,6 +1048,18 @@ async function boot() {
       }
     }
 
+    /* MANUAL GEARS. Operator: "Maual gear shift needs to eb added". The keys have existed since the
+     * beginning (E/Right-Shift up, Q down) and were read by nothing; on a pad they are the shoulder
+     * buttons. Asking for a gear latches the manual box — see vehicle.js. */
+    if (input.tapped('shiftUp')) {
+      car.wantShift = 1;
+      hud.say(`gear ${Math.min(car.gear + 1, 6)} — manual`, 1.2);
+    }
+    if (input.tapped('shiftDown')) {
+      car.wantShift = -1;
+      hud.say(`gear ${Math.max(car.gear - 1, 1)} — manual`, 1.2);
+    }
+
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
     if (input.tapped('reverse')) car.reverse = !car.reverse;
     if (input.tapped('nextCar')) {
@@ -1057,7 +1077,16 @@ async function boot() {
       }
     }
     if (input.tapped('horn')) audio.horn();
-    if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
+    /* N IS THE RADIO, AND THE RADIO IS THE YOUTUBE WINDOW. Operator: "radio does not work (changing
+     * stations seems to do nothing) but it was never suppose to -- YT video was suppose to be that."
+     *
+     * It used to step a list of synthesised oscillator "stations" while the actual music came out of
+     * a separate YouTube panel on J, so changing station did nothing you could hear. N now skips to
+     * the next track in that window, which is what the control always meant. */
+    if (input.tapped('radio')) {
+      musicPanel.next();
+      hud.say('next track', 1.6);
+    }
     /* F: pour a spare can in. A can is a tank you carry — bought at a pump, used anywhere, which is
      * the one thing suns could not buy before and exactly what you want when the needle is on the
      * pin and the nearest station is 3 km back. */
@@ -1089,7 +1118,10 @@ async function boot() {
       }
     }
     if (input.tapped('autodrive')) hud.say(auto.toggle(car) ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
-    if (input.tapped('reset')) backToRoad();
+    if (input.tapped('reset')) {
+      car.manual = false; // R is the get-me-out key; it hands the automatic back too
+      backToRoad();
+    }
     // 'Give fuel' is not in car/input.js's KEYMAP (that file is out of scope this pass) — the
     // same raw, already-edge-triggered check the assist-preset keys just below use. KeyF:
     // free of every other binding, and reads naturally as favour/friend/fuel. See
@@ -1140,13 +1172,25 @@ async function boot() {
     /* collisions — after the solver, before the camera, so the camera never chases a car
        that is momentarily inside a tree */
     const hit = solids.resolve(car, 1.05, dt);
+    /* "OUCH" IS FOR CRASHES, NOT FOR SHRUBBERY. Operator: "i keep getting ouch when offroad -- stop
+     * that happening."
+     *
+     * The bar was severity 0.35 at 9 km/h, which off the tarmac is simply DRIVING: the fields are
+     * full of bushes and saplings and you brush one every few seconds, so the toast fired
+     * continuously and the word stopped meaning anything. A real impact is both harder and faster,
+     * and it also cannot happen twice in the same second — so there is a cooldown as well as a
+     * higher bar. The streak still ends on the lighter hits; only the SHOUTING is gated. */
+    ouchClock += dt;
+    if (hit && hit.severity > 0.55 && hit.speed > 24 && ouchClock > 4) {
+      ouchClock = 0;
+      hud.say('ouch', 1.4);
+    }
     if (hit && hit.severity > 0.35 && hit.speed > 9) {
       audio.thump(Math.min(1, (hit.severity * hit.speed) / 40));
       // A real impact ends the streak immediately — unless the car is driving itself, in which
       // case the streak is frozen and there is nothing to end. Same flag, same reasoning as the
       // scoring call below; passing it here too is what stops the two disagreeing.
       streak.update(2, car, { onRoad: 0 }, { paused: auto.on, forgive: nearPump() });
-      hud.say('ouch', 1.4);
     }
 
     /* scoring */
@@ -1414,6 +1458,7 @@ async function boot() {
     } else if (showroomTold) {
       showroomTold = null;
     }
+    helper.update(dt); // the fuel cloud's own little arc — see render/helper.js
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
      * this frame's real speed and slip, and after the collision resolve so a car that has just

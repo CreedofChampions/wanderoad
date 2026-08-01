@@ -118,7 +118,10 @@ console.log('\n── new cars = suns ──────────────
 console.log('\n── first three on total collected, the rest at a dealership ───────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.earn' });
-  const earned = FLEET.filter((c) => unlockRule(c).how === 'earn');
+  /* SORTED BY THRESHOLD, not by fleet order. The ladder is what this section is about, and fleet
+   * ORDER is a display decision — when the hatch became the starter car the two stopped agreeing and
+   * this read "the next one up" as a car with a LOWER threshold than the one just earned. */
+  const earned = FLEET.filter((c) => unlockRule(c).how === 'earn').sort((a, b) => unlockRule(a).at - unlockRule(b).at);
   const bought = FLEET.filter((c) => unlockRule(c).how === 'buy');
   check(earned.length === 3, 'exactly THREE cars open on total suns collected', earned.length, '3');
   check(bought.length === FLEET.length - 3, 'and every other car needs a dealership', bought.length, String(FLEET.length - 3));

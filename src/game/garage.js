@@ -32,7 +32,28 @@ const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
  * `feel` is everything that used to live in a separate preset: how much lateral acceleration full stick asks for, which aid ladder rung, how fast
  * the keyboard reaches full lock, and the rear grip that decides whether it rotates.
  */
+/* SOME OF THESE BODIES ARE SYNTY POLYGON, and that is why this repository is private.
+ *
+ * Operator: "synty assets much better than kenny" and "CC0 assets tend to be trash use the ones i
+ * paid for". The packs are properly licensed and the proof of purchase is on file; the EULA permits
+ * using them in your own game and forbids redistributing them AS assets, which is exactly why
+ * CreedofChampions/cozy-driver is private and the old public repo must never receive them.
+ *
+ * They are converted by tools/synty-car.mjs, which renames Synty's own node names onto the ones this
+ * game's wheel rig and paint classifier expect — see that file's header. */
 export const FLEET = [
+  {
+    id: 'hatch',
+    earnAt: 0,
+    file: 'hatch.glb',
+    label: 'Hatch',
+    blurb: 'Light and eager. Turns in more sharply than it has any right to.',
+    unlockAt: 0,
+    price: 0, // the car you start in
+    tier: 'gt',
+    length: 4.0,
+    feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
+  },
   {
     /* THE PICKUP. Operator: "Add ford f150 to game".
      *
@@ -53,9 +74,8 @@ export const FLEET = [
     file: 'pickup.glb',
     label: 'Ford F150',
     blurb: 'A full-size pickup. Slow to turn, hard to stop, and happy in the dirt.',
-    unlockAt: 0,
-    earnAt: 0,
-    price: 0, // the car you start in — operator: "Starter car cant go up many hills -- replace with ford"
+    unlockAt: 60000,
+    price: 260,
     tier: 'truck',
     length: 5.91,
     /* buildRate 3.0, not 2.1. `buildRate` is how fast the KEYBOARD winds on to full lock, and at 2.1
@@ -72,7 +92,8 @@ export const FLEET = [
   },
   {
     id: 'estate',
-    file: 'estate.glb',
+    earnAt: 70,
+    file: 'synty-convertible.glb',
     label: 'Estate',
     blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
     unlockAt: 1000,
@@ -82,20 +103,8 @@ export const FLEET = [
     feel: { comfortG: 7.0, assist: 'cruise', rearGrip: 1.06, buildRate: 2.6, brakeMul: 1.15 },
   },
   {
-    id: 'hatch',
-    earnAt: 25,
-    file: 'hatch.glb',
-    label: 'Hatch',
-    blurb: 'Light and eager. Turns in more sharply than it has any right to.',
-    unlockAt: 1000,
-    price: 20,
-    tier: 'gt',
-    length: 4.0,
-    feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
-  },
-  {
     id: 'coupe',
-    earnAt: 70,
+    earnAt: 25,
     file: 'coupe.glb',
     label: 'Coupe',
     blurb: 'The road car. Quick enough to be interesting, calm enough to cruise.',
@@ -107,7 +116,7 @@ export const FLEET = [
   },
   {
     id: 'sedan',
-    file: 'sedan.glb',
+    file: 'synty-pickup.glb',
     label: 'Sedan',
     blurb: 'Long wheelbase, loose rear. It will hold a slide if you ask nicely.',
     unlockAt: 8000,
@@ -129,7 +138,7 @@ export const FLEET = [
   },
   {
     id: 'taxi',
-    file: 'taxi.glb',
+    file: 'synty-truck.glb',
     label: 'Taxi',
     blurb: 'Somebody has to. Slow, indestructible, oddly relaxing.',
     unlockAt: 45000,

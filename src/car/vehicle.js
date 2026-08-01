@@ -187,6 +187,10 @@ export class Vehicle {
 
     // internal
     this._shiftTimer = 0;
+    /** +1 / -1 for one frame when the driver asks for a gear. Consumed by the gearbox. */
+    this.wantShift = 0;
+    /** True once the driver has shifted by hand; the automatic stops deciding until autoGear(). */
+    this.manual = false;
     this._shiftHold = 0;
     this._absPhase = 0;
     this._liftoff = 0;
@@ -838,9 +842,41 @@ export class Vehicle {
     // deletes both drive AND engine braking — which is exactly why the first build coasted
     // for two kilometres. Two guards: never upshift on a closed throttle, and never shift
     // twice inside half a second.
-    if (A.autoGears && this._shiftTimer <= 0 && this._shiftHold <= 0 && !this.reverse) {
+    /* ── MANUAL GEARS ────────────────────────────────────────────────
+     * Operator: "Maual gear shift needs to eb added".
+     *
+     * `shiftUp` and `shiftDown` have been in the key map since the beginning and were read by
+     * NOTHING — tuning.js says so itself in its own note beside `autoGears`, which is why the
+     * hardcore assist was a debt rather than a mode: turning the automatic off left the car stuck in
+     * first with no way to change gear.
+     *
+     * `manual` latches the moment the driver asks for a gear. That is the whole switch: there is no
+     * mode to find in a menu, no state to explain. Ask for a gear and you have a manual box; the
+     * automatic stops making decisions for you. `autoGear()` (the R key's reset, and the assist
+     * preset) hands it back.
+     *
+     * The redline is still respected on the way up and the box still refuses a downshift that would
+     * over-rev — a manual gearbox lets you choose, it does not let you grenade the engine. */
+    if (this.wantShift) {
+      const next = this.gear + this.wantShift;
+      const ratio = next >= 1 && next <= S.ratios.length ? S.ratios[next - 1] * S.finalDrive : 0;
+      const rpmAfter = ratio ? Math.abs(wheelOmega) * ratio * (60 / TWO_PI) : 0;
+      if (next >= 1 && next <= S.ratios.length && rpmAfter < S.redline * 1.02) {
+        this.gear = next;
+        this.manual = true;
+        this._shiftTimer = GEARBOX.shiftTimeAuto;
+        this._shiftHold = 0.35;
+      }
+      this.wantShift = 0;
+    }
+
+    if (A.autoGears && !this.manual && this._shiftTimer <= 0 && this._shiftHold <= 0 && !this.reverse) {
       const upAt = curveAt(GEARBOX.upshiftAtThrottle, this.throttle) * S.redline;
-      if (this.throttle > 0.06 && this.rpm > upAt && this.gear < S.ratios.length) {
+      /* HOLD THE GEAR ON A CLIMB — the other half of low range. Without this the box drops a gear on
+       * the hill, the revs recover, it immediately shifts back up, and bogs again: the shuffle a real
+       * automatic avoids by locking out top gears while the load is high. */
+      const holdForClimb = slopeLong < -1.6 && this.throttle > 0.5 && this.rpm < S.redline * 0.94;
+      if (this.throttle > 0.06 && this.rpm > upAt && this.gear < S.ratios.length && !holdForClimb) {
         this.gear++;
         this._shiftTimer = GEARBOX.shiftTimeAuto;
         this._shiftHold = 0.5;
@@ -869,7 +905,16 @@ export class Vehicle {
          * Nothing else about the box changes. */
         const kickdown =
           this.throttle > 0.8 && (this.longAccel < -0.3 || slopeLong < -1.0) && rpmIfDown < S.redline * 0.95;
-        if (rpmIfDown < S.redline * 0.92 && (bogging || coasting || kickdown)) {
+        /* LOW RANGE. Operator: "low range uphill for auto gear".
+         *
+         * Kickdown gets the box DOWN a gear when the hill starts winning. Low range is the other
+         * half: on a real climb it should also stop shuffling back UP the moment the revs recover,
+         * because upshifting mid-hill just bogs the engine again two seconds later. `climbing` is
+         * used below to hold the gear, and it also lets the box drop one further than the bogging
+         * rule alone would — which is what a transfer case does. */
+        const climbing = slopeLong < -1.6 && this.throttle > 0.5;
+        const lowRange = climbing && rpmIfDown < S.redline * 0.86;
+        if (rpmIfDown < S.redline * 0.92 && (bogging || coasting || kickdown || lowRange)) {
           this.gear--;
           this._shiftTimer = GEARBOX.shiftTimeAuto;
           this._shiftHold = 0.5;

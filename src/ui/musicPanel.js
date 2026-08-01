@@ -166,6 +166,13 @@ export class MusicPanel {
           <span>&#9835; radio window</span>
           <button type="button" class="mpClose" aria-label="close music window (J)">&times;</button>
         </div>
+        <div class="mpControls">
+          <button type="button" data-mp="prev" title="previous track">&#9664;&#9664;</button>
+          <button type="button" data-mp="next" title="next track (N)">&#9654;&#9654;</button>
+          <input data-mp="url" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="paste a YouTube link or id, then Enter" aria-label="Play a specific video">
+          <button type="button" data-mp="play">Play</button>
+        </div>
         <div class="mpBody"></div>
         <p class="mpHint">starts muted — click the player to unmute &middot; J or &times; to close</p>
         <div class="mpGrip" title="drag to resize"></div>
@@ -175,6 +182,21 @@ export class MusicPanel {
     this._frame = root.querySelector('#mpFrame');
     this._body = root.querySelector('.mpBody');
     root.querySelector('#mpTab').addEventListener('click', () => this.show());
+    /* The controls. `stopPropagation` on the field's keys for the same reason the Garage's seed box
+     * does it: the game is still listening for single-letter bindings, and typing a link must not
+     * toggle the music window or change gear. */
+    root.addEventListener('click', (e) => {
+      const act = e.target?.dataset?.mp;
+      if (act === 'next') this.next();
+      else if (act === 'prev') this.prev();
+      else if (act === 'play') this._playFromField();
+    });
+    const field = root.querySelector('[data-mp="url"]');
+    if (field)
+      field.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') this._playFromField();
+      });
     root.querySelector('.mpClose').addEventListener('click', () => this.hide());
 
     // An independent listener, the same pattern src/ui/menu.js uses for Escape/M: a one-shot
@@ -239,6 +261,78 @@ export class MusicPanel {
   /* The iframe is created on first open, not in the constructor, so a player who never
    * touches J never sends a single request to youtube.com. Built once and then only shown or
    * hidden after that, so closing and reopening the panel never restarts the video. */
+  /* ── CHOOSING WHAT PLAYS ──────────────────────────────────────────
+   *
+   * Operator: "I still can't select which video is playing in radio", and before that "radio does not
+   * work (changing stations seems to do nothing) but it was never suppose to -- YT video was suppose
+   * to be that."
+   *
+   * Both are the same gap. There were two unrelated things called the radio: a synthesised oscillator
+   * station list on N, and this YouTube window on J — and the window had no controls at all, just an
+   * embed that played whatever the playlist started on. Changing "stations" did nothing you could
+   * hear because the stations were not what was playing.
+   *
+   * So the window gets the controls, and N drives it (see main.js). Three ways to pick:
+   *   - next / previous through the playlist
+   *   - paste a link or a bare id to play one specific video
+   *   - the `?video=` parameter the extension already hands in, unchanged
+   *
+   * Driven through the IFrame API's postMessage interface rather than by reloading the iframe.
+   * Reloading works, but it restarts the player, re-triggers autoplay policy and flashes the panel;
+   * postMessage just changes the track. `enablejsapi=1` was already on the embed, added by whoever
+   * wrote this "for a future volume/play control if this is ever extended" — this is that. */
+  _playFromField() {
+    const field = this.root.querySelector('[data-mp="url"]');
+    if (!field) return;
+    const id = this.playVideo(field.value);
+    field.value = '';
+    field.placeholder = id ? `playing ${id}` : 'that did not look like a YouTube link';
+  }
+
+  _post(func, args = []) {
+    const f = this._body.querySelector('iframe');
+    if (!f || !f.contentWindow) return false;
+    f.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args }), 'https://www.youtube.com');
+    return true;
+  }
+
+  /** Next track in the playlist. Also what the N key calls. */
+  next() {
+    this._ensureLoaded();
+    this.show();
+    return this._post('nextVideo');
+  }
+
+  /** Previous track. */
+  prev() {
+    this._ensureLoaded();
+    this.show();
+    return this._post('previousVideo');
+  }
+
+  /**
+   * Play one specific video. Accepts anything a person would actually paste: a watch URL, a youtu.be
+   * link, an /embed/ link, or the bare 11-character id on its own.
+   *
+   * @returns {string|null} the id it parsed, or null if there was nothing usable in the text
+   */
+  playVideo(text) {
+    const t = String(text || '').trim();
+    const m =
+      t.match(/[?&]v=([A-Za-z0-9_-]{11})/) ||
+      t.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) ||
+      t.match(/\/embed\/([A-Za-z0-9_-]{11})/) ||
+      t.match(/^([A-Za-z0-9_-]{11})$/);
+    if (!m) return null;
+    this._ensureLoaded();
+    this.show();
+    /* loadVideoById rather than a src change, for the same reason as above — and it drops the
+     * playlist, which is correct: the player asked for THIS video, not for the playlist's idea of
+     * where it sits. */
+    this._post('loadVideoById', [m[1]]);
+    return m[1];
+  }
+
   _ensureLoaded() {
     if (this._loaded) return;
     this._loaded = true;

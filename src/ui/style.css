@@ -1454,3 +1454,37 @@ canvas {
   opacity: 0.55;
   margin-top: 0.14rem;
 }
+
+/* ── the music window's own controls ─────────────────────────────────────────
+ * Operator: "I still can't select which video is playing in radio". Next, previous, and a field to
+ * paste a link — see ui/musicPanel.js for why this drives the IFrame API rather than reloading the
+ * iframe (a reload restarts the player and re-triggers the autoplay policy). */
+#musicPanel .mpControls {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid rgba(58, 67, 86, 0.18);
+}
+#musicPanel .mpControls button {
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: rgba(58, 67, 86, 0.1);
+  border: 1px solid rgba(58, 67, 86, 0.2);
+  border-radius: 8px;
+  padding: 0.24rem 0.5rem;
+  cursor: pointer;
+}
+#musicPanel .mpControls button:hover { background: rgba(58, 67, 86, 0.2); }
+#musicPanel .mpControls input {
+  flex: 1;
+  min-width: 6rem;
+  font: inherit;
+  font-size: 0.76rem;
+  color: var(--ink);
+  background: rgba(255, 252, 244, 0.9);
+  border: 1px solid rgba(58, 67, 86, 0.24);
+  border-radius: 8px;
+  padding: 0.24rem 0.5rem;
+}
