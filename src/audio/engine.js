@@ -15,6 +15,7 @@
  */
 
 import { clamp, clamp01, lerp } from '../core/math.js';
+import { ENGINE_VOICE } from '../game/garage.js';
 import { Radio } from './radio.js';
 import { Ambience } from './ambience.js';
 
@@ -166,7 +167,11 @@ export class EngineAudio {
      * at 6000 rpm on a four-cylinder is about 200 Hz, but you do not HEAR the fundamental —
      * you hear the low harmonics through a car body. So the range is now 26 to 74 Hz, which
      * is felt more than heard, and the sawtooth harmonics do the rest. */
-    const base = 26 + rpmFrac * 48;
+    /* PER CAR. The 26/48 pair is the shape of an engine note; `voice.pitch` is which engine it is.
+     * Read from the fleet entry the car is actually running (game/garage.js's engineVoice), so the
+     * sound and the car cannot disagree, and a car with no spec falls back to the old global note. */
+    const voice = ENGINE_VOICE;
+    const base = (26 + rpmFrac * 48) * voice.pitch;
     for (const { o, mul } of this.oscs) o.frequency.setTargetAtTime(base * mul, t, k);
 
     // Off throttle the engine gets quieter AND darker — that is most of what makes a
@@ -175,7 +180,9 @@ export class EngineAudio {
     // Quieter, and much darker. The low-pass used to open to 3.9 kHz under load, which is
     // where the bees lived.
     this.engGain.gain.setTargetAtTime(0.032 + load * 0.10, t, k);
-    this.engFilter.frequency.setTargetAtTime(260 + load * 640 + rpmFrac * 240, t, k);
+    // The same voice opens the filter: a bigger engine is darker as well as lower, which is what
+    // stops a deep note simply sounding like the same note played slowly.
+    this.engFilter.frequency.setTargetAtTime((260 + load * 640 + rpmFrac * 240) * voice.timbre, t, k);
 
     // Wind starts to matter around 55 km/h and dominates by 200.
     // Wind is the one layer allowed to grow with speed, because it is broadband and calm.

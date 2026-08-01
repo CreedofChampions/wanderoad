@@ -296,6 +296,43 @@ export function nextUnlock(best = bestStreak()) {
 }
 
 /** Apply a car's feel to the shared tuning tables. One solver, many cars. */
+/** The fleet's median length, and the reference the engine voice is scaled against. */
+export const ENGINE_REF_LEN = 4.5;
+
+/**
+ * WHAT THIS CAR SOUNDS LIKE. Operator: "Sounds need to change per car deeper for bigger cars".
+ *
+ * The engine is synthesised, and its pitch came from ONE line in audio/engine.js: a global
+ * `26 + rpmFrac * 48`. The whole fleet therefore shared one 26-74 Hz band, so the 5.91 m Ford and
+ * the 4.0 m hatch were sample-for-sample identical.
+ *
+ * Derived from the car's own LENGTH rather than a new per-car table, so it cannot drift from the
+ * fleet and a new car gets a voice for free. Raised to 0.75 rather than used linearly: linear sends
+ * a long vehicle so deep it falls out of a laptop speaker entirely, and the point is to be heard as
+ * deeper, not to disappear. Tier adds a little brightness on top, because a hyper car is not just a
+ * short GT.
+ *
+ * Resulting pitch multipliers across the fleet: pickup 0.82, hatch 1.09, rally 1.05, coupe 1.04,
+ * sedan and taxi 1.00, estate and patrol 0.98 — a hatch-to-truck ratio of 1.33, about five
+ * semitones. Unmistakable, and not a gimmick.
+ *
+ * @returns {{pitch:number, timbre:number}}
+ */
+export function engineVoice(car) {
+  const len = Math.max(2.5, +car?.length || ENGINE_REF_LEN);
+  const pitch = Math.min(1.12, Math.max(0.8, Math.pow(ENGINE_REF_LEN / len, 0.75)));
+  const bright = { gt: 0.96, sports: 1.0, hyper: 1.06, truck: 0.9 }[car?.tier] ?? 1;
+  return { pitch, timbre: (0.55 + 0.45 * pitch) * bright };
+}
+
+/* THE VOICE OF THE CAR CURRENTLY BEING DRIVEN.
+ *
+ * A shared mutable record, set by applyCarFeel, exactly like STEER/TYRE/BRAKE beside it — the
+ * audio graph is a singleton and cannot be handed a fleet entry per frame. `car.spec` in the solver
+ * is the TIER, which has no length, so the length has to reach the engine some other way and this is
+ * the way every other per-car number already travels. */
+export const ENGINE_VOICE = { pitch: 1, timbre: 1 };
+
 export function applyCarFeel(car) {
   const f = car.feel;
   STEER.comfortG = f.comfortG;
@@ -306,6 +343,8 @@ export function applyCarFeel(car) {
   /* Each car's brakes. This was declared in the fleet and then never applied — the Patrol's
    * "strongest brakes in the fleet" and the Estate's forgiving ones were the same brakes. */
   BRAKE.torque = BRAKE.baseTorque * (f.brakeMul || 1);
+  // Deeper for a bigger car — see engineVoice.
+  Object.assign(ENGINE_VOICE, engineVoice(car));
   /* THE MECHANICAL TURNING FLOOR, per car. `STEER.minRadius` is the radius below which the comfort
    * limiter stops shrinking the lock and the rack simply takes over — it is what decides a parking
    * manoeuvre, because a lateral-acceleration cap says nothing at walking pace.

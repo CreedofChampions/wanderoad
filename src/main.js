@@ -17,7 +17,7 @@ import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
 import { Water } from './render/water.js';
-import { Ships, buildPlayerBoat } from './render/ships.js';
+import { Ships, buildPlayerBoat, loadPlayerBoat } from './render/ships.js';
 import { FuelHelper } from './render/helper.js';
 import { buildPlane } from './render/plane.js';
 import { Vector3 as _V3 } from 'three';
@@ -595,7 +595,9 @@ async function boot() {
    * one. Built now rather than deferred to the actual unlock: a handful of triangles is not
    * worth a lazy-init branch in the per-frame model-placement block below. */
   const boatMode = new BoatMode({ wallet, say: (t, s) => hud.say(t, s), terrain: () => car.terrain });
-  const boatMesh = buildPlayerBoat(ships.material);
+  /* The Synty hull if it loads, the hand-built one if it does not — see loadPlayerBoat. The model
+   * lives only in the private repo, so the fallback is what keeps a public checkout afloat. */
+  const boatMesh = await loadPlayerBoat(ships.material, new URL('./models/cars/', location.href).href);
   boatMesh.visible = false;
   /* THE AEROPLANE, which did not exist until now — see render/plane.js. Flying used to drag the
    * CAR's mesh to the plane's x and z, ignoring its height, pitch and roll, so taking off looked

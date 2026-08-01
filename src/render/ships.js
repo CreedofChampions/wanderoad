@@ -36,8 +36,9 @@
  * allowed to actually happen.
  */
 
-import { Mesh, Object3D } from 'three';
+import { Mesh, Object3D, Group, Box3, Vector3, BufferAttribute } from 'three';
 import { PB, ptri, pquad, pbox, pcyl, rotY, finishPainted, createPaintedMaterial, MAT, LC, tint, mixc } from './painted.js';
+import { RGB } from '../core/palette.js';
 import { waterOpenness } from './water.js';
 import { biomeWeights, waterLevelAt, BIOME_COUNT } from '../world/biomes.js';
 import { landHeight, landFn } from '../world/terrain.js';
@@ -340,6 +341,79 @@ export function buildPlayerBoat(material = createPaintedMaterial()) {
   const mesh = new Mesh(geom, material);
   mesh.name = 'playerBoat';
   return mesh;
+}
+
+/**
+ * THE PLAYER'S BOAT AS A LOADED HULL, with the built one as the fallback.
+ *
+ * Operator: "Replace the ship asap" and "CC0 assets tend to be trash use the ones i paid for".
+ *
+ * The Synty POLYGON Pirates hull, converted by tools/make-ship.mjs — which strips the 23 Unreal
+ * `UCX_` collision proxies and splits the single `lambert1` atlas material into named bands this
+ * game can paint. Re-materialled here exactly the way car/loadedCar.js re-materials a car: the
+ * painted shader reads colour and material index from VERTEX attributes, so every mesh gets its own
+ * attribute pair written from the classification of its material NAME, and the whole boat goes
+ * through the one shared program.
+ *
+ * Falls back to `buildPlayerBoat()` on any failure, and that matters rather than being politeness:
+ * the model only exists in the private repo, so a public checkout, a bad deploy or a network hiccup
+ * must still put a boat on the water.
+ *
+ * @param {THREE.Material} material the Ships instance's own painted material
+ * @returns {Promise<THREE.Mesh|THREE.Group>}
+ */
+export async function loadPlayerBoat(material, base = './models/cars/') {
+  try {
+    const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+    const url = new URL(base + 'synty-boat.glb', globalThis.location?.href || 'http://localhost/').href;
+    const gltf = await new Promise((res, rej) => new GLTFLoader().load(url, res, undefined, rej));
+    const src = gltf.scene;
+
+    src.traverse((o) => {
+      if (!o.isMesh) return;
+      const name = (o.material && o.material.name) || '';
+      const n = name.toLowerCase();
+      /* The same three-way split make-ship.mjs banded the hull into: below the waterline is matte
+       * dark, the sides take the paint, the trim above the gunwale is metal. */
+      const col = n.includes('black') ? RGB.tyre : n.includes('grey') ? RGB.chrome : LC('paintC');
+      const mat = n.includes('black') ? MAT.MATTE : n.includes('grey') ? MAT.METAL : MAT.BODY;
+      const g = o.geometry;
+      const count = g.attributes.position.count;
+      const colArr = new Float32Array(count * 3);
+      const matArr = new Float32Array(count);
+      for (let i = 0; i < count; i++) {
+        colArr[i * 3] = col[0];
+        colArr[i * 3 + 1] = col[1];
+        colArr[i * 3 + 2] = col[2];
+        matArr[i] = mat;
+      }
+      g.setAttribute('vcol', new BufferAttribute(colArr, 3));
+      g.setAttribute('vmat', new BufferAttribute(matArr, 1));
+      if (!g.attributes.nrm && g.attributes.normal) g.setAttribute('nrm', g.attributes.normal);
+      o.material = material;
+      o.castShadow = false;
+      o.receiveShadow = false;
+    });
+
+    /* Scale to the length the game already assumes, and sit the hull's origin ON the waterline —
+     * main.js places the boat at `car.y`, which IS the water surface, and the built hull's own
+     * comment records that its origin is at the waterline for exactly that reason. */
+    const box = new Box3().setFromObject(src);
+    const size = new Vector3();
+    box.getSize(size);
+    const longest = Math.max(size.x, size.z);
+    if (longest > 0.0001) src.scale.setScalar(PLAYER_BOAT_LENGTH / longest);
+    src.updateMatrixWorld(true);
+    const box2 = new Box3().setFromObject(src);
+    src.position.y -= box2.min.y + (box2.max.y - box2.min.y) * 0.32;
+
+    const group = new Group();
+    group.name = 'playerBoat';
+    group.add(src);
+    return group;
+  } catch {
+    return buildPlayerBoat(material);
+  }
 }
 
 /* ── the live set ─────────────────────────────────────────────────────────── */
