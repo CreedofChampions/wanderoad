@@ -151,6 +151,36 @@ function linkRow(doc, el, label, url, env, hint) {
     } catch {
       /* insecure context, or the user said no — fall through to selecting it */
     }
+    /* SECOND CHANCE BEFORE THE ONE THAT MOVES THE PAGE.
+     *
+     * Operator: "drive togetheer buttons seem to push u to top of screen and do nothing else".
+     *
+     * Both halves of that are this line. `navigator.clipboard.writeText` needs a secure context AND
+     * a focused document, and it fails silently when it does not have them — so the button fell
+     * straight through to SELECTING the address, and selecting text makes the browser scroll the
+     * selection into view, which inside the Garage's scrolling sheet is the jump he is describing.
+     * Nothing was copied and the view moved: "does nothing" and "pushes you to the top", from one
+     * fallback.
+     *
+     * `execCommand('copy')` on an off-screen textarea is the old way and it still works where the
+     * async API will not: no permission prompt, no secure-context requirement, and — because the
+     * textarea is fixed at the top-left with an empty size — nothing to scroll to. It is only
+     * reached when the modern path has already failed. */
+    if (!ok) {
+      try {
+        const ta = doc.createElement('textarea');
+        ta.value = url;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+        doc.body.appendChild(ta);
+        ta.select();
+        ok = doc.execCommand?.('copy') === true;
+        ta.remove();
+      } catch {
+        /* no execCommand either — the address is still on screen to read */
+      }
+    }
+    // Only now, having tried both, fall back to the one that moves the view.
     if (!ok) selectText(doc, addr);
     copy.textContent = ok ? 'Copied' : 'Select and copy';
     setTimeout(() => {
