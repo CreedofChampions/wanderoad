@@ -518,7 +518,43 @@ export class BoatMode {
      * ends up a third of the way up the hull, which is what a small boat looks like afloat.
      * Without a measured hull it falls back to the old behaviour rather than guessing a size. */
     const draft = this._hullH > 0 ? BOAT_DRAFT * this._hullH + this._hullMinY : 0;
-    car.y = waterY - draft + Math.sin(this._t * BOAT_BOB_HZ * TAU) * BOAT_BOB_AMP;
+
+    /* WAVES, AND THEY GROW WITH THE DEPTH UNDER YOU. Operator, F6: "waves when deeper".
+     *
+     * The bob was one fixed sine at 0.14 m, the same in a harbour as it was a mile out — which is
+     * why open water has never felt different from the shallows. It is now built from the DEPTH the
+     * boat is actually floating over (the water plane less the sea bed), so a harbour stays glassy
+     * and the open sea moves, and from TWO components at different rates and headings rather than
+     * one, because a single sine reads as a machine lifting the boat on a piston.
+     *
+     * Sampled from POSITION as well as time, so the wave is a field the boat travels through rather
+     * than a wobble attached to it: crossing a swell at speed now meets crests, and sitting still in
+     * one still rises and falls. That also gives the slope for free — the surface is evaluated a few
+     * metres fore/aft and to port/starboard, and the difference IS the pitch and roll, so the hull
+     * leans into a wave face instead of staying spirit-level while the sea moves under it.
+     *
+     * All of it is CPU-side and deterministic: it deliberately does not try to match whatever the
+     * water shader is displacing, because that lives on the GPU and the boat cannot read it. What it
+     * matches is the FEEL — bigger water further out. */
+    const depth = Math.max(0, waterY - (surf.y ?? waterY));
+    const swell = clamp01(depth / 12) * (this._hullH > 0 ? 1 : 0.6);
+    const amp = BOAT_BOB_AMP + swell * 0.85;
+    const waveAt = (wx, wz) =>
+      Math.sin(this._t * BOAT_BOB_HZ * TAU + wx * 0.045) * 0.62 +
+      Math.sin(this._t * BOAT_BOB_HZ * TAU * 1.63 + wz * 0.031 + 1.9) * 0.38;
+
+    car.y = waterY - draft + waveAt(car.x, car.z) * amp;
+
+    /* The slope, from the same field. 4 m either way is about a hull length, which is the span a
+     * boat actually straddles — sampling at a point would give the derivative of the wave rather
+     * than the attitude of a hull sitting across it. */
+    const L = 4;
+    const fore = waveAt(car.x + Math.sin(this.yaw) * L, car.z + Math.cos(this.yaw) * L) * amp;
+    const aft = waveAt(car.x - Math.sin(this.yaw) * L, car.z - Math.cos(this.yaw) * L) * amp;
+    const port = waveAt(car.x + Math.cos(this.yaw) * L, car.z - Math.sin(this.yaw) * L) * amp;
+    const stbd = waveAt(car.x - Math.cos(this.yaw) * L, car.z + Math.sin(this.yaw) * L) * amp;
+    car.pitch = Math.atan2(fore - aft, L * 2);
+    car.roll = this.roll + Math.atan2(port - stbd, L * 2);
 
     car.yaw = this.yaw;
     car.vx = Math.sin(this.yaw) * this.speed;
