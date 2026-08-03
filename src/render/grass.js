@@ -768,7 +768,23 @@ ${
   s.shadow = sh*selfShadow*mix(0.52, 1.0, vOccl);
   s.trans  = 1.00*smoothstep(0.12,0.68,t);
   s.transCol = ${C.gTrans};
-  s.rim = 0.34*(0.25 + 0.75*nearK); s.ao = vAO; s.ambient = 1.0;
+  /* AMBIENT EASES OFF WITH DISTANCE, and this is the grass half of B24 ("the land is a dark
+   * blue/green ... more blue than green for human eye").
+   *
+   * Two lines above, the blade's normal is bent towards straight UP as it recedes — deliberately,
+   * because a fanned normal is sub-pixel detail at range and sparkles. But a blade facing straight
+   * up faces the SKY, and with s.ambient at a flat 1.0 it then collects the maximum possible
+   * dose of sky-coloured ambient. That is why far grass reads blue while the ground beneath it does
+   * not: the two are lit by different amounts of sky, and the further the grass is, the more of it
+   * it takes.
+   *
+   * Measured at a fixed spot on an identical 58330-pixel region, after the ground's own blue cast
+   * was fixed in post.js: bare ground reads b-r +0.8, and the same view with far grass reads +8.1 —
+   * so the grass alone was adding +7.3.
+   *
+   * Eased rather than cut: ambient is what stops distant grass going flat and dead, so it keeps
+   * three quarters of it at range. */
+  s.rim = 0.34*(0.25 + 0.75*nearK); s.ao = vAO; s.ambient = mix(0.74, 1.0, nearK);
   vec3 col = paint(s);
 
   // ── the wind flash ─────────────────────────────────────────────────────
