@@ -396,9 +396,22 @@ check(
 );
 
 /* ── 7. the fleet: two micro-cars, and the ladder they sit on ────────────── */
-head('7. the fleet — the Tricycle starts you, and the three earned cars are untouched');
+head('7. the fleet — the Hatch starts you, and the three earned cars are untouched');
 
-check('FLEET[0] is the Tricycle, so it is the car a new player arrives in', FIRST_CAR === 'threewheeler' && FLEET[0].id === 'threewheeler', `${FIRST_CAR} / ${FLEET[0].id}`);
+/* THE STARTER IS THE HATCH, and this assertion was rewritten rather than deleted.
+ *
+ * It first read `FIRST_CAR === 'threewheeler'`, because the Tricycle was made FLEET[0] to honour
+ * "it would be funny to have that as a starter car". Measured on the live beta, that took the
+ * browser suite from 38/40 to 36/40, and the four it failed are the ones that decide whether a
+ * new player can drive at all: "D steers right" read +19.9 deg — the car turning LEFT when the key
+ * said right — the brakes measured a 0 m stop from 43 km/h (a car on its roof, not a car braking),
+ * and a three-point turn managed 32 degrees of a required 100.
+ *
+ * The operator had also already said, in as many words: "make the default NOT the f150" / "make it
+ * the hatch". So the joke keeps its place at the bottom of the ladder — the Tricycle is now the
+ * cheapest thing you can buy — and the car you are HANDED is one you can steer. Changing a check
+ * whose premise the operator overruled is not weakening it; the bar it measures is unchanged. */
+check('FLEET[0] is the Hatch, so a new player arrives in a car that steers', FIRST_CAR === 'hatch' && FLEET[0].id === 'hatch', `${FIRST_CAR} / ${FLEET[0].id}`);
 const freshWallet = new Wallet({ storageKey: 'diag.switchers.fresh' });
 /* Free TWICE OVER, and both routes are asserted because each one carries a different consequence:
  * being FLEET[0] is what hands it to a brand new player before a single sun exists, and `earnAt: 0`
@@ -428,8 +441,8 @@ check(
   earned.map((c) => `${c.label}@${earnAtOf(c)}`).join(', '),
 );
 check(
-  'the ladder shifted down one rung and kept its two thresholds — 0, 25, 70',
-  earned.map((c) => `${c.id}:${earnAtOf(c)}`).join(',') === 'threewheeler:0,hatch:25,coupe:70',
+  'the ladder keeps its three thresholds — 0, 25, 70 — with the Micro-car on the middle rung',
+  earned.map((c) => `${c.id}:${earnAtOf(c)}`).join(',') === 'hatch:0,microcar:25,coupe:70',
   earned.map((c) => `${c.id}:${earnAtOf(c)}`).join(','),
 );
 /* STRICTLY ASCENDING, and it is not a tidiness check. tools/bench-economy.mjs destructures the
@@ -479,7 +492,9 @@ for (const id of ['threewheeler', 'microcar']) {
   );
   check(
     `${id} carries a real ladder position rather than the module's 0/0 placeholders`,
-    Number.isFinite(c.unlockAt) && Number.isFinite(c.price) && (c.id === FIRST_CAR || c.price > 0),
+    /* `earnAt` cars are free BY DESIGN — they are earned with suns, not bought — so a price of 0
+     * is correct for them and only a for-sale car must carry one. */
+    Number.isFinite(c.unlockAt) && Number.isFinite(c.price) && (c.id === FIRST_CAR || c.earnAt !== undefined || c.price > 0),
     `unlockAt ${c.unlockAt}, price ${c.price}`,
   );
 }

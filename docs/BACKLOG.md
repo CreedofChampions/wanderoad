@@ -37,6 +37,23 @@ every node-side check that was run against it.
 
 ---
 
+## BLOCKING — C2 "the brakes stop the car promptly" regressed on 3 Aug, cause not yet found
+
+`node tools/browser-test.mjs https://cozydriver.com/beta/` reports **"34 km/h to 0 in 0 m"** in two
+consecutive runs. A zero-metre stop is not braking — it is a car that hit something, or one whose
+position did not advance between the two samples. It PASSED on 2 August and fails on 3 August, so it
+arrived with the seven-driving-models / micro-car commit (8846e0c) or the fleet reorder after it.
+
+What is already ruled out: `src/car/drivingModels.js` does not touch `BRAKE` at all (grepped), and
+the `stock` model is identity, so the models themselves are not changing stopping power.
+
+Most likely next place to look: the fleet order changed, and showroom aprons place FLEET members on
+display — a display car spawned on or beside the test's braking straight would produce exactly this
+reading, because the car would stop against it rather than under braking. Check what is standing
+near the brake test's start point before touching any braking constant.
+
+Do NOT tune the brakes to make this pass. The number says 0 m, and no brake change produces 0 m.
+
 ## B2 — terrain steps at crossings: the CAUSE is found, and four fixes are falsified (3 Aug 2026)
 
 Baseline, `node tools/diag-crosslevel.mjs`, 12 km box: **34 of 266 car boxes hold a mismatched

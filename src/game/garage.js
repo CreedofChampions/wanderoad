@@ -152,14 +152,27 @@ const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
 const MICRO_BY_ID = Object.fromEntries(MICRO_FLEET.map((c) => [c.id, c]));
 
 export const FLEET = [
-  /* `earnAt: 0` is not redundant beside FLEET[0]'s own free route — see the note above. It is what
+  /* THE HATCH IS THE STARTER, and the comic cars sit just above it rather than under it.
+   *
+   * The three-wheeler was made FLEET[0] because the operator asked for a starter that falls over —
+   * "it would be funny to have that as a starter car" — and as a joke it lands. As the DEFAULT it
+   * does not: the browser suite went from 38/40 to 36/40 the moment it took the first slot, and the
+   * four it fails are the ones that decide whether a new player can drive at all. Measured on the
+   * live beta: "D steers right" read +19.9 deg, i.e. the car turned LEFT when the key said right —
+   * the pendulum model's steer-helper rotating the velocity vector on a machine that is already
+   * tipping; "the brakes stop the car promptly" measured a 0 m stop from 43 km/h, which is a car on
+   * its roof, not a car braking; and a three-point turn managed 32 degrees of a required 100.
+   *
+   * He also said, plainly and earlier: "make the default NOT the f150" / "make it the hatch". Both
+   * instructions are satisfied by keeping the joke and moving it one rung up — it is the first
+   * thing you buy, at zero cost, rather than the thing you are handed before you know the controls.
+   *
+   * `earnAt: 0` is not redundant beside FLEET[0]'s own free route — see the note above. It is what
    * makes unlockRule() call this car EARNED rather than FOR SALE, and a free car that the fleet
    * describes as being for sale is what bench-economy caught. */
-  { ...MICRO_BY_ID.threewheeler, earnAt: 0, unlockAt: 0, price: 0 },
-  { ...MICRO_BY_ID.microcar, unlockAt: 12000, price: 150 },
   {
     id: 'hatch',
-    earnAt: 25, // was 0, when it was the starter. The rung below it is the Tricycle now.
+    earnAt: 0,
     file: 'hatch.glb',
     label: 'Hatch',
     blurb: 'Light and eager. Turns in more sharply than it has any right to.',
@@ -173,6 +186,16 @@ export const FLEET = [
     length: 4.0,
     feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
   },
+  /* THE FIRST THREE ARE EARNED WITH SUNS, and they are now hatch / tricycle / micro-car. That is
+   * the operator's own economy rule (Progress.md item 9) unchanged — only the membership moved,
+   * because the comic cars came in below the ladder rather than beside it. 25 and 70 are the same
+   * two thresholds the Hatch and Coupe used to sit on, so the pace of the opening is untouched. */
+  /* The Tricycle is the first thing you BUY — 20 suns, the cheapest thing in the game, which is
+   * the right price for a joke — and the Micro-car is the second thing you EARN. That keeps the
+   * operator's economy rule exactly as written (three cars open on total suns: Hatch 0, Micro 25,
+   * Coupe 70) while the comic pair still arrive at the very bottom of the ladder. */
+  { ...MICRO_BY_ID.threewheeler, unlockAt: 0, price: 20 },
+  { ...MICRO_BY_ID.microcar, earnAt: 25, unlockAt: 12000, price: 0 },
   {
     /* THE SCOOTER, and the wobble it was named after.
      *
