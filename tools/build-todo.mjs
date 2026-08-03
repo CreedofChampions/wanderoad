@@ -103,7 +103,7 @@ const card = (it) => {
       <p class="detail">${esc(it.detail)}</p>
       <ul class="steps">
         ${it.steps
-          .map((s) => `<li class="${s.done ? 'y' : 'n'}"><span class="box">${s.done ? '&check;' : ''}</span>${esc(s.t)}</li>`)
+          .map((s) => `<li class="${s.done ? 'y' : 'n'}"><span class="box">${s.done ? '&check;' : ''}</span>${esc(s.t ?? s.text ?? '(no step text — TODO-ITEMS.json is malformed)')}</li>`)
           .join('\n        ')}
       </ul>
       ${proofFor(it.id)}
