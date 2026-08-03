@@ -24,6 +24,41 @@ const DIR =
   'D:/OpenClaw/G-Brain/Databases/Actual Databases/Games/Wanderoad/Working directory/projects/Wanderoad';
 const items = JSON.parse(readFileSync(DIR + '/TODO-ITEMS.json', 'utf8')).items;
 
+/* THE PROOF, MERGED INTO THE LIST. Operator: "put whole list on nib website *add to current list and
+ * merge in proofs". Two pages meant checking a claim was a second errand; now the film sits inside
+ * the card that makes the claim. Clips live on the proof page and are referenced across, so they
+ * are uploaded once. An item with no clip simply shows none — the absence IS the status. */
+const PROOF = (() => {
+  try {
+    const rows = JSON.parse(readFileSync('shots/proof/manifest-out.json', 'utf8'));
+    const byItem = {};
+    for (const r of rows) {
+      if (!r.ok || !r.clip) continue;
+      const key = r.item || r.id;
+      (byItem[key] ||= []).push(r);
+    }
+    return byItem;
+  } catch {
+    return {};
+  }
+})();
+const PROOF_BASE = 'https://nibblet.net/cozy-proof/';
+function proofFor(id) {
+  const rows = PROOF[id] || [];
+  if (!rows.length) return '';
+  return (
+    '<div class="proof">' +
+    rows
+      .map(
+        (r) =>
+          `<figure><figcaption>${r.label || r.id}${r.reading ? ` &middot; <code>${r.reading}</code>` : ''}</figcaption>` +
+          `<video src="${PROOF_BASE}${r.clip}" poster="${PROOF_BASE}${r.file}" controls loop muted playsinline preload="none"></video></figure>`
+      )
+      .join('') +
+    '</div>'
+  );
+}
+
 /* The register is still where root causes get written down, so an item there and not here is a fact
  * this page is silently missing. Warn loudly; never fail the build over it. */
 try {
@@ -71,6 +106,7 @@ const card = (it) => {
           .map((s) => `<li class="${s.done ? 'y' : 'n'}"><span class="box">${s.done ? '&check;' : ''}</span>${esc(s.t)}</li>`)
           .join('\n        ')}
       </ul>
+      ${proofFor(it.id)}
       <p class="who">Raised by: ${esc(it.who)}</p>
     </div>
   </details>`;
@@ -144,6 +180,11 @@ const html = `<!doctype html>
   .who { font-size:.72rem; color:var(--dim); margin:.8rem 0 0; padding-top:.6rem; border-top:1px solid var(--line) }
   footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line); color:var(--dim); font-size:.78rem }
   code { font:0.86em ui-monospace, Consolas, monospace; background:#0f1114; padding:.06em .34em; border-radius:4px }
+
+  .proof{padding:0 0 .6rem}
+  .proof figure{margin:.6rem 0 0}
+  .proof figcaption{font-size:.82rem;color:#8a8f96;padding:0 0 .3rem}
+  .proof video{width:100%;height:auto;border-radius:10px;background:#000}
 </style></head><body><div class="wrap">
 <h1>Cozy Driver &mdash; every bug and feature</h1>
 <p class="sub">Live beta: <a href="https://cozydriver.com/beta/">cozydriver.com/beta</a> &middot;
