@@ -56,7 +56,20 @@ import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
 import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
-import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam } from './game/garage.js';
+import { FLEET, FLEET_BY_ID, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam } from './game/garage.js';
+/* `applyDrivingModel` REPLACES `applyCarFeel` here, and it has to be the only feel call in the file.
+ *
+ * A driving model is a modifier layered over a car — see car/drivingModels.js — and it writes fields
+ * `applyCarFeel` knows nothing about (TYRE.muLongPeak, STEER.satGain, TIERS.cgHeight and the rest).
+ * A bare `applyCarFeel` therefore does not put a model BACK; it rewrites the six fields a car
+ * declares and leaves the previous model's numbers standing in every other table. `applyDrivingModel`
+ * restores the stock tables, applies the car, then layers the model, and returns the same feel object
+ * `applyCarFeel` did — so nothing downstream of FEEL changes shape. */
+import { applyDrivingModel } from './car/drivingModels.js';
+/* The micro-cars' own solver pass — see car/microPhysics.js. Idempotent and TOTAL: handed an
+ * ordinary car it DETACHES and puts the shared tables back, so it is the one call that both applies
+ * and removes the modifier, and there is no separate detach anywhere in this file. */
+import { applyMicroPhysics } from './car/microPhysics.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
 import { BoatMode } from './game/boat.js';
@@ -196,7 +209,10 @@ const RESUME = resumeFor(SEED);
  * diagnostics rely on that. Otherwise a resume puts you back in what you were driving. */
 const CAR =
   (RESUME && !params.get('car') && FLEET_BY_ID[RESUME.car] ? FLEET_BY_ID[RESUME.car] : null) || carFromUrl();
-const FEEL = applyCarFeel(CAR);
+/* The car, THROUGH whichever driving model the player last chose. `?drive=kart` beats a stored
+ * choice beats `stock`, resolved inside that module at load — the same order `?car=` already beats a
+ * resumed session two lines above, so a URL always says what you get. */
+const FEEL = applyDrivingModel(CAR);
 const LAND = applyTerrain(CFG.terrain);
 setBiomeBias(terrainBias(CFG.terrain));
 
@@ -339,6 +355,14 @@ async function boot() {
   setStat('unloading the car…', 0.52);
   const me = identity();
   const car = new Vehicle({ tier: CAR.tier, terrain: local, preset: FEEL.assist });
+  /* THE MICRO-CARS' EXTRA PASS, and the order it has to run in.
+   *
+   * It wraps this one Vehicle's `_step` and writes tuning fields the feel does not own, so it must
+   * come AFTER the feel and after the tier is set — which it is, both having happened above. Handed
+   * an ordinary fleet car it detaches instead, which is why the same single call appears here and in
+   * swapCar() and nowhere else. The Tricycle is FLEET[0], so on a fresh profile this is the call that
+   * makes the very first car anyone drives behave like three wheels. */
+  applyMicroPhysics(car, CAR);
   /* BACK WHERE YOU LEFT IT, if the spot is still somewhere a car can be.
    *
    * A saved position can outlive what made it valid — a build that moved the water table, or a
@@ -674,9 +698,16 @@ async function boot() {
       window.WANDEROAD.model = model;
       // The car owns its feel, so changing car changes how it drives.
       if (spec) {
-        const f = applyCarFeel(spec);
-        car.setTier(spec.tier);
-        car.setPreset(f.assist);
+        /* One call where there were three: `applyDrivingModel` does the feel, then `setTier` (which
+         * re-reads mass, inertia and the CG offsets the Vehicle caches) and then `setPreset` (which
+         * re-reads the aid rung the model may have rewritten) itself. Doing them again here would be
+         * harmless but would leave two places that have to agree about the order. */
+        applyDrivingModel(spec, car);
+        /* ...and then the micro pass, which must be last: it writes tuning fields the feel does not
+         * own and swaps the Vehicle's tier record for a private clone, both of which `setTier` above
+         * has just undone. Handed an ordinary car it puts everything back, so switching AWAY from a
+         * micro-car is this same line. */
+        applyMicroPhysics(car, spec);
         /* Capacity is per car and does NOT transfer — swapping in the garage loads this car's
          * own can count and its own tank. See Fuel.setCar / START_CAPACITY_MUL. */
         fuel.setCar(spec.id);
@@ -703,6 +734,25 @@ async function boot() {
     onAuto: () => auto.toggle(car),
     isAuto: () => auto.on,
     onCar: swapCar,
+    /* THE DRIVING MODEL, put on the car that is being driven right now.
+     *
+     * ui/menu.js owns the button and the choosing — `setDrivingModel` has already run and has already
+     * persisted the choice by the time this is called. This is the half only main.js can do, because
+     * only main.js knows WHICH fleet entry is in the player's hands and which Vehicle is under it.
+     * car/drivingModels.js splits the two deliberately ("a choice and an application are two
+     * different events"), and this is the application.
+     *
+     * No reload, and nothing is re-created: `applyDrivingModel` rewrites the shared tuning tables and
+     * re-reads the tier and the aid rung into the live Vehicle, and the solver reads those tables on
+     * its next step. Switching mid-corner was measured as disturbing neither position, heading nor
+     * speed on any of six switches — see tools/diag-driving-models.mjs. `applyMicroPhysics` follows
+     * for the same reason it does in swapCar: the restore inside the model wiped its fields. */
+    onDrive: () => {
+      const spec = FLEET_BY_ID[carKeyLive];
+      if (!spec) return;
+      applyDrivingModel(spec, car);
+      applyMicroPhysics(car, spec);
+    },
     bestStreak: () => Math.max(bestStreak(), streak.state.best),
     /* The shop. The garage panel is where you pick a car you own; at a dealership it is also
      * where you buy one, and where a bigger tank is fitted — see ui/menu.js's `tank` group and

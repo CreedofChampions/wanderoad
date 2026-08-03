@@ -17,6 +17,31 @@ import { BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
 import { PAD_HELP } from '../car/input.js';
 import { GRASS_STEPS, grassQuality, setGrassQuality } from '../render/grass.js';
+import { WATER_STYLES, currentWaterStyle, setWaterStyle } from '../render/waterStyles.js';
+import { DRIVING_MODELS, currentDrivingModel, cycleDrivingModel } from '../car/drivingModels.js';
+
+/* ── STEP A CYCLING LIST ──────────────────────────────────────────────────────
+ * The Water and Driving rows are the same control twice over, so they are one function once.
+ * Exported because it is the whole of the arithmetic those two buttons do, and
+ * `node tools/diag-switchers.mjs` can then hold the wrap-around to account directly rather than
+ * inferring it from a rendered label.
+ *
+ * `dir` of -1 off the front lands on the last entry, which is not decoration: with seven of each,
+ * overshooting by one and then having to press six more times to get back is the difference between
+ * a control and a punishment.
+ *
+ * @param {Array<{id:string}>} list
+ * @param {string|{id:string}} current  the entry in force, or its id
+ * @param {number} dir  +1 for the next, -1 for the one before
+ */
+export function nextInCycle(list, current, dir = 1) {
+  const n = list?.length | 0;
+  if (!n) return null;
+  const id = typeof current === 'string' ? current : current?.id;
+  const at = list.findIndex((x) => x.id === id);
+  const i = at < 0 ? 0 : at; // an id nothing matches means "start at the beginning", never NaN
+  return list[(((i + dir) % n) + n) % n];
+}
 
 
 /* ── the seed ────────────────────────────────────────────────────────────────
@@ -180,6 +205,10 @@ export class Menu {
         <h3>Car <small>each one drives differently — the first three by collecting, the rest at a dealership</small></h3>
         <div class="row" data-group="car"></div>
 
+        <h3>Driving <small>seven ways the same car can feel — click the name for the next, it changes as you drive</small></h3>
+        <div class="row" data-group="drive"></div>
+        <p class="hint" data-hint="drive"></p>
+
         <h3>Tank <small>a bigger tank for the car you are driving — bought at a dealership</small></h3>
         <div class="row" data-group="tank"></div>
 
@@ -188,6 +217,10 @@ export class Menu {
 
         <h3>Grass <small>how far the meadow reaches — turn it down if the game runs slowly</small></h3>
         <div class="row" data-group="grass"></div>
+
+        <h3>Water <small>seven different seas — click the name for the next, the sea changes at once</small></h3>
+        <div class="row" data-group="water"></div>
+        <p class="hint" data-hint="water"></p>
 
         <h3>Land <small>reloads the world</small></h3>
         <div class="row" data-group="terrain"></div>
@@ -233,6 +266,8 @@ export class Menu {
 
     this._fillSuns();
     this._fillGrass();
+    this._fillWater();
+    this._fillDrive();
     this._fillCars();
     this._fillTank();
     this._fillShop();
@@ -295,6 +330,61 @@ export class Menu {
     row.innerHTML = GRASS_STEPS.map(
       (q) => `<button data-group="grass" data-key="${q.id}"${q.id === now ? ' class="on"' : ''}>${q.label}</button>`
     ).join('');
+  }
+
+  /* ── THE TWO CYCLERS: WATER AND DRIVING ──────────────────────────────────────
+   *
+   * Operator, of the seven waters: "make seven different water types that I can stick in-game by
+   * just clicking a button". So: a button, and it says what you are looking at.
+   *
+   * A CYCLER RATHER THAN A ROW OF SEVEN, which is the one design decision in here. Every other row
+   * in this panel lays its options out side by side, and for four grass steps or eleven cars that is
+   * right. Seven waters and seven driving models would add fourteen buttons to a sheet that already
+   * scrolls, and — more to the point — the labels alone ('Low-poly', 'Glass', 'Graft') do not tell
+   * you what you would be choosing. One button that NAMES what is in force, with the style's own
+   * one-line blurb under it, answers "what am I looking at" first and "what else is there" second,
+   * which is the order someone opening this panel actually asks them in.
+   *
+   * The ◀ beside it is the price of a cycler and is paid rather than ignored: seven entries means
+   * overshooting by one otherwise costs six more presses.
+   *
+   * NEITHER OF THESE RELOADS, and that is the difference from the Grass row directly above the Water
+   * one. Grass reloads honestly — its four instanced meshes are built from the quality numbers at
+   * construction. The water is ONE material shared by every plane in the world, so swapping the
+   * shader source and setting `needsUpdate` changes the whole sea in that frame; a driving model is
+   * numbers in the shared tuning tables, which the solver re-reads on its next 120 Hz step. The
+   * headings say "changes at once" and "as you drive" because that is what happens, and a heading
+   * that promised a reload here would be a lie in the other direction.
+   *
+   * `this.current[group]` is set to the entry in force so `_mark()` agrees with the `on` class
+   * written here instead of clearing it on the next redraw — both are read off the same `now.id`.
+   *
+   * @param {string} group  the data-group, and the key in `this.current`
+   * @param {string} title  the word the button leads with, for anyone who cannot read the small
+   *                        uppercase heading above it
+   * @param {Array<{id:string,label:string,blurb:string}>} list
+   * @param {{id:string,label:string,blurb:string}} now  the entry in force
+   */
+  _fillCycle(group, title, list, now) {
+    const row = this.root.querySelector(`[data-group="${group}"]`);
+    if (!row || !now) return;
+    const i = list.findIndex((s) => s.id === now.id);
+    row.innerHTML =
+      `<button data-group="${group}" data-key="prev" title="the one before" aria-label="${title}: the one before">◀</button>` +
+      `<button data-group="${group}" data-key="${now.id}" class="on" title="${now.blurb}">${title}: ${now.label}</button>`;
+    const hint = this.root.querySelector(`[data-hint="${group}"]`);
+    if (hint) hint.textContent = `${now.blurb} — ${Math.max(0, i) + 1} of ${list.length}`;
+    this.current[group] = now.id;
+  }
+
+  /** The sea. Live, and remembered — see render/waterStyles.js. */
+  _fillWater() {
+    this._fillCycle('water', 'Water', WATER_STYLES, currentWaterStyle());
+  }
+
+  /** How the car you are in behaves. Live, and remembered — see car/drivingModels.js. */
+  _fillDrive() {
+    this._fillCycle('drive', 'Driving', DRIVING_MODELS, currentDrivingModel());
   }
 
   _fillSuns() {
@@ -507,6 +597,33 @@ export class Menu {
       return;
     }
 
+    /* THE SEA, CHANGED WHILE YOU LOOK AT IT. No reload and no `setTimeout` — compare the grass
+     * branch directly above, which needs both. `setWaterStyle` remembers the choice and puts the new
+     * shader on every water material in the scene before it returns; the panel is still open over a
+     * sea that has already changed, which is why the toast is short. */
+    if (group === 'water') {
+      const style = setWaterStyle(nextInCycle(WATER_STYLES, currentWaterStyle(), key === 'prev' ? -1 : 1).id);
+      if (!style) return;
+      this._fillWater();
+      this._mark();
+      this.hooks.say?.(`water: ${style.label} — ${style.blurb}`, 3.0);
+      return;
+    }
+
+    /* HOW THE CAR FEELS, CHANGED WHILE YOU DRIVE IT. Two halves, deliberately: `cycleDrivingModel`
+     * chooses and persists (car/drivingModels.js's own wrapping cycler — the water module has no
+     * equivalent, which is why the line above computes its step and this one does not), and the
+     * `onDrive` hook is main.js putting it on the Vehicle the player is actually sitting in. The
+     * panel does not know which car that is, and should not. */
+    if (group === 'drive') {
+      const model = cycleDrivingModel(key === 'prev' ? -1 : 1);
+      this.hooks.onDrive?.(model);
+      this._fillDrive();
+      this._mark();
+      this.hooks.say?.(`driving: ${model.label} — ${model.blurb}`, 3.4);
+      return;
+    }
+
     if (group === 'car') {
       const spec = FLEET_BY_ID[key];
       const best = this.hooks.bestStreak ? this.hooks.bestStreak() : 0;
@@ -703,6 +820,13 @@ export class Menu {
     this._fillCars();
     this._fillTank();
     this._fillShop();
+    /* The two cyclers are refilled here as well, for the same reason as the wallet rows: their state
+     * lives outside this panel. `?water=cel` on the URL, or a choice made in a previous session and
+     * read back out of localStorage, both mean the label built in the constructor can already be
+     * stale by the time anyone opens the Garage. A picker showing the wrong current value is worse
+     * than no picker — it is the panel disagreeing with the sea in the window behind it. */
+    this._fillWater();
+    this._fillDrive();
     this.refreshSeed();
     this.open = true;
     this.root.hidden = false;

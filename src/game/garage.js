@@ -6,14 +6,30 @@
  * player is ever asked is which car.
  *
  * Cars unlock with the streak — the longest run you have ever managed without leaving the
- * road. That makes the one mechanic in the game the thing that opens the game up, and it
- * means the first car is deliberately the easiest to keep on the road with.
+ * road. That makes the one mechanic in the game the thing that opens the game up.
+ *
+ * The first car used to be "deliberately the easiest to keep on the road with". It is now the
+ * Tricycle, which is deliberately the worst — see the micro-car note above FLEET for why, and for
+ * why that does not cost anybody the easy car: the Hatch that used to hold the position is still
+ * free (`earnAt: 0`, i.e. collect nothing at all) and is one click away in the Garage.
  *
  * The unlock ladder is exponential, because a linear one stops meaning anything: going from
  * 8 km to 9 km is not the achievement that going from 1 km to 2 km was.
  */
 
 import { STEER, TYRE, BRAKE, BODY } from '../car/tuning.js';
+import { MICRO_FLEET, installMicroTiers } from '../car/microPhysics.js';
+
+/* THE TWO MICRO TIERS HAVE TO EXIST WHEREVER THE FLEET DOES.
+ *
+ * `micro` and `trike` are declared by car/microPhysics.js, not by car/tuning.js, and the two fleet
+ * entries below name them. car/vehicle.js resolves an unknown tier as `TIERS[tier] || TIERS.sports`
+ * — it does not throw — so a module that had the FLEET but not the tiers would silently build a
+ * SPORTS car and call it a Tricycle, which is the worst possible failure: no error, wrong physics,
+ * and a diagnostic that reports a pass. Importing MICRO_FLEET already installs them as a side
+ * effect of loading that module; the explicit call is here so the dependency is written down rather
+ * than depending on an import staying "unused-looking" through a future tidy-up. It is idempotent. */
+installMicroTiers();
 
 /* THE BODY-ROLL NUMBERS AS THE CARS WANT THEM, captured before any vehicle overwrites them.
  *
@@ -55,15 +71,104 @@ const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
  *
  * They are converted by tools/synty-car.mjs, which renames Synty's own node names onto the ones this
  * game's wheel rig and paint classifier expect — see that file's header. */
+/* ── THE TWO MICRO-CARS, AND WHY THE TRICYCLE IS THE ONE YOU START IN ─────────
+ *
+ * The bodies, the tiers and every feel number belong to car/microPhysics.js, which built them
+ * against the operator's eight-point "feels like it's falling over" specification and MEASURED the
+ * result: the Tricycle lifts a wheel at 0.37 g where the Hatch needs 1.78 g, and goes over after
+ * 2.83 s of full lock from 36 km/h; the Bubble rocks at 1.00 Hz and swings 11.00 degrees past its
+ * resting angle where every other car in the fleet reads 0.00 Hz and 0.31 degrees. Those numbers
+ * are not repeated here — one source of truth, and it is that module.
+ *
+ * What this file adds is the one thing that module deliberately refused to decide: where the two
+ * sit on the ladder. Its `MICRO_FLEET` carries `unlockAt: 0` and `price: 0` and says in the code
+ * that they are PLACEHOLDERS. Spreading them rather than pasting them keeps the feel, the tier, the
+ * model file and the blurb in one place, so a later tuning pass on the physics cannot leave a stale
+ * copy behind in the fleet.
+ *
+ * THE TRICYCLE IS FLEET[0] — the comic starter, which is what it was asked to be.
+ *
+ * "THE FIRST THREE CARS ARE EARNED WITH SUNS" IS STILL LITERALLY TRUE, and getting there cost one
+ * design decision that a measurement forced rather than a preference chose. Written down in full,
+ * because the arithmetic is not obvious and the next person to reorder this fleet will hit it:
+ *
+ *   The first attempt gave the Tricycle NO `earnAt` and let it be free by game/wallet.js's own first
+ *   route ("the first car in the fleet, always, from the first frame"), leaving Hatch 0 / Coupe 25 /
+ *   Estate 70 untouched. Every check passed except one, and the one it failed is the check that
+ *   matters most: tools/bench-economy.mjs's "100000 suns collected opens NO dealership car", which
+ *   went 7/8. A car with no `earnAt` is classified `how: 'buy'` by unlockRule() below, so the
+ *   Tricycle counted as a forecourt car that was nevertheless open to anybody — i.e. the fleet was
+ *   telling the shop that a free car was for sale. FLEET[0] is open by definition, so FLEET[0] can
+ *   never be a 'buy' car; whichever car sits first MUST carry an `earnAt`. That is structural, and
+ *   it means inserting a car at the bottom of the ladder pushes a car off the top of it.
+ *
+ *   So the ladder shifts down exactly one rung, which is what inserting at the bottom means:
+ *
+ *     Tricycle  earnAt 0    free, and free twice over — FLEET[0] and 0 collected
+ *     Hatch     earnAt 25   was 0
+ *     Coupe     earnAt 70   was 25
+ *     Estate    bought      was earnAt 70; it already declared `price: 30`, which until now was
+ *                           dead code, and 30 suns makes it the cheapest car on any forecourt
+ *
+ *   THE TWO THRESHOLD NUMBERS DO NOT MOVE — still 25 and 70, still "the tutorial of the economy",
+ *   and still exactly three cars on the collected ladder. What moves is which car sits on each rung.
+ *   The alternative was to demote the HATCH instead and leave Coupe and Estate where they were: one
+ *   line rather than four, but it takes a car off EVERY existing save (the Hatch was free at
+ *   `earnAt: 0`, so everybody has it), where this takes the Estate off only a player who had already
+ *   collected 70 — who can buy it back for 30 out of the 70+ they have demonstrably collected.
+ *   Costing the deepest-in player 30 suns beats costing every player a car they already own.
+ *
+ * WHAT THE COMIC STARTER COSTS, MEASURED, because it is a real cost and the next person should not
+ * have to rediscover it. tools/browser-test.mjs drives whichever car FLEET[0] is, in a real headless
+ * Chrome, and two runs of it either side of this change say:
+ *
+ *     ?car=hatch (the old starter)   38/40   fails C3 (95 deg of a required 100) and O2 — both
+ *                                            pre-existing and unrelated to this
+ *     Tricycle as the starter        36/40   also fails "D steers right" and C2 (the brakes)
+ *
+ * It is NOT a bug, and the mechanism is worth writing down: the suite holds FULL lock for 2.2 s at
+ * speed, and on a keyboard full lock is what holding the key means. On real terrain from the spawn
+ * that scrubs the Tricycle to a standstill (peak roll 9.8 deg, no rollover, 35 km/h -> 0), and its
+ * traction-control ramp — the operator's own point 8, 170 N.m rising 9.26 N.m per 50 Hz tick, full
+ * power at 4.60 s — then makes it slow to get going again. So the next check reads "43 km/h to 0 in
+ * 0 m" and the one after it turns 30 degrees instead of 100: both are measuring a car that is
+ * already stopped. On flat ground with no terrain the same input DOES put it over (168 deg of roll
+ * at full lock; 6.0 / 9.0 / 11.7 deg at quarter, half and three-quarter lock, all upright). In
+ * other words it does exactly what it was specified to do, and the suite's input is the one input
+ * that provokes it.
+ *
+ * THE LEVER, if that trade is not wanted: move the Hatch back to the front of this array and give it
+ * `earnAt: 0` again, put the Tricycle wherever it lands with `earnAt` removed, and walk the Coupe
+ * and Estate back to 25 and 70. Nothing else in the game reads the starter by name — `FIRST_CAR` is
+ * `FLEET[0].id` and everything downstream goes through it.
+ *
+ * THE BUBBLE IS FLEET[1] AND IT IS PRICED, which is not an aesthetic choice: tools/bench-economy.mjs
+ * asserts of FLEET[1] that a fresh wallet does NOT own it and that `priceOf` is above zero — the
+ * second car in the fleet is the one that proves the shop takes money. 150 suns sits above the
+ * Scooter's 120, so the Scooter's own note ("the cheapest thing on any forecourt") is no less true
+ * than it was, and below the Rally's 180. `unlockAt: 12000` is a badge position on the unlock bar
+ * and grants nothing — between the Sedan's 8 km and the Rally's 20 km.
+ */
+const MICRO_BY_ID = Object.fromEntries(MICRO_FLEET.map((c) => [c.id, c]));
+
 export const FLEET = [
+  /* `earnAt: 0` is not redundant beside FLEET[0]'s own free route — see the note above. It is what
+   * makes unlockRule() call this car EARNED rather than FOR SALE, and a free car that the fleet
+   * describes as being for sale is what bench-economy caught. */
+  { ...MICRO_BY_ID.threewheeler, earnAt: 0, unlockAt: 0, price: 0 },
+  { ...MICRO_BY_ID.microcar, unlockAt: 12000, price: 150 },
   {
     id: 'hatch',
-    earnAt: 0,
+    earnAt: 25, // was 0, when it was the starter. The rung below it is the Tricycle now.
     file: 'hatch.glb',
     label: 'Hatch',
     blurb: 'Light and eager. Turns in more sharply than it has any right to.',
     unlockAt: 0,
-    price: 0, // the car you start in
+    /* `price: 0` and `earnAt: 0` — free, but no longer THE STARTER: the Tricycle above is what you
+     * arrive in now. `earnAt: 0` means "collect nothing at all", so the first proper car is still
+     * there from the first frame, one click away in the Garage, for anyone who has had enough of
+     * three wheels. It is the first of the three earned-with-suns cars. */
+    price: 0,
     tier: 'gt',
     length: 4.0,
     feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
@@ -176,7 +281,11 @@ export const FLEET = [
   },
   {
     id: 'estate',
-    earnAt: 70,
+    /* NO `earnAt` any more — this is the car the ladder pushed onto the forecourt when the Tricycle
+     * was inserted at the bottom of it, and the reasoning is written out in full in the micro-car
+     * note above FLEET. Its `price: 30` below has been sitting here since dealerships were added and
+     * was unreachable while the car was earned; it is now the cheapest car anywhere, which suits
+     * "the one you learn the roads in". */
     file: 'synty-convertible.glb',
     label: 'Estate',
     blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
@@ -188,7 +297,7 @@ export const FLEET = [
   },
   {
     id: 'coupe',
-    earnAt: 25,
+    earnAt: 70, // was 25 — one rung up, the Estate's old threshold. See the note above FLEET.
     file: 'coupe.glb',
     label: 'Coupe',
     blurb: 'The road car. Quick enough to be interesting, calm enough to cruise.',
@@ -332,9 +441,15 @@ export function earnAtOf(car) {
  * @returns {{how: 'earn'|'buy', at: number}}
  */
 export function unlockRule(car) {
-  /* The starter car is `earnAt: 0` rather than a separate 'free' case, and that is not a technicality
-   * — it is what makes "the first three cars are total collected" literally true when you count them.
-   * Estate at 0 collected, Hatch at 25, Coupe at 70; everything after is bought. */
+  /* The starter car is `earnAt: 0` rather than a separate 'free' case, and that is not a
+   * technicality — it is what makes "the first three cars are total collected" literally true when
+   * you count them, AND it is what keeps FLEET[0] out of the forecourt's books: a car with no
+   * `earnAt` falls through to `{how: 'buy'}` below, and FLEET[0] is open to everybody, so it would
+   * read as a car that is for sale and free at the same time. bench-economy caught exactly that.
+   *
+   * Tricycle at 0 collected, Hatch at 25, Coupe at 70; everything after is bought. (This line read
+   * "Estate at 0, Hatch at 25, Coupe at 70", which the entries above have not agreed with for some
+   * time — it is read off them now rather than kept as a second opinion.) */
   const e = earnAtOf(car);
   return Number.isFinite(e) ? { how: 'earn', at: e } : { how: 'buy', at: priceOf(car) };
 }

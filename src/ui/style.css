@@ -996,6 +996,33 @@ canvas {
 #menu button.on {
   color: var(--cream);
 }
+/* ── THE SELECTED BUTTON, WHILE THE POINTER IS ON IT ─────────────────────────
+ * A measured 1.32:1, which is not a contrast so much as an absence of one, and this block's own
+ * rule is that legibility is measured rather than assumed — so it is fixed here rather than noted.
+ *
+ * THE CAUSE IS AN ORDERING ACCIDENT IN THIS VERY BLOCK, not in the garage styles above. The hover
+ * BACKGROUND is restated a few lines up (a literal rgba cannot inherit the new theme), while
+ * `button.on` only restates its `color`, because its background is `var(--teal)` and therefore
+ * inherits for free. Both selectors carry the same specificity, so the later one wins the
+ * background: a hovered selected button ends up with the neutral 16% wash UNDER `.on`'s pale cream
+ * text. Measured on the running game with getComputedStyle: rgb(237,240,221) on rgb(206,211,193),
+ * a WCAG ratio of 1.32:1 against the 4.5:1 this block holds itself to.
+ *
+ * It was always latent — the car, grass and land rows each carry an `on` button — but it was easy
+ * to miss because you do not usually hover the option you have already chosen. The Water and
+ * Driving cyclers make it unmissable: their name button IS the selected one, and cycling means
+ * resting the pointer on it and clicking it again and again. The label vanished while in use.
+ *
+ * Fixed for every `on` button in the panel rather than for the two new rows, because it is one
+ * fault with one cause. `.on:hover` outranks the plain `:hover` on specificity, so this holds
+ * wherever the rules end up in the file. The darkening layer is a black wash over `var(--teal)`
+ * rather than a second green literal, so the hover cue still tracks the theme if the theme moves,
+ * and the cream label sits on something DARKER than the 5.0:1 pair this block already measured. */
+#menu button.on:hover,
+#menu button.on:focus-visible {
+  background: linear-gradient(rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.14)), var(--teal);
+  border-color: var(--teal);
+}
 #menu .foot {
   border-top: 1px solid rgba(44, 61, 49, 0.16);
 }
