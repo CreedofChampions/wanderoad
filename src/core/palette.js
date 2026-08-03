@@ -37,8 +37,19 @@ export const P = {
   gTip: '#C6D46B',
   gUpper: '#93B84E',
   gMid: '#6C9A47',
-  gLow: '#436E4F',
-  gBase: '#2B564F',
+  gLow: '#446E43',   // was #436E4F — see gBase
+  gBase: '#2C563E',  /* was #2B564F, and this is the grass half of B24.
+                     *
+                     * The blade's SHADOW colours are what a dense sward shows you at distance — `shd`
+                     * is mix(gBase*0.82, gLow) and `mid` starts at gBase — and both were TEAL, not
+                     * dark green: gBase #2B564F is r43 g86 b79, blue 36 ABOVE red, and gLow #436E4F
+                     * is 12 above. Every lit colour in the ramp is strongly green (gMid -37, gUpper
+                     * -69, gTip -91), so the field reads green close up, where the lit faces show,
+                     * and turns blue-grey at range, where the shaded interior takes over. That is
+                     * exactly the complaint: "more blue than green for human eye".
+                     *
+                     * Both are brought to a dark GREEN of the same value — the shadows stay as deep
+                     * as they were, they simply stop being teal. */
   gTrans: '#E9EE7C',
   gSheen: '#EDF0C8',
   gDry: '#D9C079',
