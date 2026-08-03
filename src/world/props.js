@@ -1573,10 +1573,23 @@ function _showroomForCell(gi, gj, seed, probe = null) {
 /** Every walk-in showroom whose centre lies in the box. */
 export function showroomsInBox(x0, z0, x1, z1, seed, probe = null) {
   const out = [];
-  const gi0 = Math.floor((x0 - SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gi1 = Math.floor((x1 + SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gj0 = Math.floor((z0 - SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gj1 = Math.floor((z1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  /* THE CELLS THAT OVERLAP THE BOX, and no more — this is B11's 1126 ms frame.
+   *
+   * This padded by a whole SHOWROOM_CELL on every side while `showroomCellsWarm`, the gate that
+   * exists to keep cold cells off the tile-bake path, does NOT pad. So the gate would confirm the
+   * overlapping cells were resolved, say yes, and this function would then resolve a RING OF CELLS
+   * THE GATE NEVER CHECKED — cold, at 20-360 ms each for their nearestRoadPoint calls. Measured per
+   * phase, that is where the 1126 ms worst frame lived, and why it was paid on every new region
+   * (1331 ms on first touch, 0.1 ms once the cells were cached, 989 ms nine kilometres away).
+   *
+   * The padding was never needed, and showroomCellsWarm's own comment already says why: only halls
+   * whose CENTRE lands inside the box are kept, four lines below, so a cell that does not overlap
+   * the box cannot contribute one. Resolving it is paying full price for an answer that is thrown
+   * away. The two functions now agree on which cells matter, which is the actual fix. */
+  const gi0 = Math.floor(x0 / SHOWROOM_CELL);
+  const gi1 = Math.floor(x1 / SHOWROOM_CELL);
+  const gj0 = Math.floor(z0 / SHOWROOM_CELL);
+  const gj1 = Math.floor(z1 / SHOWROOM_CELL);
   for (let gj = gj0; gj <= gj1; gj++) {
     for (let gi = gi0; gi <= gi1; gi++) {
       const r = showroomForCell(gi, gj, seed, probe);
