@@ -54,6 +54,38 @@ near the brake test's start point before touching any braking constant.
 
 Do NOT tune the brakes to make this pass. The number says 0 m, and no brake change produces 0 m.
 
+## B2 — attempt 6 (correct the exact crossing point) ALSO FALSIFIED, 3 Aug 2026
+
+The fix this entry itself recommended — "insert a sample at the exact crossing point findCrossings
+already computes, and correct that point at the old 18 m radius" — was implemented and measured.
+
+Implementation: after the distance search in `levelAgainst` pass 1, intersect this lane's segments
+directly with each near road's segments, and give the sample nearest each true intersection the
+other road's height at that point with full authority. No radius widened, nothing outside a crossing
+touched, node agreement untouched by construction — which is exactly what killed attempts 3, 4 and 5.
+
+| metric, after B1's fan landed | before | after |
+|---|---|---|
+| boxes holding a mismatch | 26 of 253 | **26 of 253** |
+| crossings over 1 m | 26 | **26** |
+| worst | 3.94 m | **3.96 m** (noise) |
+
+**No effect whatsoever.** So the residual is NOT "the crossing point was never corrected". Something
+downstream is either not applying the correction or undoing it — the candidates now are the long
+smoothstep release added on 3 Aug (which rebuilds the correction from runs of `weight`, and may not
+recognise a single-sample full-authority spike), or the possibility that the surface being measured
+is the ARTERIAL's rather than the lane's, in which case no amount of lane correction can close it
+because arterials never yield to lanes by design.
+
+**WHERE ATTEMPT 7 SHOULD START:** stop assuming the lane is the road that is wrong. Print, for the
+worst pair, which of the two edges each diag sample belongs to and what each one's profile says at
+that exact point. Every attempt so far has corrected the LANE; none has checked that the lane is the
+one out of place.
+
+**Context worth keeping:** B2 improved a great deal this session without any of these six attempts —
+worst step 12.91 m -> 3.94 m and 34 boxes -> 26 — from the elevation smoothing (commit bdb25d2) and
+the junction fan (commit c499928). The remaining 26 are a tail, and the bar is 19.
+
 ## B2 — terrain steps at crossings: the CAUSE is found, and four fixes are falsified (3 Aug 2026)
 
 Baseline, `node tools/diag-crosslevel.mjs`, 12 km box: **34 of 266 car boxes hold a mismatched
