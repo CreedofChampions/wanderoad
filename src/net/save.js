@@ -150,9 +150,15 @@ export class WorldSave {
   async _flushOnce() {
     if (!this.transport) return { sent: 0, more: false };
     let sent = 0;
-    // Bounded: a very long session drains over several ticks instead of hammering the
-    // server in one unbounded loop.
-    for (let round = 0; round < 6; round++) {
+    /* ONE BATCH PER FLUSH, not six.
+     *
+     * This shares a transport AND a player key with the presence tick, and the server's limit is 6
+     * requests per 2 s per player. Ticking at 2 Hz already spends 4 of those, so a six-request save
+     * burst guaranteed a 429 — which the tick loop then treated as a dead server and backed off past
+     * the 8 s presence expiry, taking the player out of everyone else's world. A save is not urgent;
+     * presence is. The existing debounce re-arms this, so a long session still drains, just without
+     * standing on the multiplayer budget to do it. */
+    for (let round = 0; round < 1; round++) {
       const batch = this._takeBatch();
       if (batch.ops.length === 0) break;
       try {

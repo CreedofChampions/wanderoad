@@ -192,6 +192,26 @@ export class Remotes {
    *                       page load and would put every ghost decades in the past.
    */
   update(dt, now = Date.now()) {
+    /* REJECT A CLOCK THAT IS NOT A WALL CLOCK, loudly, instead of silently rendering the distant
+     * past. This is the whole of "multiplayer never syncs properly".
+     *
+     * main.js called `remotes.update(dt, now)` from inside its requestAnimationFrame callback, where
+     * `now` is a DOMHighResTimeStamp measured from page load — tens of thousands of ms. Every
+     * snapshot is stamped with the SERVER's epoch ms, about 1.75e12. So `renderT` landed roughly
+     * 1.75e9 SECONDS before the oldest snapshot held, `sample()`'s `t <= buf[0].t` guard was always
+     * true, the extrapolation clamped to zero, and every ghost was pinned to the first snapshot ever
+     * received for that peer. The doc comment above said exactly this must not happen; nothing
+     * enforced it.
+     *
+     * An epoch millisecond has been above 1e12 since 2001 and will be until 33658, so this test can
+     * only ever catch the mistake it is here for. */
+    if (!(now > 1e12)) {
+      if (!this._warnedClock) {
+        this._warnedClock = true;
+        console.error('remotes.update: `now` must be a wall clock (Date.now()), got', now, '— using Date.now()');
+      }
+      now = Date.now();
+    }
     const serverNow = now + (this._offset ?? 0);
     const renderT = serverNow - DELAY_MS;
 

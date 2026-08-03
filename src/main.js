@@ -73,6 +73,32 @@ import { Cinematic } from './game/cinematic.js';
 import { Menu } from './ui/menu.js';
 import { MusicPanel } from './ui/musicPanel.js';
 import { createTransport } from './net/transport.js';
+
+/* WHERE THE MULTIPLAYER API ACTUALLY LIVES.
+ *
+ * Operator: "whole multiplayer seems to never sybc properly". It never synced on cozydriver.com
+ * because there was no server to sync with.
+ *
+ * The PHP lives in exactly one place — crumbtown.org/wanderoad/api/ — deliberately, so there is
+ * one set of endpoints and one database rather than two. But the client asked for `./api/`,
+ * resolved against its own page. From https://cozydriver.com/beta/ that is
+ * https://cozydriver.com/beta/api/, which has never existed. The transport then walked its chain,
+ * found the PHP driver failing, and quietly settled on the `local` driver — a driver that works
+ * perfectly and has exactly one peer in it, you. No error, no warning, no multiplayer.
+ *
+ * So the base is chosen by ORIGIN rather than by path. Served from crumbtown, the API is a
+ * relative hop away. Served from anywhere else — the apex, /beta, a preview — it is the absolute
+ * home, which needs the origin on the server's CORS allowlist (server/drive.php).
+ *
+ * localhost keeps the relative path ON PURPOSE: a dev server has no PHP, so it falls to `local`
+ * and a debugging session cannot write presence rows or leaderboard scores into the live database.
+ */
+const API_HOME = 'https://crumbtown.org/wanderoad/api/';
+function apiBase() {
+  const h = location.hostname;
+  const ownIt = /(^|\.)crumbtown\.org$/i.test(h) || h === 'localhost' || h === '127.0.0.1' || h === '';
+  return ownIt ? new URL('./api/', location.href).href : API_HOME;
+}
 import { Remotes } from './net/remotes.js';
 import { makeGhostFactory, ghostStats } from './net/ghostCar.js';
 import { identity } from './net/identity.js';
@@ -866,7 +892,7 @@ async function boot() {
   setStat('looking for company…', 0.7);
   const transport = createTransport({
     backend: OFFLINE ? 'none' : 'auto',
-    phpBase: new URL('./api/', location.href).href,
+    phpBase: apiBase(),
   });
   /* Ghosts are now the SAME loaded GLB the driver is actually driving — src/net/ghostCar.js,
    * which has the whole story. Two separate bugs sat on top of each other here and only the
@@ -949,6 +975,8 @@ async function boot() {
 
   let netState = 'offline';
   let nextTick = 0;
+  /** Consecutive failed ticks, for the backoff ladder — see the catch below. */
+  let netFails = 0;
   async function netTick(now) {
     if (now < nextTick) return;
     nextTick = now + 4000; // pessimistic; the server's own `rate` replaces this
@@ -959,15 +987,31 @@ async function boot() {
         return;
       }
       netState = transport.backend === 'local' ? 'solo' : 'online';
+      netFails = 0; // a good tick resets the backoff ladder
       if (res.peers) remotes.ingest(res.peers, res.now);
       // The server sets the pace. 'rate' is in HERTZ, not seconds: 0.25 when you are alone in
       // a continent, 2 when someone is within 800 m. Reading it as seconds inverts the whole
       // scheme — a lone driver would poll four times a second and a crowded road once every
       // two.
       nextTick = performance.now() + 1000 / Math.max(0.05, Math.min(res.rate || 0.25, 10));
-    } catch {
+    } catch (err) {
       netState = 'offline';
-      nextTick = performance.now() + 8000;
+      /* A BACKOFF LONGER THAN THE EXPIRY IS A DISCONNECT.
+       *
+       * This waited 8000 ms after any failure, and the server drops a presence row after 8.0 s. So a
+       * SINGLE dropped tick — one timeout, one rate limit — guaranteed the other player lost you
+       * entirely, and the rate then collapses to its lonely 0.25 Hz so it takes seconds more to
+       * notice you came back. That is not a network problem, it is a backoff tuned past the cliff it
+       * was meant to stay behind.
+       *
+       * Jittered growth from 1.2 s, capped at 5 s, so it stays inside the expiry window and a room
+       * full of clients that all failed at once do not come back in lockstep. A 429 is not a dead
+       * server, so honour Retry-After: the transport already attaches the status and nothing has
+       * ever read it. */
+      const status = err && err.status;
+      netFails = status === 429 ? 1 : Math.min(netFails + 1, 4);
+      const wait = status === 429 ? 1200 : Math.min(1200 * Math.pow(1.7, netFails - 1), 5000);
+      nextTick = performance.now() + wait * (0.85 + Math.random() * 0.3);
     }
   }
   /* Presence must not live and die with requestAnimationFrame. Browsers pause rAF entirely for
@@ -1666,7 +1710,10 @@ async function boot() {
     // above where it is registered. remotes.update() stays here: it is the visual
     // interpolation of ghosts already ingested, which is a rendering concern and belongs
     // exactly where every other per-frame visual update lives.
-    remotes.update(dt, now);
+    /* Date.now(), NOT the frame's `now`. The frame timestamp comes from requestAnimationFrame and
+     * is measured from page load; remotes needs the same wall clock the snapshots are stamped with.
+     * Passing the wrong one pinned every ghost to its oldest snapshot — see remotes.update. */
+    remotes.update(dt, Date.now());
 
     /* audio + post cues */
     audio.update(dt, car);
@@ -1753,6 +1800,8 @@ async function boot() {
     // ACTUALLY DREW rather than against a second opinion about what should be there.
     flora,
     remotes,
+    transport,
+    netInfo: () => netState,
     /* How many ghosts got their real GLB versus the procedural stand-in. Exposed because
      * "the ghost is the wrong car" can only be answered with a count of models that actually
      * loaded — see src/net/ghostCar.js. */
