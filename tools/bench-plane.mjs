@@ -119,6 +119,33 @@ console.log('\n── banking turns the aeroplane (the reference own trick) ─�
   check(Math.abs(straight.yaw - s0) < 0.12, 'and wings level it flies straight', `${(((straight.yaw - s0) * 180) / Math.PI).toFixed(1)} deg`, 'about 0');
 }
 
+/* ── 4b. WHICH WAY IT TURNS ──────────────────────────────────────────────── */
+console.log('\n── press left, go left ────────────────────────────────────────────');
+{
+  /* Operator: "the plane when being steered left goes right and vice versa". The bank-trick check
+   * above passed the whole time it was inverted, because it only asks whether a held stick turns
+   * the aeroplane AT ALL — Math.abs() on both the bank and the heading change. Sign is the thing
+   * the player actually feels, so it gets its own check.
+   *
+   * The convention, once, from car/input.js: steer POSITIVE IS LEFT. The pose convention, from
+   * plane.js: forward is (sin yaw, cos yaw), so yaw INCREASING sweeps +Z towards +X, which is to
+   * the right. Left stick must therefore make yaw go DOWN. */
+  const left = airborne(w);
+  const l0 = left.yaw;
+  for (let i = 0; i < 6 / DT; i++) left.update(DT, STICK({ throttle: 0.8, steer: 1 }));
+  const dLeft = left.yaw - l0;
+
+  const right = airborne(w);
+  const r0 = right.yaw;
+  for (let i = 0; i < 6 / DT; i++) right.update(DT, STICK({ throttle: 0.8, steer: -1 }));
+  const dRight = right.yaw - r0;
+
+  console.log(`       6 s of stick: left ${((dLeft * 180) / Math.PI).toFixed(0)} deg, right ${((dRight * 180) / Math.PI).toFixed(0)} deg  (negative = to the left)`);
+  check(dLeft < -0.15, 'holding LEFT turns the nose to the left', `${((dLeft * 180) / Math.PI).toFixed(0)} deg`, 'negative');
+  check(dRight > 0.15, 'holding RIGHT turns the nose to the right', `${((dRight * 180) / Math.PI).toFixed(0)} deg`, 'positive');
+  check(left.roll < 0 && right.roll > 0, 'and it banks the way it is turning', `${((left.roll * 180) / Math.PI).toFixed(0)} / ${((right.roll * 180) / Math.PI).toFixed(0)} deg`, 'left negative, right positive');
+}
+
 /* ── 5. the ground is a floor, not a wall ────────────────────────────────── */
 console.log('\n── landing is soft, and the ground holds ──────────────────────────────────');
 {

@@ -65,7 +65,7 @@ await send('Page.enable', {}, S);
 await send('Runtime.enable', {}, S);
 const ev = async (e) => (await send('Runtime.evaluate', { expression: e, returnByValue: true }, S)).result?.result?.value;
 
-const URL_ = `${BASE}?unlock=123&fresh=1&car=scooter&seed=20260726`;
+const URL_ = process.env.SHOT_URL || `${BASE}?unlock=123&fresh=1&car=scooter&seed=20260726`;
 console.log('opening', URL_);
 await send('Page.navigate', { url: URL_ }, S);
 for (let i = 0; i < 120; i++) {
@@ -81,6 +81,7 @@ await sleep(6000);
 await send('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 87, key: 'w', code: 'KeyW' }, S);
 await sleep(600);
 
+if (process.env.SHOT_SETUP) { await ev(process.env.SHOT_SETUP); await sleep(Number(process.env.SHOT_WAIT || 3000)); }
 const info = await ev(
   "(() => { const W = window.WANDEROAD; return JSON.stringify({ car: W.carId ?? (W.carSpec && W.carSpec.id) ?? 'unknown', kph: Math.round(W.car.kph), roll: +(W.car.roll * 180 / Math.PI).toFixed(2) }); })()"
 );
@@ -88,7 +89,7 @@ console.log('   in game:', info);
 
 mkdirSync(OUT, { recursive: true });
 const { result: shot } = await send('Page.captureScreenshot', { format: 'png' }, S);
-const file = `${OUT}/scooter-live.png`;
+const file = `${OUT}/${process.env.SHOT_NAME || 'scooter'}-live.png`;
 writeFileSync(file, Buffer.from(shot.data, 'base64'));
 console.log('   wrote', file, Buffer.from(shot.data, 'base64').length, 'bytes');
 

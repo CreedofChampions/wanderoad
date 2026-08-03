@@ -76,6 +76,9 @@ const BOAT_ROLL_RATE = 4;
  *  they are module-private consts over there and this is the only other place in the game
  *  that draws a boat riding water. Kept identical on purpose: one boat at anchor, one boat
  *  under way, the same sea underneath both. */
+/** How much of the hull's own height sits UNDER the water. A third reads as afloat and loaded;
+ * much less looks like a bath toy resting on glass, much more looks like it is going down. */
+const BOAT_DRAFT = 0.33;
 const BOAT_BOB_AMP = 0.14;
 const BOAT_BOB_HZ = 0.11;
 /** Fraction of the boat's own speed carried onto the beach on a normal exit — "keep heading +
@@ -205,6 +208,18 @@ export class BoatMode {
    *        terrain sampler — see the file header for why this is a callback and not a
    *        captured reference.
    */
+  /**
+   * Tell the boat how big its hull is, so it can work out where the waterline should cut it.
+   * Called whenever the boat model changes; safe to call with nothing, which restores the old
+   * origin-on-the-water behaviour rather than inventing a size.
+   *
+   * @param {{minY:number, height:number}|null} box the loaded hull's bounds, relative to its origin
+   */
+  setHull(box) {
+    this._hullMinY = box && Number.isFinite(box.minY) ? box.minY : 0;
+    this._hullH = box && Number.isFinite(box.height) && box.height > 0 ? box.height : 0;
+  }
+
   constructor({ wallet, say = null, terrain = null } = {}) {
     this.wallet = wallet;
     this.say = say || (() => {});
@@ -225,6 +240,9 @@ export class BoatMode {
     this._t = 0;
     /** seconds since the locked-barrier toast last said its line. */
     this._sinceSay = Infinity;
+    /** The hull's own box, in metres, measured from the model that is actually loaded. */
+    this._hullMinY = 0;
+    this._hullH = 0;
     /** seconds remaining on the post-bounce exit-test suspension — see EXIT_BOUNCE_COOLDOWN's
      *  own comment. Zero means the exit test runs normally. */
     this._bounceCooldown = 0;
@@ -486,7 +504,21 @@ export class BoatMode {
 
     const wl = waterLevelAt(surf.w, surf.y);
     const waterY = wl === null ? surf.y : wl; // guard only: `active` implies wet by construction
-    car.y = waterY + Math.sin(this._t * BOAT_BOB_HZ * TAU) * BOAT_BOB_AMP;
+    /* WHERE THE WATERLINE CUTS THE HULL. Operator: "boat is always half flooded with water".
+     *
+     * The old line put the model's ORIGIN on the water plane, which is only right if the origin
+     * happens to be the waterline — and for a boat mesh it never is. Whatever the origin is,
+     * the hull's own box says where the keel is, and the boat is placed so that a fixed fraction
+     * of the hull sits below the surface:
+     *
+     *   keel_world = car.y + hullMinY   must equal   waterY - DRAFT * hullHeight
+     *
+     * which rearranges to the line below. A model with its origin at the keel (hullMinY = 0) gets
+     * sunk; one with its origin amidships (hullMinY = -h/2) gets lifted; either way the water
+     * ends up a third of the way up the hull, which is what a small boat looks like afloat.
+     * Without a measured hull it falls back to the old behaviour rather than guessing a size. */
+    const draft = this._hullH > 0 ? BOAT_DRAFT * this._hullH + this._hullMinY : 0;
+    car.y = waterY - draft + Math.sin(this._t * BOAT_BOB_HZ * TAU) * BOAT_BOB_AMP;
 
     car.yaw = this.yaw;
     car.vx = Math.sin(this.yaw) * this.speed;

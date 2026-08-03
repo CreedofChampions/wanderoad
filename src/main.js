@@ -10,7 +10,7 @@
  * time-sliced.
  */
 
-import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, SRGBColorSpace } from 'three';
+import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, Box3, SRGBColorSpace } from 'three';
 import * as THREE_NS from 'three';
 import { DEG, closestHeading } from './core/math.js';
 import { createSky } from './render/sky.js';
@@ -40,8 +40,7 @@ import {
   SHOWROOM_REACH,
   hallSpots,
   HALL_REACH,
-  SHOWROOM_HALF_W,
-} from './world/props.js';
+  SHOWROOM_HALF_W, AIRFIELD_HALF_LEN } from './world/props.js';
 import { Walker, EYE, ENTER_R, LEASH } from './game/walk.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
@@ -634,6 +633,18 @@ async function boot() {
    * lives only in the private repo, so the fallback is what keeps a public checkout afloat. */
   const boatMesh = await loadPlayerBoat(ships.material, new URL('./models/cars/', location.href).href);
   boatMesh.visible = false;
+  /* TELL THE BOAT HOW BIG ITS HULL IS. Operator: "boat is always half flooded with water".
+   *
+   * Measured from whichever hull actually loaded — the Synty one or the hand-built fallback — so
+   * the waterline lands a third of the way up either of them without a hardcoded number that would
+   * be wrong for the other. game/boat.js does the arithmetic; this is the only place that knows
+   * which mesh is on screen. */
+  {
+    const box = new Box3().setFromObject(boatMesh);
+    if (Number.isFinite(box.min.y) && box.max.y > box.min.y) {
+      boatMode.setHull({ minY: box.min.y, height: box.max.y - box.min.y });
+    }
+  }
   /* THE AEROPLANE, which did not exist until now — see render/plane.js. Flying used to drag the
    * CAR's mesh to the plane's x and z, ignoring its height, pitch and roll, so taking off looked
    * like nothing happening. */
@@ -1159,6 +1170,14 @@ async function boot() {
      * and the windsock are for — but the check is deliberately soft: the plane only needs somewhere
      * flat, so a long straight road works too, and refusing it there would be a rule with no reason
      * behind it. What IS enforced is the unlock: sea diamonds, or the pass. */
+    /* CAN THE PLANE LEAVE THE GROUND FROM HERE? Within the strip's own half-length of an
+     * airfield's centre, or with everything unlocked. AIRFIELD_HALF_LEN is the same 190 m the
+     * "an airfield — P to take off" prompt already uses, so the message and the rule agree. */
+    const canTakeOffHere = () => {
+      if (cheatOn()) return true;
+      const near = props.nearestAirfield ? props.nearestAirfield(car.x, car.z) : null;
+      return !!near && near.dist <= AIRFIELD_HALF_LEN;
+    };
     if (input.tapped('fly')) {
       if (plane.active) {
         plane.stop();
@@ -1166,8 +1185,29 @@ async function boot() {
         hud.say('back in the car', 2.4);
       } else if (!plane.unlocked) {
         hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} away`, 3.4);
+      } else if (!canTakeOffHere()) {
+        /* AN AEROPLANE LIVES AT AN AIRFIELD. Operator: "unlock /switch should require airport
+         * (unless "all unlock" is on)".
+         *
+         * This deliberately overrides the softer rule that was here — the old comment argued the
+         * plane only needs somewhere flat, so a long straight road should do. That made the 380 m
+         * strip and its windsock decorative: there was never a reason to fly TO one. Now there is,
+         * and the airfields become destinations rather than scenery.
+         *
+         * `?unlock=123` still bypasses it, because a cheat that unlocks everything and then makes
+         * you drive to a runway anyway is not an unlock. */
+        const far = props.nearestAirfield ? props.nearestAirfield(car.x, car.z) : null;
+        hud.say(
+          far ? `planes take off from airfields — nearest is ${(far.dist / 1000).toFixed(1)} km away` : 'planes take off from airfields — find one first',
+          3.6
+        );
       } else {
         plane.start(car, false);
+        /* WHICH KEY RAISES THE NOSE. Operator: "control to point nose up unclear". Pitch is on K
+         * and I, which nothing anywhere said, so taking off consisted of holding the throttle and
+         * hoping. Said at the one moment it is needed and nowhere else. */
+        const bank = input.device === 'pad' ? input.label('steer') : `${input.label('steerLeft')}/${input.label('steerRight')}`;
+        hud.say(`${input.label('pitchUp')} nose up · ${input.label('pitchDown')} nose down · ${bank} bank`, 6.0);
       }
     }
 

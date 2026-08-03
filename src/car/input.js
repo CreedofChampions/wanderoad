@@ -140,6 +140,7 @@ export const PAD_HELP = [
   ['throttle', 'RT', 'throttle'],
   ['brake', 'LT', 'brake'],
   ['steer', 'Left stick', 'steer'],
+  ['pitchUp', 'Right stick', 'nose up and down, when you are flying'],
   ['handbrake', 'A', 'handbrake'],
   ['reset', 'Y or View', 'put me back on the road'],
   ['garage', 'Start', 'this Garage - and Start or B closes it'],
@@ -286,6 +287,7 @@ export class Input {
     let kHand = this.held('handbrake') ? 1 : 0;
 
     // ── gamepad ──
+    let gPitch = 0;
     let gSteer = 0;
     let gThrottle = 0;
     let gBrake = 0;
@@ -313,6 +315,14 @@ export class Input {
         const n = clamp01((mag - STEER.padDeadzone) / (STEER.padSaturation - STEER.padDeadzone));
         gSteer = Math.sign(ax) * Math.pow(n, STEER.padCurve);
       }
+      /* THE ELEVATOR, on the right stick. Operator: "control to point nose up unclear" — on a pad
+       * it was not merely unclear, it did not exist: the pad could START flight (left stick click)
+       * and then had no way to raise the nose at all, so every pad take-off ran along the ground.
+       * Axis 3 is the right stick's Y in the W3C Standard Gamepad layout, and it is negated for the
+       * same reason flight sims pull back to climb. Same deadzone as the steering, and the car
+       * ignores it. */
+      const py = -(p.axes[3] || 0);
+      gPitch = Math.abs(py) > STEER.padDeadzone ? clamp(py, -1, 1) : 0;
       gThrottle = p.buttons[7] ? p.buttons[7].value : 0;
       gBrake = p.buttons[6] ? p.buttons[6].value : 0;
       gHand = p.buttons[0] && p.buttons[0].pressed ? 1 : 0;
@@ -351,7 +361,8 @@ export class Input {
 
     /* The plane's pitch axis. Read here so there is ONE place that turns keys into intent — the
      * same argument the file header makes for everything else — and simply ignored by the car. */
-    s.pitchAxis = (this.held('pitchUp') ? 1 : 0) - (this.held('pitchDown') ? 1 : 0);
+    const kPitch = (this.held('pitchUp') ? 1 : 0) - (this.held('pitchDown') ? 1 : 0);
+    s.pitchAxis = kPitch || gPitch;
 
     return s;
   }

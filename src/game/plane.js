@@ -212,7 +212,19 @@ export class Plane {
      * last rate for ever. The reference leans on Unity's angular drag for this; here it is
      * explicit, which is also what makes it testable. */
     const stickPitch = clamp(i.pitch || 0, -1, 1);
-    const stickRoll = clamp(i.steer || 0, -1, 1);
+  /* THE STICK'S SIGN, and the plane had it backwards.
+   *
+   * Operator: "the plane when being steered left goes right and vice versa".
+   *
+   * `i.steer` arrives straight from car/input.js, whose convention is POSITIVE IS LEFT
+   * (`held('steerLeft') ? 1 : 0) - (held('steerRight') ? 1 : 0`). The flight model's is the
+   * opposite by construction: a positive roll banks right, the bank trick below yaws in
+   * proportion to that bank, and yaw increasing turns towards +X because forward is
+   * (sin yaw, cos yaw). So a steady press on A rolled the aeroplane left and flew it right.
+   *
+   * Negated HERE rather than at the call site so the one game-wide convention holds
+   * everywhere and there is no second place to remember it. */
+    const stickRoll = -clamp(i.steer || 0, -1, 1);
     const stickYaw = clamp(i.yaw || 0, -1, 1);
 
     this.p += (stickPitch * PLANE.pitchTorque - this.p * PLANE.angularDamp) * dt;
