@@ -229,11 +229,28 @@ void main(){
 
   // shadows to violet, highlights to cream — the single biggest lever
   float l = luma(c);
-  vec3 shadowPush = mix(vec3(0.90,0.95,1.16), vec3(1.0), smoothstep(0.0, 0.34, l));
+  /* WARMED, because this was most of "the land reads more blue than green to the eye".
+   *
+   * It was vec3(0.90, 0.95, 1.16): in anything darker than mid-grey it multiplied BLUE by 1.16 and
+   * RED by 0.90 — a 29% blue-over-red push, applied hardest to exactly the mid-dark pixels a
+   * hillside of grass is made of. It is a conventional cool-shadow film grade and it looks lovely
+   * on a city street; on a meadow it turns the ground grey-blue.
+   *
+   * Measured, parked at a fixed spot on an identical 58330-pixel region: the ground WITHOUT grass
+   * read r114.2 g114.2 b121.2 — blue 7.0 above red and green exactly equal to red, i.e. no green
+   * left in the land at all. Aerial haze and the grass distance-convergence were both eliminated
+   * first (K_MIST #D6DDD4 and tMid #6A924F are strongly green-dominant and can only push greener),
+   * which is what left the grade as the candidate.
+   *
+   * Halved rather than removed: the cool shadow is doing real work separating shaded ground from
+   * lit ground, and flattening it to neutral would trade one complaint for another. */
+  vec3 shadowPush = mix(vec3(0.96,0.98,1.07), vec3(1.0), smoothstep(0.0, 0.34, l));
   vec3 highPush   = mix(vec3(1.0), vec3(1.055,1.012,0.925), smoothstep(0.44, 0.98, l));
   c *= mix(vec3(1.0), shadowPush, 0.85*uPaint) * mix(vec3(1.0), highPush, 0.9*uPaint);
   // lift: nothing in a Ghibli frame is ever pure black
-  vec3 lift = vec3(0.017, 0.021, 0.036)*uPaint;
+  /* The lift is the same story an order smaller: blue was raised more than twice as far as red into
+   * the blacks (0.036 against 0.017). Brought together so the shadows lift neutrally. */
+  vec3 lift = vec3(0.024, 0.025, 0.028)*uPaint;
   c = c*(1.0 - lift) + lift;
   // gentle S and a nudge of saturation in the midtones
   c = mix(c, c*c*(3.0-2.0*c), 0.16*uPaint);
