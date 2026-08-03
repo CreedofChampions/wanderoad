@@ -136,9 +136,18 @@ spread above, arrived at from the other direction.
       degree junction not like part into each other -- that way its 1 template that just works
       for all intersections."
 
-      Baseline, `node tools/diag-crossing-angle.mjs`, 12 km box: **175 crossings, mean deviation
-      16.48 degrees from square, worst 82.6.** Every measured crossing in this world is
-      arterial x lane; same-tier crossings essentially do not occur.
+      **THE BASELINE IN THIS ENTRY WAS STALE, and that is the most useful thing on this pass.**
+      The 175/16.48/82.6 figures below were true when the five hypotheses were tried; they are
+      not true now. Re-measured 2 August 2026 on current `main`, same command, same 12 km box:
+      **89 crossings, mean deviation 6.89 degrees, worst 31.5.** The junction work that landed
+      since (T-splits and 4-ways getting real geometry, and a lane that would cross an arterial
+      badly simply not being built) more than halved the crossing count and cut the mean to 42%
+      of what it was. Anyone reading the table below to pick a sixth attempt should measure
+      first: it is aimed at a world that no longer exists.
+
+      Original baseline, kept for the table: 175 crossings, mean deviation 16.48 degrees from
+      square, worst 82.6. Every measured crossing in this world is arterial x lane; same-tier
+      crossings essentially do not occur.
 
       | # | Hypothesis | Change | Result |
       |---|---|---|---|
@@ -163,6 +172,37 @@ spread above, arrived at from the other direction.
       squares both crossings at once. That is a real piece of work in the most load-bearing
       function in the file, and it needs the full road gate (seam, water, R1/R2/R5, cliffs,
       density, deadends) behind it.
+
+      **HYPOTHESIS 6 — SEVERITY-FIRST WINDOWS — BUILT, MEASURED, AND REVERTED (2 Aug 2026).**
+      The first of those two ideas was implemented in full: every crossing's ask is computed
+      up front, the crossings are sorted by |delta| descending, and the room is handed out
+      worst-first against a set of claimed index spans, so the crossing furthest from square
+      claims its window before a nearly-square neighbour can spend it on a nudge nobody would
+      see. The single monotonic `cursor` skip (`if (kc <= cursor) continue`) is gone; claims
+      cannot overlap by construction. Correction, window formula, symmetry and backoff all
+      unchanged — only the ORDER of claiming.
+
+      | metric, 12 km box | before | after |
+      |---|---|---|
+      | crossings | 89 | 89 |
+      | mean deviation | 6.89 deg | **6.99 deg** |
+      | worst | 31.5 deg | **43.6 deg** |
+
+      Reverted. A 12-degree worse worst case is a regression on the exact thing this entry
+      exists to fix, and it is the SAME trap already recorded above for the asymmetric window:
+      giving one crossing a large window bends a long stretch of edge hard, which swings a
+      nearby stretch of the same edge into near-parallel with something else. Worst-first
+      allocation makes that failure MORE likely, not less, because it hands the biggest windows
+      to the crossings whose corrections are largest — and it starves their neighbours of room
+      completely, where polyline order at least left them some.
+
+      **What that leaves.** The severity idea is dead as stated; the remaining untried half is
+      MERGING overlapping windows into a single correction that squares both crossings at once,
+      which does not create a large lone bend and so does not obviously walk into the same trap.
+      Also worth knowing before anyone spends a day here: at 6.89 degrees mean the metric is
+      already a quarter of what the operator's complaint was raised against, so the residual is
+      now a TAIL problem (one crossing at 31.5, the rest well under 24) rather than a systemic
+      one, and a fix that improves the mean while moving the worst is not worth taking.
 
 - [x] **THE REVERSED SPAWN IS RESTORED — crossings are levelled and the hold is lifted.**
       `+ Math.PI` is back in `findSpawn`. The gate it was waiting on, measured by the new
