@@ -49,6 +49,9 @@ export const BOAT_MAX_KPH = 34;
 export const BOAT_MAX_SPEED = BOAT_MAX_KPH / 3.6;
 /** 1/s. At this rate a pinned throttle reaches 1 - e^(-DRAG*4) = 96% of BOAT_MAX_SPEED in the
  *  4 s the brief asks for. */
+/** Seconds for the hull's course to catch up with its heading at full speed — the crab in a turn. */
+export const BOAT_COURSE_LAG = 0.85;
+
 export const BOAT_DRAG = 0.8;
 /** m/s² — the ONE free tuning number (the brief gives a settle speed and a settle time, which
  *  together fix DRAG; ACCEL is whatever reaches that settle point AT full throttle). */
@@ -499,8 +502,30 @@ export class BoatMode {
 
     // forward is (sin yaw, cos yaw) — car/vehicle.js's own convention, kept so the two never
     // disagree about which way the world's +X/+Z axes point.
-    car.x += Math.sin(this.yaw) * this.speed * dt;
-    car.z += Math.cos(this.yaw) * this.speed * dt;
+    /* THE HULL CARRIES ON WHERE IT WAS GOING — F6's "Zelda-style controls".
+     *
+     * The boat moved exactly where its nose pointed: turn the wheel and the whole craft changed
+     * direction the same frame, which is a car on ice, not a boat. What makes a small boat feel like
+     * one is that the WATER does not care where you are pointing — the hull keeps its old course for
+     * a moment and slides wide, and the bow comes round before the boat does.
+     *
+     * So a COURSE is tracked separately from the heading and eased towards it. Turn hard and the two
+     * disagree for a second: the boat crabs, the wake stays behind where it WAS going, and you have
+     * to think a bend ahead. It converges quickly enough that going straight is unaffected.
+     *
+     * The lag shortens with speed. Standing still a boat pivots on the spot — there is no water
+     * flowing past the hull to resist it — while at speed there is real momentum to overcome, which
+     * is exactly backwards from a car and the reason boats feel the way they do. */
+    if (this._course === undefined) this._course = this.yaw;
+    const lag = BOAT_COURSE_LAG * (0.35 + 0.65 * Math.min(Math.abs(this.speed) / BOAT_MAX_SPEED, 1));
+    let dHead = this.yaw - this._course;
+    while (dHead > Math.PI) dHead -= Math.PI * 2;
+    while (dHead < -Math.PI) dHead += Math.PI * 2;
+    this._course += dHead * Math.min(1, dt / Math.max(lag, 1e-3));
+    car.x += Math.sin(this._course) * this.speed * dt;
+    car.z += Math.cos(this._course) * this.speed * dt;
+    /** How far the hull is crabbing, radians — read by the renderer and by the wake. */
+    this.slip = dHead;
 
     const wl = waterLevelAt(surf.w, surf.y);
     const waterY = wl === null ? surf.y : wl; // guard only: `active` implies wet by construction
