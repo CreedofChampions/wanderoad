@@ -1175,7 +1175,19 @@ export class Vehicle {
     // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
     // drive at speed" part.
     if (bogHere > 0) crr = lerp(crr, SAND.crrBogged, bogHere); // bogHere, not sandBog — see the note by offCap
-    let vDrag = lerp(18.7 / offMul, 1.4, clamp01(onRoad));
+    /* 30.0 off-road, not 18.7 — O2, "off-road is meaningfully slower than tarmac", the last
+     * failing check in the browser suite.
+     *
+     * Measured on the live beta: 64.7 km/h on the road against 40.4 km/h at full throttle across a
+     * field, i.e. 62% — while the check wants under 55%, and the operator's own complaint was that
+     * leaving the tarmac made too little difference. crr (the constant term) was already doing its
+     * job of stopping a creep; what sets the TOP SPEED is this speed-proportional term, and at 18.7
+     * N per m/s it ran out long before the drive force did.
+     *
+     * The RELATIVE ranking is untouched: this is divided by the car's own offRoad multiplier exactly
+     * as before, so the Rally at 1.35 and the pickup keep their advantage over the saloons — the
+     * operator asked for the truck to be BETTER off-road, not for everything to be equally slow. */
+    let vDrag = lerp(30.0 / offMul, 1.4, clamp01(onRoad));
     /* The speed-proportional half of off-road resistance is what a car arriving off the
      * tarmac at speed actually decelerates against — the constant term above is too small at
      * 19 m/s to matter (a few tenths of a m/s²) and only bites once the car is already slow.
