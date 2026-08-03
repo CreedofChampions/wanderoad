@@ -41,10 +41,20 @@ def esc(s):
 
 
 def main():
+    # THE ARCHIVE, not the per-run manifest. tools/proof-gallery.mjs REWRITES manifest-out.json on
+    # every shoot, so publishing from it silently dropped every proof captured in an earlier run —
+    # it happened twice, and the second time the live page briefly showed nothing at all. The
+    # archive accumulates; the manifest is merged into it before publishing.
+    arch = os.path.join(SHOTS, "archive.json")
     man = os.path.join(SHOTS, "manifest-out.json")
-    if not os.path.isfile(man):
-        raise SystemExit("no manifest-out.json — run tools/proof-gallery.mjs first")
-    rows = json.load(io.open(man, encoding="utf-8"))
+    rows = json.load(io.open(arch, encoding="utf-8")) if os.path.isfile(arch) else []
+    known = {r["id"]: r for r in rows}
+    if os.path.isfile(man):
+        for r in json.load(io.open(man, encoding="utf-8")):
+            if r.get("ok"):
+                known[r["id"]] = r
+    rows = list(known.values())
+    io.open(arch, "w", encoding="utf-8").write(json.dumps(rows, indent=2, ensure_ascii=False))
     good = [r for r in rows if r.get("ok")]
 
     cards = []
