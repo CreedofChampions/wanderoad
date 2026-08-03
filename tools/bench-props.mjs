@@ -1017,9 +1017,15 @@ console.log('\n── a dealership stocks the cars you cannot collect ───�
   }
 
   /* Every slot must be inside the apron and clear of the canopy posts, the pump island and the
-   * kiosk, or a display car is standing in the wall. These are STATION_HITBOXES' own numbers. */
+   * kiosk, or a display car is standing in the wall. These are STATION_HITBOXES' own numbers —
+   * the kiosk's dz is PARAMETRIC on STATION_APRON_HALF_DEPTH there (`-(AD - 2.2)`), not a fixed
+   * -4.8, and this table hard-coded the AD=7.0 answer rather than the formula. That was the
+   * "one thing that can drift silently" the comment above already worried about, just not the
+   * copy it was watching: AD moved to 9.0 (see that constant's own comment in world/props.js —
+   * the entrance/showroom-row conflict this file's own dealership-drive measurements found) and
+   * this table kept reporting the kiosk 2 m from where render/props.js actually draws it. */
   const FIXED = [
-    { dx: 0, dz: -4.8, r: 2.8 },
+    { dx: 0, dz: -(STATION_APRON_HALF_DEPTH - 2.2), r: 2.8 },
     { dx: 0, dz: 1.0, r: 1.55 },
     { dx: -5.2, dz: -2.4, r: 0.22 },
     { dx: 5.2, dz: -2.4, r: 0.22 },
@@ -1036,12 +1042,38 @@ console.log('\n── a dealership stocks the cars you cannot collect ───�
      * WIDTH must stay on the tarmac; the nose is allowed onto the grass, and the figure is logged so
      * it can never grow quietly. */
     const len = SHOWROOM_CARS[i] ? SHOWROOM_CARS[i].length : 4.5;
-    worstSide = Math.min(worstSide, 9.5 - (Math.abs(s.dx) + 0.9));
-    worstNose = Math.max(worstNose, Math.abs(s.dz) + len / 2 - 7.0);
+    worstSide = Math.min(worstSide, STATION_APRON_HALF_WIDTH - (Math.abs(s.dx) + 0.9));
+    worstNose = Math.max(worstNose, Math.abs(s.dz) + len / 2 - STATION_APRON_HALF_DEPTH);
   });
   check(worstClear > 0, 'no display car overlaps a post, pump or kiosk', `${worstClear.toFixed(2)} m`, '> 0');
   check(worstSide > 0, 'the row stays on the tarmac across its width', `${worstSide.toFixed(2)} m`, '> 0');
   console.log(`       the longest display car noses ${worstNose.toFixed(2)} m past the apron's front edge, onto grass (by design)`);
+
+  /* THE ROW MUST NOT STAND IN THE ONE DOORWAY A DEALERSHIP HAS. Measured (this file, driving a
+   * real Vehicle in from a real approach — see "a real station hitbox actually stops the car"
+   * above and tools/diag-spur-drive.mjs) at the OLD STATION_APRON_HALF_DEPTH (7.0): every one of
+   * 22 sampled dealerships had the access spur's own arrival point inside a display car's
+   * collision radius plus a car's own (2.4 m combined) — the row was placed to clear the canopy
+   * posts alone, back when the spur's real doorway edge was not correctly known (the `yaw` fix
+   * a few lines up in world/props.js). The row is fixed in the station's local frame and the
+   * spur's arrival point is a pure function of the same frame (`stationSpur`), so this is
+   * checked geometrically, once, for every seed and every road heading, rather than by sampling
+   * — the two are either always clear or the placement is wrong for every dealership. */
+  {
+    const CAR_R = 1.05;
+    const st2 = { x: 0, z: 0, yaw: 0.6109, nx: -Math.sin(0.6109), nz: -Math.cos(0.6109), width: 6.0, deal: true };
+    const sp2 = stationSpur(st2);
+    const ca2 = Math.cos(st2.yaw), sa2 = Math.sin(st2.yaw);
+    // The spur's own arrival point, in the station's local frame — same inverse rotation
+    // probe-station-frame.mjs uses.
+    const wx = sp2.apronX - st2.x, wz = sp2.apronZ - st2.z;
+    const doorLx = wx * ca2 + wz * sa2, doorLz = -wx * sa2 + wz * ca2;
+    let worstDoorClear = Infinity;
+    SHOWROOM_SLOTS.forEach((s) => {
+      worstDoorClear = Math.min(worstDoorClear, Math.hypot(s.dx - doorLx, s.dz - doorLz) - 1.35 - CAR_R);
+    });
+    check(worstDoorClear > 0, 'the showroom row leaves the access spur\'s own doorway clear', `${worstDoorClear.toFixed(2)} m`, '> 0');
+  }
 
   // The world-space mapping must be a rigid motion: spacing on the apron survives the rotation.
   const st = { x: 1234, z: -567, yaw: 0.937, deal: true };

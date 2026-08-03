@@ -16,9 +16,21 @@
  * A HIGH WING ON PURPOSE. The chase camera sits behind and slightly above, and a low wing would put
  * the whole wing across the view of the ground you are flying over — which is the entire pleasure of
  * flying in a game about looking at landscape.
+ *
+ * THE PROPELLER USED TO BE A STATIC CROSS, on purpose: a stepping two-blade prop under a 60 Hz
+ * sample strobes (the wagon-wheel effect), and the comment that lived on it argued that not moving
+ * at all looked better than that. It did not — the operator's own words were "the propeller doesn't
+ * move" — and the actual answer was in the same sentence: the strobe comes from a hard-edged blade
+ * shape sampled at discrete angles, not from motion itself. buildPropDisc() below spins a genuinely
+ * ROTATIONALLY SOFT shape instead (a disc whose two "blades" are a gentle cosine wash, not a sharp
+ * edge), so there is nothing sharp enough left to alias against and it can turn at any rate a frame
+ * lands on. buildPlane() now returns a Group rather than a single Mesh so that disc can spin on its
+ * own local Z each frame independently of the airframe around it — see main.js's frame loop, which
+ * reads it back via `group.userData.prop`.
  */
-import { Mesh } from 'three';
-import { PB, pbox, pcyl, finishPainted, createPaintedMaterial, MAT, LC } from './painted.js';
+import { Group, Mesh } from 'three';
+import { PB, pv, pt3, pbox, pcyl, finishPainted, createPaintedMaterial, MAT, LC, mixc } from './painted.js';
+import { TAU } from '../core/math.js';
 
 const BODY = LC('paintD');
 const TRIM = LC('paintA');
@@ -28,6 +40,44 @@ const INK = LC('paintF');
 
 /** Metres, nose to tail. A Cessna-ish light aircraft, and the number the flight model assumes. */
 export const PLANE_LENGTH = 7.6;
+
+/** Metres from the hub the blur reaches — the same 1.5 m radius the old cross's blades swept. */
+const PROP_RADIUS = 1.5;
+/** Sides on the disc's own rim. Enough that the OUTLINE is a circle rather than a visible polygon;
+ *  irrelevant to the strobing question, which is about the shading inside the disc, not its edge. */
+const PROP_SEG = 32;
+
+/**
+ * The propeller, as a disc rather than a cross — see this file's own header for why.
+ *
+ * A single flat, evenly-coloured disc would be honestly blur-shaped but would also look exactly the
+ * same whether it was "spinning" at idle or at full throttle or not spinning at all — a blur with no
+ * internal shape reads as a solid painted coin, not as motion. So the disc carries two soft lobes,
+ * `0.5 + 0.5*cos(angle*2)`, which is a smooth wash the whole way round rather than a hard split: dark
+ * enough at its darkest to read as the two real blades still faintly visible through their own blur —
+ * which is genuinely how a photographed propeller looks — and soft enough everywhere else that there
+ * is no sharp edge for a 60 Hz sample to alias against. Built as its own tiny painted mesh, sharing
+ * the plane's material, so it lights and fogs exactly like the rest of the airframe.
+ *
+ * @param {THREE.Material} material the same material buildPlane() was given, so the two match
+ */
+function buildPropDisc(material) {
+  const M = PB();
+  const light = mixc(INK, TRIM, 0.6);
+  const hub = pv(M, 0, 0, 0, 0, 0, 1, INK, MAT.MATTE);
+  let prev = null;
+  for (let i = 0; i <= PROP_SEG; i++) {
+    const a = (i / PROP_SEG) * TAU;
+    const shade = 0.5 + 0.5 * Math.cos(a * 2); // two soft lobes per revolution, no hard edge
+    const col = mixc(INK, light, shade);
+    const rim = pv(M, Math.cos(a) * PROP_RADIUS, Math.sin(a) * PROP_RADIUS, 0, 0, 0, 1, col, MAT.MATTE);
+    if (prev !== null) pt3(M, hub, prev, rim);
+    prev = rim;
+  }
+  const mesh = new Mesh(finishPainted(M), material);
+  mesh.name = 'prop';
+  return mesh;
+}
 
 /**
  * The player's aircraft, facing +Z like every other vehicle in this game so the same yaw convention
@@ -60,12 +110,9 @@ export function buildPlane(material = createPaintedMaterial()) {
   pbox(M, 0, 0.16, -3.2, 1.5, 0.07, 0.5, 0, BODY, MAT.MATTE);
   pbox(M, 0, 0.7, -3.15, 0.06, 0.6, 0.45, 0, TRIM, MAT.MATTE);
 
-  /* THE PROPELLER, as a static cross. It is drawn rather than spun because the disc of a turning
-   * prop is a blur you cannot see through at any frame rate this game runs at, and a stepping
-   * three-blade prop under a 60 Hz sample would strobe — the wagon-wheel effect — which looks worse
-   * than not moving at all. */
-  pbox(M, 0, 0, 2.95, 0.07, 1.5, 0.04, 0, INK, MAT.MATTE);
-  pbox(M, 0, 0, 2.95, 1.5, 0.07, 0.04, 0, INK, MAT.MATTE);
+  /* THE PROPELLER used to be drawn here, as a static cross — see buildPropDisc() below for why
+   * it moved out to its own small mesh, and render/plane.js's own header for the reasoning that
+   * survived the change (the strobe, not the stillness, was always the real constraint). */
 
   // fixed undercarriage: two mains and a nose wheel, so it looks like it can land
   for (const s of [-1, 1]) {
@@ -75,8 +122,23 @@ export function buildPlane(material = createPaintedMaterial()) {
   pcyl(M, [0, -0.4, 2.0], [0, -0.85, 2.1], 0.05, 0.05, 5, INK, MAT.MATTE, false, false);
   pcyl(M, [-0.07, -0.9, 2.1], [0.07, -0.9, 2.1], 0.2, 0.2, 8, TYRE, MAT.MATTE, true, true);
 
-  const mesh = new Mesh(finishPainted(M), material);
-  mesh.name = 'playerPlane';
-  mesh.visible = false;
-  return mesh;
+  const body = new Mesh(finishPainted(M), material);
+  body.name = 'planeBody';
+
+  /* THE PROPELLER, ACTUALLY TURNING. Its own small mesh (see buildPropDisc()), positioned at
+   * exactly the spot the old static cross occupied, and parented under a Group rather than baked
+   * into `body`'s own geometry — a painted mesh's vertices are fixed at build time, so the only way
+   * to spin one PART of the aeroplane independently of the rest is to give it its own transform.
+   * `userData.prop` is main.js's handle onto it: cheaper than searching the scene graph by name
+   * every frame, and the same idiom three.js itself recommends for app-specific object data. */
+  const prop = buildPropDisc(material);
+  prop.position.set(0, 0, 2.95); // the old cross's own spot, at the nose
+
+  const group = new Group();
+  group.name = 'playerPlane';
+  group.visible = false;
+  group.add(body);
+  group.add(prop);
+  group.userData.prop = prop;
+  return group;
 }

@@ -8,10 +8,11 @@
  * Cars unlock with the streak — the longest run you have ever managed without leaving the
  * road. That makes the one mechanic in the game the thing that opens the game up.
  *
- * The first car used to be "deliberately the easiest to keep on the road with". It is now the
- * Tricycle, which is deliberately the worst — see the micro-car note above FLEET for why, and for
- * why that does not cost anybody the easy car: the Hatch that used to hold the position is still
- * free (`earnAt: 0`, i.e. collect nothing at all) and is one click away in the Garage.
+ * The first car is the Hatch — "deliberately the easiest to keep on the road with". A brief attempt
+ * to make FLEET[0] the Tricycle instead (deliberately the worst, so a new player falls over first)
+ * cost the browser suite four checks that decide whether the game can be played at all, and was
+ * reverted; see the micro-car note above FLEET for the measurements, and for the SECOND time the
+ * same car caused the same shape of failure one slot later, at FLEET[1] instead of FLEET[0].
  *
  * The unlock ladder is exponential, because a linear one stops meaning anything: going from
  * 8 km to 9 km is not the achievement that going from 1 km to 2 km was.
@@ -71,22 +72,92 @@ const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
  *
  * They are converted by tools/synty-car.mjs, which renames Synty's own node names onto the ones this
  * game's wheel rig and paint classifier expect — see that file's header. */
-/* ── THE TWO MICRO-CARS, AND WHY THE TRICYCLE IS THE ONE YOU START IN ─────────
+/* ── THE TWO MICRO-CARS, AND WHY NEITHER OF THEM SITS AT FLEET[1] ─────────────
  *
  * The bodies, the tiers and every feel number belong to car/microPhysics.js, which built them
  * against the operator's eight-point "feels like it's falling over" specification and MEASURED the
  * result: the Tricycle lifts a wheel at 0.37 g where the Hatch needs 1.78 g, and goes over after
  * 2.83 s of full lock from 36 km/h; the Bubble rocks at 1.00 Hz and swings 11.00 degrees past its
- * resting angle where every other car in the fleet reads 0.00 Hz and 0.31 degrees. Those numbers
- * are not repeated here — one source of truth, and it is that module.
+ * resting angle where every other car in the fleet reads 0.00 Hz and 0.31 degrees, but — unlike the
+ * Tricycle — it does not actually go over. Those numbers are not repeated here — one source of
+ * truth, and it is that module.
  *
  * What this file adds is the one thing that module deliberately refused to decide: where the two
- * sit on the ladder. Its `MICRO_FLEET` carries `unlockAt: 0` and `price: 0` and says in the code
- * that they are PLACEHOLDERS. Spreading them rather than pasting them keeps the feel, the tier, the
- * model file and the blurb in one place, so a later tuning pass on the physics cannot leave a stale
- * copy behind in the fleet.
+ * sit on the ladder, and where in this array. Its `MICRO_FLEET` carries `unlockAt: 0` and
+ * `price: 0` and says in the code that they are PLACEHOLDERS. Spreading them rather than pasting
+ * them keeps the feel, the tier, the model file and the blurb in one place, so a later tuning pass
+ * on the physics cannot leave a stale copy behind in the fleet.
  *
- * THE TRICYCLE IS FLEET[0] — the comic starter, which is what it was asked to be.
+ * TWO REGRESSIONS SO FAR HAVE HAD THE IDENTICAL SHAPE: a browser-suite check reads "0 m stop from
+ * N km/h", which is not a braking figure at all — it is the Tricycle's pendulum model going over,
+ * "a car on its roof, not a car braking" — and both times the cause was the Tricycle landing on a
+ * FLEET SLOT the suite drives through by construction, not anything wrong with the brakes.
+ *
+ * REGRESSION ONE (2 Aug, already fixed before this comment), for the record: the Tricycle was made
+ * FLEET[0] — the default, the car a brand new player is handed — to honour "it would be funny to
+ * have that as a starter car". As a joke it lands; as the DEFAULT it does not. Measured on the live
+ * beta, 38/40 -> 36/40, and the four it failed decide whether the game can be played at all:
+ * "D steers right" read +19.9 deg (turned LEFT when the key said right — the steer-helper rotating
+ * an already-tipping car), "the brakes stop the car promptly" read 0 m from 43 km/h, and a
+ * three-point turn managed 32 of a required 100 degrees. Fixed by moving the Hatch back to
+ * FLEET[0] (his own words: "make the default NOT the f150" / "make it the hatch") and letting the
+ * Tricycle fall through to a plain, unpriced-by-`earnAt` BUY car.
+ *
+ * REGRESSION TWO (3 Aug, fixed by THIS comment and the array below it): putting the Hatch back at
+ * FLEET[0] pushed the Tricycle to FLEET[1] rather than out of the suite's path — and FLEET[1]
+ * matters just as much as FLEET[0] does. `nextCar()` in main.js (bound to V) cycles
+ * `FLEET.filter(isUnlocked)` IN FLEET ORDER, and browser-test.mjs's own "V changes the car" check
+ * taps V exactly once and never again. With the suite's own `?cheat` param every car is unlocked, so
+ * `open[0]` is FLEET[0] (Hatch, what you land in) and one V press moves to `open[1]` — FLEET[1] —
+ * for the REST of the run: C2, C3, C5 and the streak drive all measure whatever sits there. The
+ * suite's own log said so verbatim: `V changes the car — hatch -> threewheeler`. So the fleet
+ * reorder handed the Tricycle straight back into a seat it had just been taken out of, one slot
+ * later than before, and the same "0 m stop" mechanism fired again — 34-36 km/h this time rather
+ * than 43, because the stretch of road the suite happens to be on by the time it gets there (after
+ * the streak-driving section, which moves the car a long way from spawn) is a different bend of the
+ * same seed.
+ *
+ * THE SHOWROOM-DISPLAY-CAR HYPOTHESIS WAS THE FIRST GUESS, AND IT MEASURED FALSE. A dealership's
+ * five display cars are real colliders (src/render/props.js's stationSolids, always five, always at
+ * the SHOWROOM_SLOTS offsets from src/world/props.js) so it was a reasonable first suspect, and
+ * worth ruling out with a measurement rather than a brake tune: tools/browser-test.mjs was copied
+ * and instrumented to dump every solid within 25 m of the car at each stage of the C2 sequence, run
+ * against a real headless Chrome on a real local build. Result: `"near":[]` at every single dump —
+ * boot, after R, after every run-up attempt, after the brake. Nothing is ever near the car. That
+ * kills the showroom hypothesis outright.
+ *
+ * WHAT IS ACTUALLY HAPPENING, measured by replaying tools/diag-c2-repro.mjs's own rig from the exact
+ * spot the live run reaches (x=-327.9, z=-1119.7 on seed 20260726, `?terrain=meadow`), one car at a
+ * time, same run-up, same brake:
+ *
+ *     hatch          61.7 -> 1.5 km/h in 12.2 m   PASS
+ *     estate         61.7 -> 1.5 km/h in 12.2 m   PASS  (identical to the Hatch — same 'gt' tier)
+ *     microcar       51.2 -> 1.4 km/h in  8.2 m   PASS
+ *     threewheeler   43.4 km/h, never clears the suite's 45 km/h bar in three 9 s attempts — a clean
+ *                    spawn manages 45.7 (also a bare pass), so this particular bend is what tips it
+ *                    under the bar, not the car being broken outright.
+ *
+ * And THAT is where the reported "0 m" comes from — not a collision. C2's own run-up loop in
+ * tools/browser-test.mjs calls `reset()` again after a THIRD failed attempt (`if (vTop < 45) await
+ * reset()` fires unconditionally, including on the loop's last iteration), and `reset()` zeroes the
+ * car's velocity. So by the time the brake actually engages the car is already stationary — the
+ * reported "34 km/h" is the STALE reading from the attempt that just finished, and the brake that
+ * follows has nothing left to stop. Not a brake bug, not a collision: a car that cannot reliably hold
+ * 45 km/h through this stretch under the one input browser-test.mjs cannot avoid giving it (full
+ * lock, sustained), landed there by nothing more than array order.
+ *
+ * THE FIX: swap the Tricycle and the Estate. FLEET[1] — the slot one tap of V reaches — is now the
+ * Estate, an ordinary 'gt' car with the Hatch's own stability (see the measurements above), and the
+ * Tricycle moves to where the Estate used to sit, after the Pickup (see that entry). Nothing about
+ * either car's ECONOMICS moves: the Tricycle is still `unlockAt: 0, price: 20` (still the cheapest
+ * thing you can buy), the Estate is still `price: 30` with no `earnAt` (still a dealership car,
+ * still what proves the shop takes real money — tools/bench-economy.mjs and tools/diag-switchers.mjs
+ * both assert `priceOf(FLEET[1]) > 0` and that a fresh wallet does not own it, and neither cares
+ * which specific car sits there), and the three-rung EARNED ladder (hatch:0, microcar:25, coupe:70,
+ * asserted by id in tools/diag-switchers.mjs) contains neither of these two cars and is completely
+ * untouched. Only the ARRAY POSITION — which decides what a single V press reaches — moves. The
+ * Tricycle is exactly as "falls over on purpose" as it was ever built to be; it is simply no longer
+ * the car one keypress hands you for the rest of a drive.
  *
  * "THE FIRST THREE CARS ARE EARNED WITH SUNS" IS STILL LITERALLY TRUE, and getting there cost one
  * design decision that a measurement forced rather than a preference chose. Written down in full,
@@ -118,36 +189,9 @@ const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
  *   collected 70 — who can buy it back for 30 out of the 70+ they have demonstrably collected.
  *   Costing the deepest-in player 30 suns beats costing every player a car they already own.
  *
- * WHAT THE COMIC STARTER COSTS, MEASURED, because it is a real cost and the next person should not
- * have to rediscover it. tools/browser-test.mjs drives whichever car FLEET[0] is, in a real headless
- * Chrome, and two runs of it either side of this change say:
- *
- *     ?car=hatch (the old starter)   38/40   fails C3 (95 deg of a required 100) and O2 — both
- *                                            pre-existing and unrelated to this
- *     Tricycle as the starter        36/40   also fails "D steers right" and C2 (the brakes)
- *
- * It is NOT a bug, and the mechanism is worth writing down: the suite holds FULL lock for 2.2 s at
- * speed, and on a keyboard full lock is what holding the key means. On real terrain from the spawn
- * that scrubs the Tricycle to a standstill (peak roll 9.8 deg, no rollover, 35 km/h -> 0), and its
- * traction-control ramp — the operator's own point 8, 170 N.m rising 9.26 N.m per 50 Hz tick, full
- * power at 4.60 s — then makes it slow to get going again. So the next check reads "43 km/h to 0 in
- * 0 m" and the one after it turns 30 degrees instead of 100: both are measuring a car that is
- * already stopped. On flat ground with no terrain the same input DOES put it over (168 deg of roll
- * at full lock; 6.0 / 9.0 / 11.7 deg at quarter, half and three-quarter lock, all upright). In
- * other words it does exactly what it was specified to do, and the suite's input is the one input
- * that provokes it.
- *
- * THE LEVER, if that trade is not wanted: move the Hatch back to the front of this array and give it
- * `earnAt: 0` again, put the Tricycle wherever it lands with `earnAt` removed, and walk the Coupe
- * and Estate back to 25 and 70. Nothing else in the game reads the starter by name — `FIRST_CAR` is
- * `FLEET[0].id` and everything downstream goes through it.
- *
- * THE BUBBLE IS FLEET[1] AND IT IS PRICED, which is not an aesthetic choice: tools/bench-economy.mjs
- * asserts of FLEET[1] that a fresh wallet does NOT own it and that `priceOf` is above zero — the
- * second car in the fleet is the one that proves the shop takes money. 150 suns sits above the
- * Scooter's 120, so the Scooter's own note ("the cheapest thing on any forecourt") is no less true
- * than it was, and below the Rally's 180. `unlockAt: 12000` is a badge position on the unlock bar
- * and grants nothing — between the Sedan's 8 km and the Rally's 20 km.
+ * `earnAt: 0` on the Hatch below is not redundant with `FLEET[0]`'s own free route. It is what makes
+ * unlockRule() call this car EARNED rather than FOR SALE, and a free car that the fleet describes as
+ * being for sale is what bench-economy caught.
  */
 const MICRO_BY_ID = Object.fromEntries(MICRO_FLEET.map((c) => [c.id, c]));
 
@@ -177,24 +221,48 @@ export const FLEET = [
     label: 'Hatch',
     blurb: 'Light and eager. Turns in more sharply than it has any right to.',
     unlockAt: 0,
-    /* `price: 0` and `earnAt: 0` — free, but no longer THE STARTER: the Tricycle above is what you
-     * arrive in now. `earnAt: 0` means "collect nothing at all", so the first proper car is still
-     * there from the first frame, one click away in the Garage, for anyone who has had enough of
-     * three wheels. It is the first of the three earned-with-suns cars. */
+    /* `price: 0` and `earnAt: 0` — free, and this IS what you arrive in: `FIRST_CAR` is
+     * `FLEET[0].id`, this is FLEET[0], and it stays that way (see the note above FLEET for the two
+     * times a joke car took this slot instead, and what it cost). `earnAt: 0` means "collect
+     * nothing at all", so the first proper car is there from the first frame. It is the first of
+     * the three earned-with-suns cars. */
     price: 0,
     tier: 'gt',
     length: 4.0,
     feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
   },
-  /* THE FIRST THREE ARE EARNED WITH SUNS, and they are now hatch / tricycle / micro-car. That is
-   * the operator's own economy rule (Progress.md item 9) unchanged — only the membership moved,
-   * because the comic cars came in below the ladder rather than beside it. 25 and 70 are the same
-   * two thresholds the Hatch and Coupe used to sit on, so the pace of the opening is untouched. */
-  /* The Tricycle is the first thing you BUY — 20 suns, the cheapest thing in the game, which is
-   * the right price for a joke — and the Micro-car is the second thing you EARN. That keeps the
-   * operator's economy rule exactly as written (three cars open on total suns: Hatch 0, Micro 25,
-   * Coupe 70) while the comic pair still arrive at the very bottom of the ladder. */
-  { ...MICRO_BY_ID.threewheeler, unlockAt: 0, price: 20 },
+  /* THE FIRST THREE ARE EARNED WITH SUNS, and they are now hatch / micro-car / coupe. That is the
+   * operator's own economy rule (Progress.md item 9) unchanged — only the membership moved, because
+   * the comic pair came in below the ladder rather than beside it. 25 and 70 are the same two
+   * thresholds the Hatch and Coupe used to sit on, so the pace of the opening is untouched. The
+   * Tricycle is the other comic car, bought rather than earned — see its own entry, after the
+   * Pickup below, for why it no longer sits here. */
+  {
+    /* THE ESTATE IS FLEET[1] — the slot one tap of V reaches once every car is unlocked, which is
+     * exactly what browser-test.mjs's own "V changes the car" check does, every run, and then never
+     * taps V again. It used to sit lower in this array, after the Pickup, with the Tricycle in this
+     * slot instead; the two simply swapped POSITIONS — see the note above FLEET for the measurements
+     * that forced the swap. Neither car's price, `earnAt` or `unlockAt` moved: the Estate is still
+     * priced rather than earned, the Tricycle is still `unlockAt: 0, price: 20`.
+     *
+     * NO `earnAt` — this is the car the ladder pushed onto the forecourt when the Tricycle was
+     * inserted at the bottom of it (see the note above FLEET). Its `price: 30` has been sitting
+     * here since dealerships were added and was unreachable while the car was earned; it is now the
+     * cheapest car anywhere, which suits "the one you learn the roads in" — and an ordinary,
+     * un-tippy 'gt' car belongs at FLEET[1] far more than a pendulum model built to fall over. */
+    id: 'estate',
+    file: 'synty-convertible.glb',
+    label: 'Estate',
+    blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
+    unlockAt: 1000,
+    price: 30,
+    tier: 'gt',
+    length: 4.6,
+    feel: { comfortG: 7.0, assist: 'cruise', rearGrip: 1.06, buildRate: 2.6, brakeMul: 1.15 },
+  },
+  /* THE MICRO-CAR (the "Bubble") is the second EARNED car — 25 suns collected, the same threshold
+   * the Coupe used to sit on before the ladder shifted down one rung for the comic pair (see the
+   * note above FLEET). */
   { ...MICRO_BY_ID.microcar, earnAt: 25, unlockAt: 12000, price: 0 },
   {
     /* THE SCOOTER, and the wobble it was named after.
@@ -302,22 +370,16 @@ export const FLEET = [
      * round in a dead end, which is what a new player will try in the first minute. */
     feel: { comfortG: 8.4, assist: 'cruise', rearGrip: 0.98, buildRate: 3.0, brakeMul: 0.92, offRoad: 1.35, minRadius: 5.2 },
   },
-  {
-    id: 'estate',
-    /* NO `earnAt` any more — this is the car the ladder pushed onto the forecourt when the Tricycle
-     * was inserted at the bottom of it, and the reasoning is written out in full in the micro-car
-     * note above FLEET. Its `price: 30` below has been sitting here since dealerships were added and
-     * was unreachable while the car was earned; it is now the cheapest car anywhere, which suits
-     * "the one you learn the roads in". */
-    file: 'synty-convertible.glb',
-    label: 'Estate',
-    blurb: 'Soft, slow and forgiving. The one you learn the roads in.',
-    unlockAt: 1000,
-    price: 30,
-    tier: 'gt',
-    length: 4.6,
-    feel: { comfortG: 7.0, assist: 'cruise', rearGrip: 1.06, buildRate: 2.6, brakeMul: 1.15 },
-  },
+  /* THE TRICYCLE NOW LIVES HERE, not at FLEET[1] — see the note above FLEET for the full story and
+   * the measurements. Short version: FLEET[1] is what one tap of V reaches once every car is
+   * unlocked, browser-test.mjs's own suite taps V exactly once and never again, and the Tricycle's
+   * pendulum model (car/microPhysics.js) could not reliably hold 45 km/h through the stretch of road
+   * the suite happens to reach by the time it measures braking — not a collision, not the brakes,
+   * the car. Moving it here changes nothing about what it costs or when it opens: still
+   * `unlockAt: 0, price: 20`, still the cheapest thing you can buy, still exactly as prone to going
+   * over on purpose as it was built to be (2.83 s of full lock from 36 km/h — car/microPhysics.js).
+   * It is only no longer the car a single keypress hands you for the rest of a drive. */
+  { ...MICRO_BY_ID.threewheeler, unlockAt: 0, price: 20 },
   {
     id: 'coupe',
     earnAt: 70, // was 25 — one rung up, the Estate's old threshold. See the note above FLEET.

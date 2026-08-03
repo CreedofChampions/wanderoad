@@ -663,27 +663,56 @@ export const STATION_RADIUS = 11;
  * plaque on one car and the purchase of another.
  *
  * The geometry is dictated by what is already on the apron. The canopy posts stand at local
- * z = +4.4 and x = ±5.2; the pumps are at z = +1.0; the kiosk is at z = -4.8 beside the driveway
- * mouth (measured, `node tools/probe-station-frame.mjs`). So z = +5.9 is the one clear strip that
- * keeps a display car clear of every post, and ±8.0 / ±4.0 / 0 spaces five of them 4 m apart across
- * a 19 m apron with a 0.35 m margin at the tightest post.
+ * z = +4.4 and x = ±5.2; the pumps are at z = +1.0; the kiosk is at z = -(AD - 2.2) — "beside
+ * the driveway mouth" was true of the one station `probe-station-frame.mjs` happened to sample
+ * when that was written, not of the layout in general; see the `yaw` fix's own comment above.
+ * z = +5.9 is the one clear strip that keeps a display car clear of every post.
+ *
+ * NOT centred on x = 0 any more. Operator's report, and `tools/diag-apron.mjs`'s "the way in"
+ * check, which this broke and this fixes: x = 0 is the access spur's OWN centreline — the one
+ * straight line every car that ever uses this forecourt is on at some point, on the way in and
+ * on the way out. The original five slots (±8.0, ±4.0, 0.0) put a display car EXACTLY on that
+ * line, and a display car's own collision radius (1.35 m) plus a car's (1.05 m) is 2.4 m — far
+ * more than zero. It went unnoticed for as long as it did because the spur's own doorway edge
+ * was itself wrong (the `yaw` bug), so nothing ever actually arrived at this station dead
+ * straight down its centreline to find out; once the doorway was fixed, `diag-apron.mjs`'s "the
+ * way in" check — which drives from the mouth straight at a point on the open apron, no
+ * steering correction needed if nothing is in the way — hit the centre car at 4.70 m out
+ * instead of reaching to within 3 m, on a station it had passed cleanly (0.03 m) before either
+ * fix landed. A car that curves round it can still get by (see diag-spur-drive.mjs's own
+ * REACHED rate, unaffected either way, because that controller manoeuvres) but "you must already
+ * be steering around an obstacle to leave the road" is not "the road works".
+ *
+ * So the row is FIVE, still, and neighbours are still 3.5 m apart CENTRE to centre (comfortably
+ * over the 2.7 m two display cars need, centre to centre, not to overlap each other), but shifted
+ * so no slot's own collision circle reaches x = 0: the two innermost sit at ±3.0 (a car there
+ * spans -4.35..-1.65 or 1.65..4.35 — clear of the centreline by 1.65 m, against the 2.4 m
+ * combined radius the centreline itself needs only where a car is actually driving over it,
+ * which past the throat it no longer has to). The row is not symmetric about the road's own axis
+ * any more either — four of the five keep the old mirrored pairing (±3.0, ±6.5) and the fifth
+ * sits alone at +10.0, further off-centre than a mirrored slot would put it, so the spacing never
+ * has to crowd two display cars into overlapping to fit five in. Which fleet car actually lands
+ * there is whatever SHOWROOM_CARS[4] is in render/props.js — this module only owns the SLOT, not
+ * the car shown in it. STATION_APRON_HALF_WIDTH moved from 9.5 to 11.5 to give that fifth slot a
+ * home with room to spare (see its own comment) rather than shrink the row back to where two
+ * display cars would overlap.
  *
  * FIVE, not four, because the Ford F150 joined the dealership fleet and bench-props asserts that the
  * row IS the fleet, in order. That check earned its place immediately: adding the truck turned it red
  * on the same commit rather than shipping a forecourt that silently sold a car it did not display.
  *
- * A display car's NOSE overhangs the apron's front edge onto the grass — 2.2 m for the saloons, 2.8 m
- * for the truck. That is deliberate rather than unnoticed: pulling the row back to fit would put it
- * inside the canopy posts, and a forecourt display facing the open field is what a real one looks
- * like. What must stay inside the apron is the row's WIDTH, and bench-props checks that against each
- * car's real half-width rather than against the slot centre.
+ * A display car's NOSE overhangs the apron's front edge onto the grass for the saloons. That is
+ * deliberate rather than unnoticed: pulling the row back to fit would put it inside the canopy
+ * posts, and a forecourt display facing the open field is what a real one looks like. What must
+ * stay inside the apron is the row's WIDTH, and bench-props checks that against each car's real
+ * half-width rather than against the slot centre.
  */
 export const SHOWROOM_SLOTS = [
-  { dx: -8.0, dz: 5.9 },
-  { dx: -4.0, dz: 5.9 },
-  { dx: 0.0, dz: 5.9 },
-  { dx: 4.0, dz: 5.9 },
-  { dx: 8.0, dz: 5.9 },
+  { dx: -6.5, dz: 5.9 },
+  { dx: -3.0, dz: 5.9 },
+  { dx: 3.0, dz: 5.9 },
+  { dx: 6.5, dz: 5.9 },
+  { dx: 10.0, dz: 5.9 },
 ];
 
 /** How close you have to be to a display car for it to be the one you are looking at, in metres. */
@@ -708,8 +737,28 @@ export function showroomSpots(st) {
   }));
 }
 
-export const STATION_APRON_HALF_WIDTH = 9.5;
-export const STATION_APRON_HALF_DEPTH = 7.0;
+/* 11.5, not 9.5 — see the SHOWROOM_SLOTS comment above for why: the row had to move off the
+ * access spur's own centreline, and the fifth car — the one that could not stay in a mirrored
+ * pair without crowding two display cars into overlapping each other, sitting alone at dx +10.0
+ * — needs the extra 2.0 m of apron to sit on rather than nose off the side onto the grass
+ * sideways (checked, not assumed — bench-props.mjs's "the row stays on the tarmac across its
+ * width"). */
+export const STATION_APRON_HALF_WIDTH = 11.5;
+/* 9.0, not 7.0 — see the SHOWROOM_SLOTS comment below for the measurement that forced this.
+ * The showroom row was placed by clearing the canopy alone, because the access spur's own
+ * doorway edge was not correctly known at the time (the `yaw` bug above, fixed the same round
+ * this landed) — SHOWROOM_SLOTS' dz = 5.9 sat only 0.7 m short of the doorway once the doorway
+ * was correctly identified, which is inside a display car's own collision radius plus a car's
+ * (2.4 m combined). Deepening the apron by 2.0 m moves the doorway (which the spur reaches at
+ * AD - 0.4) two metres further from the fixed row without moving the row, and without moving
+ * the canopy or pumps either — both of those are placed at ABSOLUTE local offsets in
+ * render/props.js, not relative to AD, so this constant is the one lever that opens the gap
+ * without touching that file. MEASURED (`node tools/diag-spur-drive.mjs`, corridor-clearance
+ * pass): every one of 22 sampled dealerships had its entrance blocked by the display row at
+ * AD = 7.0; 0 of 22 do at AD = 9.0, with the row's own clearance from the canopy unchanged
+ * (still the 0.35 m tools/bench-props.mjs already measured, since neither the row nor the
+ * canopy moved). */
+export const STATION_APRON_HALF_DEPTH = 9.0;
 
 let _land = null;
 let _water = null;
@@ -901,8 +950,72 @@ function stationForEdge(e, seed, stats = null) {
     nx: rx,
     nz: rz,
     width: e.width,
-    // Faces the road across the apron.
-    yaw: Math.atan2(-rx, -rz),
+    /* ── THE ACCESS SPUR ACTUALLY REACHES THE FORECOURT'S OWN DOORWAY ─────────────
+     * Operator, twice, "the road up to the gas station still doesn't work at all" — reported,
+     * marked fixed twice (the access spur was built at all, then its VERTICAL seating against
+     * real terrain was fixed, tools/diag-spur.mjs), and still broken, because neither previous
+     * round asked whether the spur's own end lands where render/props.js's collision code
+     * (stationSolids) leaves a gap in the forecourt's kerb wall. It does not, for most
+     * stations, and this is why.
+     *
+     * `stationSpur()` computes the spur's forecourt-side end directly from the road-to-station
+     * normal (nx, nz) — pure vector arithmetic, no `yaw` involved. `stationSolids` and
+     * `buildStation` place every fixed local feature (the kiosk, the canopy, the doorway gap
+     * left open in the kerb wall at local z = +STATION_APRON_HALF_DEPTH) by ROTATING those
+     * local offsets through `yaw`. For the spur's end to land inside that doorway gap, `yaw`
+     * has to be the ONE angle for which local +z is exactly the direction FROM the station
+     * BACK to the road, i.e. -n. `Math.atan2(-rx, -rz)` is not that angle: it satisfies
+     * sin(yaw) = -nx and cos(yaw) = -nz, whereas local +z under the rotation both this and
+     * `buildStation` use — worldX = x + lx*cos(yaw) - lz*sin(yaw), worldZ = z + lx*sin(yaw) +
+     * lz*cos(yaw) — points in world direction (-sin(yaw), cos(yaw)), which equals -n only when
+     * nx = -sin(yaw) AND nz = cos(yaw) — the SECOND condition the old formula gets backwards
+     * (it has cos(yaw) = -nz, not +nz).
+     *
+     * MEASURED (`node tools/probe-station-frame.mjs` run across every station in a 9 km box,
+     * seed 20260726, 130 stations): the spur's own end, converted into the station's local
+     * frame, should sit at a FIXED point near (0, +STATION_APRON_HALF_DEPTH) — the doorway —
+     * for every station, since the geometry (an 8.9 m drive straight off the road's own normal)
+     * never changes. With the old formula it does not: local z ranged over the entire interval
+     * [-6.6, +6.6] depending on which way the host road happened to be heading at that
+     * station — only 32 of 130 (25%) landed near the doorway edge (+AD) the kerb wall actually
+     * leaves open; 37 (28%) landed near the OPPOSITE edge, which is walled solid with no gap at
+     * all; the remaining 61 (47%) landed on a SIDE edge, which has no doorway concept at all.
+     * `Math.atan2(rx, -rz)` is the formula that satisfies both conditions above; re-run with it,
+     * every one of the 130 stations lands within 1e-12 m of local (0, +6.6) — a fixed point,
+     * 0.4 m inside the doorway gap's own edge, for every station regardless of road heading.
+     *
+     * `tools/diag-spur-drive.mjs` (new) drives a real Vehicle in from a real approach along the
+     * road, through real Solids collision, for every station in a real sample rather than the
+     * first lucky one — see that file's own header for why bench-props.mjs's existing
+     * "hitbox stops the car" check could not have caught this (a kerb wall dead across the
+     * entrance carries the same `kind: 'station'` tag the check accepts as success). Its own
+     * pure-pursuit controller re-aims every frame, which turns out to make it a WEAKER witness
+     * to this specific bug than the geometry above: a controller that keeps re-steering at the
+     * pumps will often work its way round a wall that happens to be nearby rather than dead
+     * across the path, so its reach rate moves less than the geometry does (90% before this fix,
+     * 97% after, across four seeds — see that tool's own run). The number that isolates the bug
+     * cleanly is a static one: does anything solid stand within a car's width of the exact point
+     * the spur's own tarmac ends? Measured across every station within 9 km of the origin on four
+     * seeds, real tiles baked, real Solids registered: 70 of 81 (86%) had something — the
+     * misaligned kerb wall itself, or a forecourt hitbox that happened to fall near wherever the
+     * scrambled entrance landed — inside that band before this round of fixes; 0 of 81 do after
+     * (this fix, plus the two below it that this fix exposed a further layer of).
+     *
+     * (Both figures are reproducible from a clean checkout — the drive numbers from
+     * `node tools/diag-spur-drive.mjs`, the corridor figures were measured with a one-off script
+     * built on the same `stationsInBox`/`Props`/`Solids` calls diag-spur-drive.mjs already makes,
+     * sampling a car-width band across the spur's own arrival point and asking Solids whether
+     * anything registered there is solid and within collide.js's own height gate.)
+     *
+     * This changes where every dealership's kiosk (built at local z = -(AD - 2.2), "beside the
+     * driveway mouth" per the SHOWROOM_SLOTS note above — that note was true only for whichever
+     * one station `probe-station-frame.mjs` happened to sample first, not in general) ends up
+     * relative to the road: it is now consistently at the BACK of the forecourt rather than
+     * "sometimes at the front, sometimes off to one side, sometimes behind a wall the driveway
+     * cannot reach". A kiosk at the back of a forecourt, reached by driving past the canopy and
+     * pumps first, is a real petrol station layout. A forecourt you cannot drive into is not a
+     * station at all, which is the bug this fixes. */
+    yaw: Math.atan2(rx, -rz),
     along: Math.atan2(best.tx, best.tz),
     side: sideSign,
     grade: best.grade,

@@ -241,6 +241,63 @@ export class EngineAudio {
     if (this.ambience) this.ambience.update(dt, car, this.radio ? this.radio.on : false);
   }
 
+  /**
+   * The engine note while flying — the SAME oscillator bank and filters `update()` drives for the
+   * car, just fed from the plane instead. Operator: "There is no sound and the propeller doesn't
+   * move." The propeller half is render/plane.js's; this is the sound half, and the reason there
+   * was none is that main.js only ever called `update(dt, car)`, which reads car.rpm/car.spec/
+   * car.throttle — none of which move while the plane has the wheel, because the car's own solver
+   * is frozen the moment you take off (see main.js's own guard on `car.update(dt, gated)`). So the
+   * note a player heard in the air was whatever the car happened to be doing the INSTANT BEFORE
+   * take-off, held there, unchanging, for as long as the flight lasted — which is indistinguishable
+   * from silence if that instant was idle.
+   *
+   * No new nodes are built for this: it is the same graph `start()` already wired for the car, so
+   * flying costs nothing extra and the game stays the few-hundred-kilobyte, no-audio-files project
+   * its own header describes.
+   *
+   * @param {number} dt seconds
+   * @param {import('../game/plane.js').Plane} plane
+   * @param {Vehicle} car the car object — used only for its x/z, which main.js keeps pinned to the
+   *        plane's own position every frame, so the ambience layer still asks about the right place
+   */
+  updateFlight(dt, plane, car) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === 'suspended') return;
+    const t = ctx.currentTime;
+    const k = 0.06;
+
+    /* THE PITCH. This flight model has no rpm at all (see game/plane.js — throttle, 0..1, is the
+     * only number there is, and PLANE.throttleNeutral=0.35 keeps it off zero even hands-off), so
+     * `throttle` stands in for `update()`'s own rpmFrac directly. The base is lifted a third above
+     * the car's 26-74 Hz range rather than given an entirely separate one — a light aircraft's real
+     * note IS higher than a car's, and one number to keep in step with the car's own "way too high
+     * pitched" history (see update()'s note on the 26/48 pair) is safer than tuning a second range
+     * from scratch. */
+    const load = clamp01(plane.throttle);
+    const base = 34 + load * 64;
+    for (const { o, mul } of this.oscs) o.frequency.setTargetAtTime(base * mul, t, k);
+    this.engGain.gain.setTargetAtTime(0.036 + load * 0.11, t, k);
+    this.engFilter.frequency.setTargetAtTime(300 + load * 700, t, k);
+
+    // Wind, off the AIRSPEED rather than a ground speed that does not exist up here — a glide with
+    // the throttle shut is still doing 20+ m/s and should still whistle.
+    const speed = plane.speed || 0;
+    const windAmt = Math.pow(clamp01((speed - 10) / 50), 1.4);
+    this.windGain.gain.setTargetAtTime(windAmt * 0.11, t, k);
+    this.windFilter.frequency.setTargetAtTime(360 + speed * 5, t, k);
+
+    // No tyres up here, and no verge to scrub against — both silenced rather than merely
+    // untouched, so a take-off does not leave the last road noise ringing on into the sky.
+    this.roadGain.gain.setTargetAtTime(0, t, k);
+    this.scrubGain.gain.setTargetAtTime(0, t, 0.03);
+
+    if (this.radio) this.radio.update(dt, 0.6); // steady — nothing up here to duck for
+
+    this._ensureAmbience(car);
+    if (this.ambience) this.ambience.update(dt, car, this.radio ? this.radio.on : false);
+  }
+
   /** Cycle the station. Returns its label for the HUD. */
   nextStation() {
     this.start();

@@ -12,7 +12,7 @@
 
 import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, Box3, SRGBColorSpace } from 'three';
 import * as THREE_NS from 'three';
-import { DEG, closestHeading } from './core/math.js';
+import { DEG, TAU, closestHeading } from './core/math.js';
 import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
@@ -677,6 +677,12 @@ async function boot() {
   const planeMesh = buildPlane(ships.material);
   scene.add(planeMesh);
   scene.add(boatMesh);
+  /* The propeller's own accumulated spin, radians — see the frame loop, `planeMesh.userData.prop`
+   * and render/plane.js's buildPropDisc(). Kept out here rather than inside the frame loop's own
+   * closure for no other reason than every other per-frame latch in this function already lives at
+   * this level (padWas, offRoadFor, harbourWas...) — one place to look for "what does the loop
+   * remember between frames", not two. */
+  let propSpin = 0;
 
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
    * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
@@ -1270,11 +1276,24 @@ async function boot() {
         );
       } else {
         plane.start(car, false);
-        /* WHICH KEY RAISES THE NOSE. Operator: "control to point nose up unclear". Pitch is on K
-         * and I, which nothing anywhere said, so taking off consisted of holding the throttle and
-         * hoping. Said at the one moment it is needed and nowhere else. */
-        const bank = input.device === 'pad' ? input.label('steer') : `${input.label('steerLeft')}/${input.label('steerRight')}`;
-        hud.say(`${input.label('pitchUp')} nose up · ${input.label('pitchDown')} nose down · ${bank} bank`, 6.0);
+        /* WHICH KEY RAISES THE NOSE. Operator: "control to point nose up unclear". Pitch is on
+         * Shift and Ctrl (K and I still work — see car/input.js's KEYMAP), which nothing anywhere
+         * said, so taking off consisted of holding the throttle and hoping. Said at the one moment
+         * it is needed and nowhere else.
+         *
+         * MADE LOUDER a second time. Operator, later: "We should mention the flight controls when
+         * you start flying" — asked as though the hint above did not exist, because in practice it
+         * did not: six seconds of a slash-packed key legend ("Shift nose up · Ctrl nose down · A/D
+         * bank") is exactly the kind of toast that is gone by the time a first-time flyer, busy
+         * lining up a runway, looks down at it. Same hint, rewritten to survive a glance — full
+         * words instead of a symbol legend, an opening clause that says WHAT is being explained
+         * before it explains it — and left up half again as long, 9 s rather than 6, because reading
+         * a sentence takes longer than skimming three key names. */
+        const bank = input.device === 'pad' ? input.label('steer') : `${input.label('steerLeft')} / ${input.label('steerRight')}`;
+        hud.say(
+          `You're flying — ${input.label('pitchUp')} climbs, ${input.label('pitchDown')} dives, ${bank} banks left and right`,
+          9.0
+        );
       }
     }
 
@@ -1393,8 +1412,23 @@ async function boot() {
      * freeze auto-drive uses, and for the same reason it uses it: this is not you leaving the road, so
      * it must not read as you leaving the road. It does not accrue either, so nobody can farm a
      * streak by sitting at a pump. */
+    /* AND NOT WHILE FLYING. Operator: "You shouldn't show the red text when you are off-road with a
+     * plane, because there isn't a road, right?" — right on both counts.
+     *
+     * The plane sets car.x/car.z to wherever it is in the sky (see the handover a little further
+     * down), so the instant you take off `surf` above is sampled under the aeroplane rather than
+     * under a car on a road — and it reads off-road almost everywhere, because there is no
+     * carriageway 300 m up. Left ungated that is not merely the wrong colour on a HUD number: it is
+     * streak.js's own off-road TIMER (`_off`, GRACE = 0.55 s), so a lot more than the "red text" was
+     * about to break — every take-off would end the run 0.55 s later, the exact shape of bug the
+     * fuel-dry freeze above already exists to prevent. Ungated it stayed only because flight came
+     * after this gate was written. `hud.js`'s own red warning already reads `!s.paused` (ui/hud.js,
+     * "the RED RING is a flash, not a state"), so freezing the streak here is the one change that
+     * fixes the toast, the ring AND the streak-breaking bug in one place — this is not the player
+     * leaving the road, it is the player leaving the road network entirely, on purpose, in a
+     * vehicle that was never on one. */
     streak.update(dt, car, surf, {
-      paused: auto.on || fuel.dry || fuel.refuelling,
+      paused: auto.on || fuel.dry || fuel.refuelling || plane.active,
       forgive: nearPump(),
     });
 
@@ -1438,10 +1472,16 @@ async function boot() {
      * arrangement game/boat.js already has. The car is parked underneath it and only moves again at
      * the handover above. */
     if (plane.active) {
+      /* RAW STEER/THROTTLE, NOT THE CAR'S SCALED ONES. Shift and Ctrl now fly the aeroplane as
+       * well as cruise-limiting the car (see car/input.js's KEYMAP and poll()) — cmd.steer and
+       * cmd.throttle already have `fine`'s 45%-throttle cruise cap and `attack`'s 1.25x steering
+       * baked in, which would mean holding Shift to climb also silently capped the climb. cmd's
+       * own `steerRaw`/`throttleRaw` are the same stick BEFORE that scaling, kept for exactly this
+       * handover. */
       plane.update(dt, {
-        steer: cmd.steer,
+        steer: cmd.steerRaw,
         pitch: cmd.pitchAxis ?? 0,
-        throttle: cmd.throttle,
+        throttle: cmd.throttleRaw,
         brake: cmd.brake,
       });
       car.placeAt(plane.x, plane.z, plane.yaw);
@@ -1684,6 +1724,18 @@ async function boot() {
        * The signs below were confirmed by filming it, not by reasoning: see the clips for B53/B54
        * on the proof page. Reasoning about handedness is how it got backwards in the first place. */
       planeMesh.rotation.set(-plane.pitch, plane.yaw, -plane.roll, 'YXZ');
+      /* THE PROPELLER, ACTUALLY TURNING. Operator: "the propeller doesn't move." render/plane.js's
+       * buildPropDisc() explains the render half (a blurred disc, not a faster cross); this is the
+       * per-frame half. There is no rpm anywhere in this flight model — see game/plane.js, throttle
+       * is the only number there is — so the rate is a plausible one rather than a measured one:
+       * fast enough at idle (6 rad/s, just under a full turn a second) that the disc is visibly
+       * live the moment you take off, and fast enough at full throttle (52 rad/s, over eight turns
+       * a second) that the two-lobe shading (buildPropDisc's own cosine wash) blurs into an even
+       * disc rather than reading as two blades going round. `% TAU` keeps the accumulator bounded
+       * across a flight that runs on for a while, rather than letting a float creep out of the
+       * precision a rotation needs. */
+      propSpin = (propSpin + dt * (6 + plane.throttle * 46)) % TAU;
+      planeMesh.userData.prop.rotation.z = propSpin;
     } else if (boatMode.active) {
       planeMesh.visible = false;
       model.group.visible = false;
@@ -1839,7 +1891,15 @@ async function boot() {
     remotes.update(dt, Date.now());
 
     /* audio + post cues */
-    audio.update(dt, car);
+    /* THE ENGINE NOTE WHILE FLYING. Operator: "There is no sound and the propeller doesn't move."
+     * update(dt, car) reads car.rpm/car.spec/car.throttle, none of which move while the plane has
+     * the wheel — the car's own solver is frozen the instant you take off (see car.update(dt,
+     * gated)'s own guard earlier in this loop) — so the note a player heard in the air used to be
+     * whatever the car was doing the moment before take-off, held there for as long as the flight
+     * lasted. updateFlight() is the plane's own branch of the same synthesised graph; see
+     * audio/engine.js for why it costs no new nodes. */
+    if (plane.active) audio.updateFlight(dt, plane, car);
+    else audio.update(dt, car);
     post.speed = sNorm;
     post.limit = car.limit;
 
@@ -1950,6 +2010,10 @@ async function boot() {
     /* The aeroplane, so a diagnostic can ask whether it is flying and how high — the same reason
      * every other live object is on this handle. */
     plane,
+    /* The live plane MESH, same reasoning as `boatMesh` above: a diagnostic asking whether the
+     * propeller is actually turning needs `planeMesh.userData.prop.rotation.z` off the object the
+     * frame loop is really spinning, not a re-derivation from `plane.throttle`. */
+    planeMesh,
     /* The walker, for the same reason `wallet` and `props` are here: the only honest answer to "am I
      * out of the car" is the object the frame loop is actually stepping. See tools/diag-walkin.mjs. */
     walker,

@@ -52,11 +52,20 @@ const KEYMAP = {
   onFoot: ['KeyZ'],
   /* P for PLANE — take off from where you are, or land and get back in the car. See game/plane.js. */
   fly: ['KeyP'],
-  /* The pitch axis, which only the plane reads. I/K rather than the arrows, because the arrows are
-   * already throttle and steering (see KEY_HELP) and the throttle has to keep meaning throttle in the
-   * air. K pulls the nose UP — back on the stick to climb, the one control every flight game shares. */
-  pitchUp: ['KeyK'],
-  pitchDown: ['KeyI'],
+  /* THE PITCH AXIS, ON SHIFT AND CTRL. Operator: "probably use something more familiar to people
+   * like the ARMA controls, I think that's shift and control, up and down, so you can do them all
+   * with one hand, especially in a cozy game you want to be able to play with one hand."
+   *
+   * It used to be I/K, which only the plane reads — chosen because the arrows are already throttle
+   * and steering (see KEY_HELP) and the throttle has to keep meaning throttle in the air. That is
+   * still true, but I/K sit off to the right of the home row, so flying meant one hand on W/A/S/D
+   * for throttle and bank and the OTHER hand reaching across for pitch — not the one-handed cockpit
+   * the operator asked for. Shift and Ctrl sit directly under the little finger that is already
+   * resting near W/A/S/D, so throttle, bank and pitch are now all one hand's reach. KeyK/KeyI are
+   * kept as ALIASES, listed second, rather than replaced — actionLabel() reads index 0, so the HUD
+   * now teaches Shift/Ctrl, but a player who already learned I/K loses nothing. */
+  pitchUp: ['ShiftLeft', 'KeyK'],
+  pitchDown: ['ControlLeft', 'KeyI'],
   fine: ['ShiftLeft'],
   attack: ['ControlLeft'],
   /* THE GARAGE, as an ACTION rather than a key listened for somewhere else. Escape and M were bound
@@ -181,6 +190,10 @@ export class Input {
       analogue: false,
       fine: false,
       attack: false,
+      /** steer/throttle before `fine`/`attack` scale them — see poll(). The plane reads these
+       *  instead of the two above, so holding Shift/Ctrl to pitch does not also cruise-limit it. */
+      steerRaw: 0,
+      throttleRaw: 0,
       /** Plane only — see poll(). The car never reads it. */
       pitchAxis: 0,
     };
@@ -348,6 +361,18 @@ export class Input {
     s.analogue = padLive && Math.abs(gSteer) >= Math.abs(kSteer) && Math.abs(gSteer) > 0.001;
     if (this.touch.active) s.analogue = true;
 
+    /* THE PLANE GETS THE STICK BEFORE THE CAR'S OWN MODIFIERS TOUCH IT.
+     *
+     * `fine`/`attack` are car-only ideas — cruise assist and aggressive steering — and until this
+     * pass they lived on keys nothing else read. Now Shift/Ctrl ALSO fly the aeroplane (see
+     * pitchUp/pitchDown above), so without this line pulling back to climb would silently cap the
+     * throttle at 45% — `fine`'s own ceiling, meant for holding 40 km/h on a cruise, not for an
+     * aeroplane's climb rate — every time the pitch-up key was held. Captured here, before fine and
+     * attack get anywhere near s.throttle/s.steer, so main.js can hand the plane the UNMODIFIED
+     * stick while the car keeps the scaled one it always had. */
+    s.throttleRaw = s.throttle;
+    s.steerRaw = s.steer;
+
     // ── modifiers ──
     // Fine mode is for cruising: hold it and the car will sit at 40 km/h without you
     // feathering a digital key.
@@ -426,7 +451,7 @@ export const KEY_HELP = [
   ['N', 'radio'],
   ['G', 'auto-drive'],
   ['P', 'fly (needs a plane — diamonds at sea)'],
-  ['I / K', 'nose down / up, in the air'],
+  ['Shift / Ctrl', 'nose up / down, in the air (I / K also work)'],
   ['F', 'pour in a spare fuel can'],
   ['Esc / M', 'garage'],
   ['H', 'horn'],
