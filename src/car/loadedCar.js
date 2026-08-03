@@ -177,10 +177,28 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
     const n = g.attributes.position.count;
     const colArr = new Float32Array(n * 3);
     const matArr = new Float32Array(n);
+    /* THE MODEL'S OWN COLOURS, WHERE IT HAS THEM. Operator: "also no textures on the cars."
+     *
+     * A Quaternius car separates its parts by MATERIAL, so classifying the material name is the
+     * whole story and every body panel takes the player's paint. A Synty car does not: it is one
+     * body mesh whose lights, grille, bumpers, interior and panel lines all live in a palette
+     * ATLAS, so painting it by material name gives one flat lump with no detail at all.
+     *
+     * tools/synty-car.mjs bakes that atlas into a COLOR_0 attribute at conversion time — one sample
+     * per vertex, which is near-lossless for a palette texture and needs no sampler here. So: if a
+     * BODY mesh arrived with its own vertex colours, use them; otherwise paint it. Glass, wheels and
+     * lights still classify by name either way, because those must obey the game, not the artist. */
+    const baked = mat === MAT.BODY ? g.attributes.color : null;
     for (let i = 0; i < n; i++) {
-      colArr[i * 3] = rgb[0];
-      colArr[i * 3 + 1] = rgb[1];
-      colArr[i * 3 + 2] = rgb[2];
+      if (baked) {
+        colArr[i * 3] = baked.getX(i);
+        colArr[i * 3 + 1] = baked.getY(i);
+        colArr[i * 3 + 2] = baked.getZ(i);
+      } else {
+        colArr[i * 3] = rgb[0];
+        colArr[i * 3 + 1] = rgb[1];
+        colArr[i * 3 + 2] = rgb[2];
+      }
       matArr[i] = mat;
     }
     // The painted shader reads `vcol` and `vmat` per vertex — the same attribute names the

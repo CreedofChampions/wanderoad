@@ -71,7 +71,7 @@ export const FLEET = [
      * besides the Rally's — a pickup should be the thing you take off the tarmac when the Rally is
      * still out of reach. The tank is the fleet's biggest, in tuning.js, for the same reason. */
     id: 'pickup',
-    file: 'pickup.glb',
+    file: 'synty-pickup.glb',
     label: 'Ford F150',
     blurb: 'A full-size pickup. Slow to turn, hard to stop, and happy in the dirt.',
     unlockAt: 60000,
@@ -116,7 +116,7 @@ export const FLEET = [
   },
   {
     id: 'sedan',
-    file: 'synty-pickup.glb',
+    file: 'sedan.glb',
     label: 'Sedan',
     blurb: 'Long wheelbase, loose rear. It will hold a slide if you ask nicely.',
     unlockAt: 8000,
@@ -138,7 +138,7 @@ export const FLEET = [
   },
   {
     id: 'taxi',
-    file: 'synty-truck.glb',
+    file: 'taxi.glb',
     label: 'Taxi',
     blurb: 'Somebody has to. Slow, indestructible, oddly relaxing.',
     unlockAt: 45000,

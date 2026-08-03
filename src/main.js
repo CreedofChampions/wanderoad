@@ -154,6 +154,15 @@ if (CFG.cheat) setCheat(true);
  * and before the Vehicle is constructed — a car swapped in after the solver exists would be driving
  * on the previous car's tuning. Returns null for a fresh start, a different seed, or `?fresh=1`.
  * See game/session.js for what is and is not in the record. */
+/* `?unlock=123` IS APPLIED BEFORE THE CAR IS CHOSEN.
+ *
+ * It used to run inside boot(), which is after `carFromUrl()` has already picked the car at module
+ * scope — so on a fresh profile `?unlock=123&car=pickup` silently handed you the starter car,
+ * because the cheat was not set yet when the choice was made. It only worked on the SECOND load,
+ * once the latch was in storage. Reading the URL has no side effects worth ordering around, so it
+ * happens here. */
+applyUnlockParam();
+
 const RESUME = resumeFor(SEED);
 
 /* The car IS the feel. One choice, not two — see src/game/garage.js.
@@ -644,7 +653,7 @@ async function boot() {
   /* `?unlock=123` — the operator's own hack. Applied before the Garage is built so the fleet is
    * already open the first time it draws, and it opens the PLANE and the BOAT as well as the cars:
    * "unlock all" that leaves two things locked is not unlock all. See game/garage.js's UNLOCK_PASS. */
-  if (applyUnlockParam()) {
+  if (cheatOn()) {
     wallet.boat = true;
     wallet.plane = true;
     wallet.save();
