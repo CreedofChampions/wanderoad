@@ -54,6 +54,34 @@ near the brake test's start point before touching any braking constant.
 
 Do NOT tune the brakes to make this pass. The number says 0 m, and no brake change produces 0 m.
 
+## B2 — attempt 8 (finer arterial sampling) FALSIFIED, 3 Aug 2026
+
+Attempt 7 found that at the worst crossing the ARTERIAL's nearest sample sits 10.7 m away while the
+lane's sits 3.6 m, so `levelAgainst` aims the lane at a height INTERPOLATED across more than ten
+metres of a road climbing out of a cutting. That looked like the answer: a sampling-resolution
+problem, which would explain why six attempts at authority, radius, clamping and window all failed.
+
+The sample count is `n = clamp(round(chord / T.step), 8, 96)`, and a long arterial hits that 96 cap,
+so its spacing grows with its length. Raising the cap to 160:
+
+| 12 km box | before | after |
+|---|---|---|
+| boxes holding a mismatch | 26 of 253 | **28 of 260** |
+| worst step | 3.94 m | **4.89 m** |
+
+WORSE on both, and reverted. (The box totals differ because finer sampling changes the geometry
+slightly, so the census is over a marginally different world — but the direction is unambiguous.)
+
+So the interpolation gap is real and is NOT what leaves the step. Seven mechanisms are now
+eliminated with numbers: the earthwork clamp, a span-derived radius, a flat 40 m radius, switching
+levelling off near nodes, tapering, correcting the exact crossing point, and finer arterial sampling.
+
+**What has actually moved this number**, for whoever picks it up: nothing aimed at the levelling
+pass. The two real improvements both came from elsewhere — the elevation feather rewritten in metres
+(12.91 m -> 7.03 m, commit bdb25d2) and the junction departure fan (7.03 m -> 3.94 m, commit
+c499928). That is worth taking seriously as evidence: the residual may not live in `levelAgainst` at
+all, and an eighth attempt aimed at it would be the eighth to fail.
+
 ## B2 — attempt 6 (correct the exact crossing point) ALSO FALSIFIED, 3 Aug 2026
 
 The fix this entry itself recommended — "insert a sample at the exact crossing point findCrossings
