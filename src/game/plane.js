@@ -212,19 +212,30 @@ export class Plane {
      * last rate for ever. The reference leans on Unity's angular drag for this; here it is
      * explicit, which is also what makes it testable. */
     const stickPitch = clamp(i.pitch || 0, -1, 1);
-  /* THE STICK'S SIGN, and the plane had it backwards.
+  /* THE STICK'S SIGN, third time, and this one is measured against the CAR rather than argued.
    *
-   * Operator: "the plane when being steered left goes right and vice versa".
+   * Operator, three times: "the plane when being steered left goes right", then "the D key goes
+   * left instead of right", then decisively — "Left and right are still inverted -- visually right
+   * but actually wrong." That last sentence is what solved it: the MODEL is correct, so the error
+   * is here in the motion, not in the mesh.
    *
-   * `i.steer` arrives straight from car/input.js, whose convention is POSITIVE IS LEFT
-   * (`held('steerLeft') ? 1 : 0) - (held('steerRight') ? 1 : 0`). The flight model's is the
-   * opposite by construction: a positive roll banks right, the bank trick below yaws in
-   * proportion to that bank, and yaw increasing turns towards +X because forward is
-   * (sin yaw, cos yaw). So a steady press on A rolled the aeroplane left and flew it right.
+   * THE GROUND TRUTH, taken from the browser suite on the live build rather than from reasoning
+   * about handedness, which got this wrong twice:
+   *     A steers left  — yaw  59.7 deg  (POSITIVE = LEFT)
+   *     D steers right — yaw -115.1 deg (NEGATIVE = RIGHT)
+   * Those are the CAR's checks and they pass, so that is the convention this game means.
    *
-   * Negated HERE rather than at the call site so the one game-wide convention holds
-   * everywhere and there is no second place to remember it. */
-    const stickRoll = -clamp(i.steer || 0, -1, 1);
+   * car/input.js gives POSITIVE for left (`held('steerLeft') ? 1 : 0) - (held('steerRight') ...`).
+   * A positive roll banks right, the bank trick below yaws in proportion to the bank, and yaw
+   * therefore INCREASES — which by the convention above is a turn to the LEFT. So feeding the
+   * stick through unchanged is what makes left mean left, and the negation added on 2 August is
+   * exactly what made it mean right. It is removed.
+   *
+   * A flight clip taken on 3 August read "heading change -4.0 deg" with A held and I called that a
+   * left turn. By the table above it is a RIGHT turn. The number was right; my reading of it was
+   * not. tools/bench-plane.mjs now asserts the sign against this convention explicitly so the next
+   * person does not have to take anyone's word for it. */
+    const stickRoll = clamp(i.steer || 0, -1, 1);
     const stickYaw = clamp(i.yaw || 0, -1, 1);
 
     this.p += (stickPitch * PLANE.pitchTorque - this.p * PLANE.angularDamp) * dt;

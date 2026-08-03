@@ -130,20 +130,28 @@ console.log('\n── press left, go left ────────────�
    * The convention, once, from car/input.js: steer POSITIVE IS LEFT. The pose convention, from
    * plane.js: forward is (sin yaw, cos yaw), so yaw INCREASING sweeps +Z towards +X, which is to
    * the right. Left stick must therefore make yaw go DOWN. */
+  /* THE CONVENTION IS THE CAR'S, and it is quoted here so nobody has to re-derive it. Measured on
+   * the live build by tools/browser-test.mjs, both passing:
+   *     A steers left  — yaw  59.7 deg  (POSITIVE = LEFT)
+   *     D steers right — yaw -115.1 deg (NEGATIVE = RIGHT)
+   * The aeroplane must agree with the car it is parked next to. This check was previously written
+   * against my own reading of a flight clip, which was backwards — the operator reported the
+   * inversion three times before it was believed. A number with the convention written beside it
+   * is the only version of this check worth having. */
   const left = airborne(w);
   const l0 = left.yaw;
-  for (let i = 0; i < 6 / DT; i++) left.update(DT, STICK({ throttle: 0.8, steer: 1 }));
+  for (let i = 0; i < 6 / DT; i++) left.update(DT, STICK({ throttle: 0.8, steer: 1 })); // steer +1 = A = LEFT
   const dLeft = left.yaw - l0;
 
   const right = airborne(w);
   const r0 = right.yaw;
-  for (let i = 0; i < 6 / DT; i++) right.update(DT, STICK({ throttle: 0.8, steer: -1 }));
+  for (let i = 0; i < 6 / DT; i++) right.update(DT, STICK({ throttle: 0.8, steer: -1 })); // steer -1 = D = RIGHT
   const dRight = right.yaw - r0;
 
-  console.log(`       6 s of stick: left ${((dLeft * 180) / Math.PI).toFixed(0)} deg, right ${((dRight * 180) / Math.PI).toFixed(0)} deg  (negative = to the left)`);
-  check(dLeft < -0.15, 'holding LEFT turns the nose to the left', `${((dLeft * 180) / Math.PI).toFixed(0)} deg`, 'negative');
-  check(dRight > 0.15, 'holding RIGHT turns the nose to the right', `${((dRight * 180) / Math.PI).toFixed(0)} deg`, 'positive');
-  check(left.roll < 0 && right.roll > 0, 'and it banks the way it is turning', `${((left.roll * 180) / Math.PI).toFixed(0)} / ${((right.roll * 180) / Math.PI).toFixed(0)} deg`, 'left negative, right positive');
+  console.log(`       6 s of stick: A ${((dLeft * 180) / Math.PI).toFixed(0)} deg, D ${((dRight * 180) / Math.PI).toFixed(0)} deg  (POSITIVE = LEFT, the car's convention)`);
+  check(dLeft > 0.15, 'A flies LEFT — positive heading change, same as the car', `${((dLeft * 180) / Math.PI).toFixed(0)} deg`, 'positive');
+  check(dRight < -0.15, 'D flies RIGHT — negative heading change, same as the car', `${((dRight * 180) / Math.PI).toFixed(0)} deg`, 'negative');
+  check(left.roll > 0 && right.roll < 0, 'and it banks INTO the turn it is making', `${((left.roll * 180) / Math.PI).toFixed(0)} / ${((right.roll * 180) / Math.PI).toFixed(0)} deg`, 'A positive, D negative');
 }
 
 /* ── 5. the ground is a floor, not a wall ────────────────────────────────── */
