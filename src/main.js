@@ -586,6 +586,8 @@ async function boot() {
     return !!h && h.dist <= HARBOUR_RADIUS;
   };
   let harbourWas = false;
+  /** Last frame's menu state, so the pause is applied once on each transition. */
+  let pausedWas = false;
   let airfieldWas = false; // latch for the airfield line — see the frame loop
   const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
 
@@ -1082,6 +1084,21 @@ async function boot() {
      * below), and consuming it here as well would open the Garage over the top of the first frame
      * the player ever sees. */
     if (!cine.active && input.tapped('garage')) menu.toggle();
+    /* ESC = PAUSE = NO SOUND. Operator, verbatim: "esc = pause = no sound".
+     *
+     * Watched as a TRANSITION on `menu.open` rather than hooked onto the Escape key, because the
+     * Garage has four ways in — Escape, the pad's Start, B, and the buttons that open it from a
+     * showroom — and hanging the audio off one of them would leave the other three playing an
+     * engine over a paused world. The world was already stopped here (`!menu.open` gates the car,
+     * the boat, the fuel burn and the rest); only the sound kept going.
+     *
+     * The music window is told separately: the YouTube embed has its own audio path and the master
+     * gain cannot reach it. */
+    if (menu.open !== pausedWas) {
+      pausedWas = menu.open;
+      audio.setPaused(menu.open);
+      musicPanel.setPaused(menu.open);
+    }
     if (menu.open) menu.padNav(input.padNav());
 
     if (input.padLive !== padWas) {

@@ -152,6 +152,29 @@ export class EngineAudio {
   }
 
   /** @param {Vehicle} car */
+  /**
+   * Silence, for while the game is paused. Operator: "esc = pause = no sound".
+   *
+   * The Garage already stops the world — main.js gates the car, the boat, the fuel burn and the
+   * rest on `!menu.open` — but the audio graph kept running underneath it, so a paused game sat
+   * there with an engine idling and birds singing over a menu.
+   *
+   * A ramp on the MASTER gain rather than `ctx.suspend()`: suspending stops the graph's clock, so
+   * every ramp and LFO in the ambience layer resumes exactly where it froze, which is audible as a
+   * click on the way back. 80 ms is short enough to read as instant and long enough not to pop.
+   *
+   * @param {boolean} on
+   */
+  setPaused(on) {
+    this._paused = !!on;
+    if (!this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const to = on ? 0.0001 : this.volume;
+    this.master.gain.cancelScheduledValues(t);
+    this.master.gain.setValueAtTime(Math.max(this.master.gain.value, 0.0001), t);
+    this.master.gain.exponentialRampToValueAtTime(Math.max(to, 0.0001), t + 0.08);
+  }
+
   update(dt, car) {
     const ctx = this.ctx;
     if (!ctx || ctx.state === 'suspended') return;

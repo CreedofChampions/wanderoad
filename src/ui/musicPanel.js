@@ -296,6 +296,25 @@ export class MusicPanel {
     return true;
   }
 
+  /**
+   * Hold and release the music for a pause. Operator: "esc = pause = no sound".
+   *
+   * The YouTube embed is a separate window with its own audio path, so the master gain in
+   * audio/engine.js cannot touch it — silencing the game without this leaves the music playing
+   * over a paused world, which is the half-fix nobody wants.
+   *
+   * Only resumes what it itself paused: a player who deliberately stopped the music before opening
+   * the Garage should not find it playing when they close it.
+   */
+  setPaused(on) {
+    if (on) {
+      this._pausedByGame = this._post('pauseVideo');
+    } else if (this._pausedByGame) {
+      this._pausedByGame = false;
+      this._post('playVideo');
+    }
+  }
+
   /** Next track in the playlist. Also what the N key calls. */
   next() {
     this._ensureLoaded();
