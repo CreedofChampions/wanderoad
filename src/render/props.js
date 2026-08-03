@@ -2337,8 +2337,16 @@ export class Props {
       this._job.phase = 0;
     }
     const t0 = performance.now();
+    /* PER-PHASE TIMING, because "the worst props frame is 807 ms" says nothing about WHICH of the
+     * phases below spends it, and B11 has been carried as one number for weeks. `_drain` already
+     * runs one tile job per frame and skips on a long frame, so the cost is not a greedy backlog —
+     * it is one phase of one job. This records where it actually goes so the split is aimed. */
+    const phase = this._job.phase;
     this._step(this._job);
-    this.stats.buildMs = performance.now() - t0;
+    const ms = performance.now() - t0;
+    this.stats.buildMs = ms;
+    (this.stats.phaseMs ||= {});
+    if (ms > (this.stats.phaseMs[phase] || 0)) this.stats.phaseMs[phase] = ms;
     this.stats.backlog = this.pending.length + (this._job ? 1 : 0);
   }
 
