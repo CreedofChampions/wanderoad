@@ -144,7 +144,22 @@ export const P = {
   head: '#FFF3D0',
   // light
   sun: '#FFD79C',
-  ambSky: '#9EC6E6',
+  ambSky: '#BCCFDD',  /* was #9EC6E6, and this is the answer to B24 after five investigations.
+                       *
+                       * Operator, for weeks: "the land is a dark blue/green ... more blue than green
+                       * for human eye". Measured, the land is GREEN (grass alone reads b-r -22.6).
+                       * The ROAD is blue (+22.2 before today, +13.6 after the post grade was warmed).
+                       *
+                       * core/glsl.js builds its hemispheric ambient as
+                       *     hemi = mix(K_AMB_GND, K_AMB_SKY, N.y*0.5 + 0.5)
+                       * so a surface facing STRAIGHT UP takes the full sky colour — and #9EC6E6 is
+                       * r158 g198 b230, blue 72 above red. Tarmac is flat, faces straight up, and is
+                       * a near-neutral grey (#8E8B86) with no colour of its own to hide the tint.
+                       * Grass blades face every which way and are saturated green, which swamps it.
+                       * Same lighting, opposite readings — which is exactly what was measured.
+                       *
+                       * Paled rather than neutralised: a blue sky bounce is real and is what keeps
+                       * shadows from going flat grey. It just should not be dyeing the carriageway. */
   ambGround: '#AA9C64',
   shadowTint: '#5C6E9E',
 };
