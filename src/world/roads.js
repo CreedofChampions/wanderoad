@@ -952,6 +952,32 @@ function buildBaseGeom(i, j, dir, tier, seed) {
 
   nodeDir(i, j, tier, seed, _t0);
   nodeDir(i1, j1, tier, seed, _t1);
+  /* THE PLAN HALF OF THE SIXTH APPROACH — each edge leaves a node biased towards where IT is
+   * actually going, instead of along the node's one shared line.
+   *
+   * Operator, repeatedly: "when 2 roads get close they need to start to connect via a 90 degree
+   * junction not like part into each other", and later, plainly, that roads "go in and out of each
+   * other". nodeDir's own comment states the cause as though it were a feature: the tangent
+   * "belongs to the NODE, not to either edge, so both edges meeting here leave along the same
+   * line". That is exactly what braiding IS — two roads leaving a junction on top of one another
+   * and only slowly separating. Measured: 33.3% of node pairs leave under 26 degrees apart, and
+   * the tightest pair in the sample is 0 degrees.
+   *
+   * The fix is not to abandon the shared tangent — it is what keeps the network kink-free, and
+   * throwing it away puts a corner at every node. It is blended towards THIS edge's own chord by
+   * NODE_FAN, which fans the departures apart near the node while leaving the far end of the
+   * tangent alone. The blend is renormalised, so tangent LENGTH is untouched and every downstream
+   * measurement that depends on it — the backoff loop directly below, the curvature floor, the
+   * squaring pass — sees the same magnitudes it always did. */
+  const _cx = (p1[0] - p0[0]) / chord;
+  const _cz = (p1[1] - p0[1]) / chord;
+  for (const [t, sgn] of [[_t0, 1], [_t1, 1]]) {
+    const bx = t[0] + (_cx * sgn - t[0]) * NODE_FAN;
+    const bz = t[1] + (_cz * sgn - t[1]) * NODE_FAN;
+    const bl = Math.hypot(bx, bz) || 1;
+    t[0] = bx / bl;
+    t[1] = bz / bl;
+  }
   /* Tangent LENGTH scales with this edge's own chord, not with the lattice cell. It used to be
    * cell * curve * 2, which is fine while two nodes sit a cell apart — but the jitter can put
    * them a fifth of that apart, and a 769 m tangent on a 130 m link is a cusp, not a curve.
@@ -2215,6 +2241,27 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
  *  levelAgainst captures at 18 m of horizontal distance; edgesInBox's own margin adds the
  *  partner's half-width and verge on top of this, so 24 m is comfortably generous. */
 const CROSS_PAD = 24;
+/** How far each edge's departure tangent is blended from the node's shared line towards its own
+ *  chord. 0 is the old behaviour (every edge leaves a node along one line — the braiding).
+ *
+ *  0.28 is chosen for MARGIN, not because it is the best number. Measured braiding, worst seed:
+ *      0.00 -> 33.3%   0.12 -> 31.8%   0.20 -> 26.9%   0.24 -> 21.5%
+ *      0.28 -> 15.4%   0.31 -> 12.8%   0.35 -> 9.5% but BREAKS THE BOAT
+ *  At 0.35 five checks in bench-boat fail — the boat is no longer afloat and will not turn — because
+ *  fanning the departures moves whole edges, and past that point a road reaches water the bench's
+ *  steep-bank fixture depends on. 0.31 is clean and 0.35 is not, so the cliff is somewhere between;
+ *  0.28 sits a fifth below it rather than a tenth. Worth knowing before anyone turns this up: the
+ *  thing that breaks is the BOAT, not the roads, and it breaks suddenly.
+ *
+ *  AND IT COSTS MID-EDGE SQUARENESS, at every strength tried — this is a TRADE, not a free win,
+ *  and it is recorded here rather than left to be discovered. diag-crossing-angle, 12 km box:
+ *      fan 0.00  mean 6.89 deg  worst 31.5      fan 0.14  mean 8.39  worst 50.9
+ *      fan 0.20  mean 9.34      worst 74.5      fan 0.28  mean 9.43  worst 61.5
+ *  Braiding is what the operator reports over and over ("roads go in and out of each other"), and
+ *  the crossing-STEP census improves alongside it (34 boxes/7.03 m -> 26 boxes/3.94 m), so the fan
+ *  is taken — but a road crossing another at 61 degrees off square is a real thing he can see, and
+ *  it is now its own tracked item rather than a footnote. */
+const NODE_FAN = 0.28;
 
 /**
  * The furthest a road can reach into carve(), and therefore the smallest pad any field may
