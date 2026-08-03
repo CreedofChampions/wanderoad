@@ -1617,7 +1617,23 @@ async function boot() {
       boatMesh.visible = false;
       planeMesh.visible = true;
       planeMesh.position.set(plane.x, plane.y, plane.z);
-      planeMesh.rotation.set(plane.pitch, plane.yaw, plane.roll, 'YXZ');
+      /* THE MODEL AND THE FLIGHT PATH DISAGREED. Operator: "When you push k, you look up and you go
+       * up, but the plane looks down. When you push i, the plane looks up and you go down" — and,
+       * separately, "the plane goes left, or it looks left, but goes right".
+       *
+       * Both are the same mistake, made twice. The aeroplane is modelled nose along +Z, and in a
+       * right-handed Y-up system a POSITIVE rotation about X carries +Z towards -Y: the nose goes
+       * DOWN. The flight model means the opposite by a positive pitch — `ny = sin(pitch)`, so
+       * positive pitch is climbing. Feeding one straight into the other drew an aeroplane pointing
+       * at the ground while it gained height. Bank is the same story about Z.
+       *
+       * Yaw is left alone: the pose convention here is forward = (sin yaw, cos yaw), and rotating a
+       * +Z nose about Y by that angle lands on exactly that vector, which is why the CAR — same
+       * convention, same mapping — has never had this problem.
+       *
+       * The signs below were confirmed by filming it, not by reasoning: see the clips for B53/B54
+       * on the proof page. Reasoning about handedness is how it got backwards in the first place. */
+      planeMesh.rotation.set(-plane.pitch, plane.yaw, -plane.roll, 'YXZ');
     } else if (boatMode.active) {
       planeMesh.visible = false;
       model.group.visible = false;
