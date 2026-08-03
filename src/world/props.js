@@ -707,12 +707,25 @@ export const STATION_RADIUS = 11;
  * stay inside the apron is the row's WIDTH, and bench-props checks that against each car's real
  * half-width rather than against the slot centre.
  */
+/* EIGHT SLOTS, because eight cars are for sale. The row was five while the fleet had five to sell;
+ * the 3 August reorder brought the Estate, the Scooter and the Tricycle onto the forecourt and
+ * bench-props caught the shortfall immediately ("there is a slot for every car on show: 5, want 8").
+ * A car with no slot is a car you can buy and never see.
+ *
+ * The extra three go in a SECOND ROW rather than stretching the first one further along the apron:
+ * the existing row already reaches 10 m from the centre, and pushing it to 24 m would run the last
+ * car off the tarmac and out of the plaque's reach. Two rows keep every car inside SHOWROOM_REACH
+ * of somewhere a player can stand. */
 export const SHOWROOM_SLOTS = [
   { dx: -6.5, dz: 5.9 },
   { dx: -3.0, dz: 5.9 },
   { dx: 3.0, dz: 5.9 },
   { dx: 6.5, dz: 5.9 },
   { dx: 10.0, dz: 5.9 },
+  { dx: -6.5, dz: 11.4 },
+  { dx: -3.0, dz: 11.4 },
+  { dx: 3.0, dz: 11.4 },
+  { dx: 6.5, dz: 11.4 },
 ];
 
 /** How close you have to be to a display car for it to be the one you are looking at, in metres. */

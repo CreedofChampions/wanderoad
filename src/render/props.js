@@ -1344,16 +1344,27 @@ export function buildAirfield(M, r, f, skirt) {
  * The colours are pulled apart deliberately — four cars in four shades of the same paint is the
  * "similar 3 biomes" mistake again, on a smaller stage. */
 export const SHOWROOM_CARS = [
-  /* FOUR COLOURS THAT ARE ACTUALLY FOUR COLOURS. The first version put paintA on the Sedan and
+  /* THIS LIST MIRRORS THE FLEET'S FOR-SALE CARS, and it is hand-maintained on purpose: this module
+   * is loaded by the tile worker and must not pull the game's modules in behind it. That makes it
+   * the one thing in the project that can drift silently — the plaque you read and the car you buy
+   * would be different cars, and nothing else would notice. tools/bench-props.mjs compares it
+   * against `FLEET.filter(c => unlockRule(c).how === 'buy')` for exactly that reason, and it caught
+   * this drift the moment the fleet was reordered on 3 August: the row still showed five cars while
+   * eight were for sale, so the Estate, the Scooter and the Tricycle were buyable and undisplayed.
+   *
+   * FOUR COLOURS THAT ARE ACTUALLY FOUR COLOURS. The first version put paintA on the Sedan and
    * VERMILION on the Rally — and VERMILION is paintA mixed 18% towards amber, so photographed on the
-   * apron they were two reds side by side and the row read as three cars, not four. Blue, red,
-   * amber, teal: the four most separated hues the painted palette has. */
+   * apron they were two reds side by side and the row read as three cars, not four. The hues below
+   * stay as separated as the painted palette allows now that the row is longer. */
+  { id: 'estate', length: 4.6, colour: LC('paintB') }, // green
+  { id: 'scooter', length: 1.95, colour: AMBER },
+  // The pickup is the only one on the row you can pick out by its OUTLINE — 5.91 m against the
+  // saloons' 4.5, which is the whole reason a truck is worth adding to a fleet of cars.
+  { id: 'pickup', length: 5.91, colour: CREAM },
+  { id: 'threewheeler', length: 2.95, colour: LC('paintE') },
   { id: 'sedan', length: 4.5, colour: LC('paintC') }, // slate blue
   { id: 'rally', length: 4.2, colour: VERMILION }, // rally red
   { id: 'taxi', length: 4.5, colour: AMBER }, // and a taxi is amber, obviously
-  // The pickup, and it is the only one on the row you can pick out by its OUTLINE — 5.91 m against
-  // the saloons' 4.5, which is the whole reason a truck is worth adding to a fleet of cars.
-  { id: 'pickup', length: 5.91, colour: CREAM },
   { id: 'patrol', length: 4.6, colour: TEAL },
 ];
 
