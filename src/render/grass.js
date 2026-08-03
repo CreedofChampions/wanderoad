@@ -144,7 +144,10 @@ export const GRASS_STEPS = [
  * that is a bigger change than this one and is logged rather than rushed. Shipping a default that
  * opens at 3.6 fps is not giving someone the original's look, it is taking the game away from them
  * in the first ten seconds. */
-export const GRASS_DEFAULT = 'high';
+/** Rings from this index up are built lazily, after the first frames — see the constructor. */
+const LAZY_FROM = 3;
+
+export const GRASS_DEFAULT = 'far';
 
 export function grassQuality() {
   let id = GRASS_DEFAULT;
@@ -910,7 +913,39 @@ export class Grass {
     this._hallRegionZ = Infinity;
 
     this.stats = { chunks: 0, dirty: 0, drawn: 0, built: 0, extended: 0, buildMs: 0, bytes: 0 };
-    this._rings = RINGS.map((R, i) => this._buildRing(R, i));
+    /* THE OUTER RING IS BUILT LAZILY, and this is what F19 was waiting on.
+     *
+     * Operator: "the original grass is visible from much farther -- put that on by default and have
+     * a slider for settings to reduce lag for lesser pcs". The slider shipped; the DEFAULT did not,
+     * and the note above GRASS_DEFAULT records exactly why — every ring was built here, in the
+     * constructor, before the first frame, so choosing `far` opened the game at 3.6 fps. That note
+     * also names the fix: "build the outer ring LAZILY over the first few seconds instead of before
+     * the first frame, at which point the default can move out".
+     *
+     * So the near rings — the ones you are actually driving through — are built now, and any ring
+     * beyond LAZY_FROM is queued and built one per update once the game is running. The queue is
+     * drained by `update`, which already runs a wall-clock budget for rebuilds, so a deferred ring
+     * arrives as a few busy frames a second or two in rather than as a frozen opening.
+     *
+     * Nothing about the FIELD changes: the same rings, the same densities, the same chunk grids.
+     * Only when the far one is assembled moves. */
+    this._rings = [];
+    this._pendingRings = [];
+    for (let i = 0; i < RINGS.length; i++) {
+      if (i < LAZY_FROM) this._rings.push(this._buildRing(RINGS[i], i));
+      else this._pendingRings.push(i);
+    }
+  }
+
+  /** Build at most one queued ring. Called from `update`, so it costs a frame, not the opening. */
+  _drainPendingRings() {
+    if (!this._pendingRings.length) return;
+    const i = this._pendingRings.shift();
+    const ring = this._buildRing(RINGS[i], i);
+    /* Rings are addressed by index elsewhere (setAngular walks `this._rings` and writes each one's
+     * uLodB), so a lazily-built ring has to land at ITS OWN index, not on the end. */
+    this._rings[i] = ring;
+    if (this.angPerPx) this.setAngular(this.angPerPx);
   }
 
   get group() {
@@ -1051,6 +1086,7 @@ export class Grass {
    * @param {number} dt seconds
    */
   update(camX, camZ, camY, dt) {
+    this._drainPendingRings();
     if (this.wind) this.wind.update(dt, { x: camX, y: camY, z: camZ });
 
     const t0 = performance.now();
