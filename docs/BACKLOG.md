@@ -37,6 +37,40 @@ every node-side check that was run against it.
 
 ---
 
+## B2 — terrain steps at crossings: the CAUSE is found, and four fixes are falsified (3 Aug 2026)
+
+Baseline, `node tools/diag-crosslevel.mjs`, 12 km box: **34 of 266 car boxes hold a mismatched
+crossing, 34 of 2590 crossings over 1 m, worst 12.91 m at (1448,-1952)** between arterial
+`0:0,-2,1` and lane `1:2,-4,1`; 1 mismatch within 2600 m of spawn (the gate the reversed spawn
+waits on).
+
+**THE CAUSE, and it is not what the code says it is.** `levelAgainst`'s capture radius is a flat
+18 m, measured from one of THIS lane's samples to the other road's segments. At that crossing no
+sample of the lane lands within 18 m of the arterial, so the lane is never corrected AT ALL. The
+comment in `canonicalProfile` claims the correction happens and the earthwork clamp then cuts it
+back off. That is wrong.
+
+| # | Hypothesis | Change | Result |
+|---|---|---|---|
+| 1 | The earthwork clamp undoes the correction (what the code comment claims) | `CROSS_EARTHWORK` x6, 36 m -> 216 m | **exactly no change** — 12.91 m, same place, same 34 boxes. The clamp never touched it. |
+| 2 | The radius should be derived from sample spacing (half a span + half the other road's width) | implemented properly | **no change whatsoever** — this lane's span is small, so spacing does not explain the missing reach, and a formula fitted to it would be a just-so story |
+| 3 | Just make the radius 40 m | flat 40 | worst **12.91 -> 1.52 m**, arterial-vs-arterial over 1 m **9 -> 5** — but **S3 REGRESSES**, edges at a shared node go from exact to **2.72 m out** at node `1:-1,1`. Two edges meeting at a node share one tangent and must agree; a 40 m reach drags one off it. |
+| 4 | Keep 40 m but switch levelling off near nodes, via the existing `guard` | `guard: edgeNodeXZ(e, seed)` on both lane passes | S3 perfect (0.0000 m) and **the crossings collapse**: 34 boxes -> **131**, 34 crossings over 1 m -> **138**, worst -> **14.50 m**, near-spawn 1 -> 4. A great many crossings ARE near nodes and simply stopped being corrected. |
+| 5 | Taper the radius from 18 m at a node up to 40 m mid-edge | `NODE_TAPER`, swept 12/18/25/45/90 m | S3 holds (0.0000-0.0001 m) and worst falls **12.91 -> 4.57 m** (plateau below 18 m of taper) — but crossings over 1 m rise **34 -> 64** and the near-spawn gate worsens **1 -> 2**. |
+
+**NOT SHIPPED.** #5 is the closest thing to a fix and it is still a TRADE, not a win: it buys a
+2.8x smaller worst step by doubling how many crossings are mildly out, and it makes the
+reversed-spawn gate worse, which is the one the operator actually drives through. Under "do not
+weaken a check to make something pass" that is a fail, so it was reverted and the baseline
+re-measured identical.
+
+**Where a sixth attempt should start.** The radius is the wrong lever because it is one number
+serving two jobs. What the lane actually needs is a sample AT the crossing: `findCrossings` already
+computes the exact crossing point for the squaring pass, so the levelling pass could INSERT a
+sample there (or snap the nearest one onto it) and correct that point exactly, at the old 18 m
+radius, with no reach anywhere else. That leaves node agreement untouched by construction, which is
+what killed #3, #4 and #5.
+
 ## Now — the failing requirements, worst first
 
 ### Junction shape — MEASURED PROPERLY, and five approaches falsified with numbers
