@@ -188,6 +188,46 @@ export const TIERS = {
    * NOTE wheelRadius DIVIDES the drive force, so the bigger tyre a truck should have is paid for in
    * the ratio rather than given away. Slow on the flat, unstoppable on a hill — which is the trade
    * the operator asked for. */
+  /* THE SCOOTER. Operator: "Get the old wobbly controls back and give them to a scooter you can
+   * unlock". A 125 cc twist-and-go, and it needs its own tier for the plain reason that it cannot
+   * borrow a car's: at 130 kg it is a twelfth of the Grand Tourer's mass, and mass is what every
+   * force in the solver is divided by.
+   *
+   * `rollPerG: 11.0` is the number that gives it its character, and it is not arbitrary — a real
+   * two-wheeler LEANS INTO a corner rather than rolling away from it, and while this solver has no
+   * lean-steer model, tripling the roll-per-g of the tallest car in the fleet is what makes a
+   * corner look like it is being thrown rather than negotiated. Combined with the restored wobble
+   * in garage.js it is unmistakable from ten metres away.
+   *
+   * `drive: 'rwd'` because that is what a scooter is: engine in the back wheel, nothing at all
+   * driving the front. Low power, low top speed, and a redline it reaches almost immediately. */
+  scooter: {
+    name: 'Scooter',
+    mass: 130,
+    izz: 42,
+    wheelbase: 1.32,
+    /* TRACK 1.0, and a scooter has no track at all — this is an honest accommodation, not a
+     * measurement. A real two-wheeler stays upright by counter-steering, a model this solver does
+     * not have and is not getting for one vehicle; give it the 0.4 m its wheels actually sit at and
+     * the four-wheel roll model tips it onto its roof at the first real corner (measured: 178.9
+     * degrees of roll, upside down, at the end of a single held turn). 1.0 m is the width the roll
+     * model needs to keep it on its wheels while still being much the narrowest thing in the fleet,
+     * so it leans hard and early without falling over. */
+    track: 1.0,
+    cgHeight: 0.45, // still the highest relative to its track, which is what makes it lean so readily
+    weightRear: 0.56,
+    power: 12,
+    peakTorque: 9,
+    redline: 8600,
+    cdA: 0.55,
+    rollPerG: 11.0,
+    topSpeed: 58,
+    zeroTo60: 11.5, // it will not quite get there on the flat, which is exactly right
+    ratios: [3.2, 1.0], // a twist-and-go has no gears; two ratios is the minimum the box accepts
+    finalDrive: 9.5,
+    wheelRadius: 0.28,
+    drive: 'rwd',
+  },
   truck: {
     name: 'Truck',
     mass: 2100,

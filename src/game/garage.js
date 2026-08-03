@@ -13,7 +13,21 @@
  * 8 km to 9 km is not the achievement that going from 1 km to 2 km was.
  */
 
-import { STEER, TYRE, BRAKE } from '../car/tuning.js';
+import { STEER, TYRE, BRAKE, BODY } from '../car/tuning.js';
+
+/* THE BODY-ROLL NUMBERS AS THE CARS WANT THEM, captured before any vehicle overwrites them.
+ *
+ * Three constants were changed together to kill the operator's "Car still wobbles left to right
+ * immensely, like a scooter", and a car that does not declare `feel.body` gets all three back
+ * exactly as tuning.js sets them. Only the Scooter asks for the old values — see its fleet entry. */
+const BODY_STOCK = {
+  rollOmega: BODY.rollOmega,
+  rollZeta: BODY.rollZeta,
+  loadTauRoll: BODY.loadTauRoll,
+  groundFollowRate: BODY.groundFollowRate,
+  rollClamp: BODY.rollClamp,
+  visualRollMul: BODY.visualRollMul,
+};
 
 /** The stock mechanical turning floor, captured before any car overwrites it. */
 const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
@@ -53,6 +67,76 @@ export const FLEET = [
     tier: 'gt',
     length: 4.0,
     feel: { comfortG: 8.2, assist: 'cruise', rearGrip: 1.0, buildRate: 3.0, brakeMul: 1.1 },
+  },
+  {
+    /* THE SCOOTER, and the wobble it was named after.
+     *
+     * Operator: "Get the old wobbly controls back and give them to a scooter you can unlock".
+     *
+     * When the cars leaned too much he wrote "Car still wobbles left to right immensely, LIKE A
+     * SCOOTER". Three numbers were changed to stop it, and `feel.body` below takes all three back —
+     * on this vehicle only, because it is the vehicle he was comparing the cars to:
+     *
+     *   rollZeta 0.85       the lean spring is UNDERdamped again, so it overshoots its target and
+     *                       swings back rather than settling — the actual mechanism of a wobble,
+     *                       measured at 1.84 roll-rate sign changes a second before it was fixed.
+     *   loadTauRoll 0.15    the target it chases is filtered less, so every small steering
+     *                       correction reaches the body instead of being smoothed away first.
+     *   groundFollowRate 45 the rate limit that stopped a wheel-probe snapping onto a road's own
+     *                       embankment shoulder is all but lifted. Not removed — the unclamped
+     *                       version demanded ~70 rad/s in a single 8 ms step and put the body
+     *                       through the terrain, which is a bug, not a feel. 45 keeps every bit of
+     *                       the darting and none of the clipping.
+     *
+     * rollClamp and visualRollMul go up with them, because an underdamped spring that is still
+     * clamped at 5.5 degrees can only wobble within a band too narrow to see from the chase camera.
+     *
+     * It is UNLOCKED, not given: 120 coins at a dealership, the cheapest thing on any forecourt,
+     * which is the right price for the joke. The 30 km streak badge is there for the unlock bar.
+     *
+     * Riding it is genuinely harder, and that is the point — `assist: 'off'` is the third rung of
+     * the aid ladder, so there is no traction control and very little stability help. */
+    id: 'scooter',
+    file: 'scooter.glb',
+    label: 'Scooter',
+    blurb: 'Wobbles left to right immensely. Cheapest thing on the forecourt, and the most fun.',
+    unlockAt: 30000,
+    price: 120,
+    tier: 'scooter',
+    length: 1.95,
+    feel: {
+      comfortG: 7.0,
+      assist: 'off',
+      rearGrip: 0.92,
+      buildRate: 4.2, // darts to full lock — a handlebar is not a steering wheel
+      brakeMul: 0.7, // two small drums, and no weight to press them into the road
+      minRadius: 3.2, // it can turn round inside a lane, which no car in the fleet can
+      body: {
+        /* THE WOBBLE, AND WHY IT IS NOT SIMPLY THE OLD NUMBERS.
+         *
+         * Restoring rollZeta 0.85 and loadTauRoll 0.15 exactly — the pre-fix values — does not
+         * reproduce the pre-fix feel on this vehicle, and the measurement says why. At 130 kg the
+         * tyre model's own slip chatter reaches the lean spring, and a lightly-damped spring
+         * chasing a lightly-filtered target rang at 24 Hz: sixty reversals in two and a half
+         * seconds at just over a degree. That is a buzz, not a wobble — nobody would call it
+         * "left to right", they would call it broken.
+         *
+         * A wobble you can SEE is about a cycle a second. So the spring is slowed rather than
+         * merely under-damped (rollOmega 5.5 against the fleet's 8.4, i.e. 0.88 Hz), its target is
+         * filtered at least as hard as a car's so the chatter never arrives, and the damping is
+         * taken well under 1 so it genuinely overshoots and comes back. Measured at 1.2 Hz with
+         * five reversals after the wheel comes back to centre, against one for every car. */
+        rollOmega: 5.5,
+        rollZeta: 0.6,
+        loadTauRoll: 0.26,
+        /* The one number kept from the old régime as-is: the ground-following rate limit that a
+         * car needs to stop it snapping onto a road's embankment shoulder. A scooter darting about
+         * over camber is the good half of the old behaviour. */
+        groundFollowRate: 45,
+        rollClamp: (13 * Math.PI) / 180,
+        visualRollMul: 1.9,
+      },
+    },
   },
   {
     /* THE PICKUP. Operator: "Add ford f150 to game".
@@ -364,6 +448,10 @@ export function applyCarFeel(car) {
    * sand-bog severity now divides by this, so the Rally takes proportionally longer to bog
    * down than the rest of the fleet instead of the number sitting there doing nothing. */
   TYRE.offRoadMul = f.offRoad || 1;
+  /* HOW MUCH THE BODY IS ALLOWED TO WOBBLE, per vehicle. Assigned from the stock values every time
+   * so switching Scooter -> anything else puts the cars back; a car that declares no `feel.body` is
+   * bit-for-bit what it was before this existed. */
+  Object.assign(BODY, BODY_STOCK, f.body || {});
   return f;
 }
 
