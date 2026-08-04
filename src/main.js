@@ -1261,6 +1261,14 @@ async function boot() {
     /* CAN THE PLANE LEAVE THE GROUND FROM HERE? Within the strip's own half-length of an
      * airfield's centre, or with everything unlocked. AIRFIELD_HALF_LEN is the same 190 m the
      * "an airfield — P to take off" prompt already uses, so the message and the rule agree. */
+    /* Is there a made surface under the wheels right now? `surface()` is the same query the car's
+     * own solver reads for grip, so this cannot disagree with what the driver feels — asking a
+     * second opinion about "is this tarmac" is how the road and the drivable road drifted apart
+     * once already (see roadCamber's note in world/roads.js). */
+    const onHardSurface = () => {
+      const s = car.terrain.surface(car.x, car.z);
+      return !!s && s.onRoad > 0.5;
+    };
     const canTakeOffHere = () => {
       if (cheatOn()) return true;
       const near = props.nearestAirfield ? props.nearestAirfield(car.x, car.z) : null;
@@ -1273,6 +1281,17 @@ async function boot() {
         hud.say('back in the car', 2.4);
       } else if (!plane.unlocked) {
         hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} away`, 3.4);
+      } else if (!onHardSurface()) {
+        /* AND THE WHEELS HAVE TO BE ON SOMETHING HARD. Operator: "You should also be required to
+         * run this on tarmac in some way to take off. Right now I'm just running away through
+         * trees in the forest and it seems to make no difference whatsoever."
+         *
+         * The airfield rule below is about WHERE you are; this is about WHAT IS UNDER YOU, and the
+         * two are not the same — an airfield's own grass is inside the strip's radius. `?unlock=123`
+         * deliberately does NOT bypass this one, unlike the airfield rule: the complaint was
+         * precisely that a roll through a forest worked, and a cheat that unlocks the aeroplane is
+         * not a cheat that makes soft ground hard. */
+        hud.say('you need tarmac under the wheels to get airborne — find the strip or a road', 3.6);
       } else if (!canTakeOffHere()) {
         /* AN AEROPLANE LIVES AT AN AIRFIELD. Operator: "unlock /switch should require airport
          * (unless "all unlock" is on)".
