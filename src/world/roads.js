@@ -1959,6 +1959,55 @@ export function findCrossings(edges) {
 
 const _seg = { d: 0, t: 0, x: 0, z: 0 };
 
+/* A TURNING HEAD IS PAVED GROUND, SO THE CARVE HOLDS IT FLAT.
+ *
+ * Operator, four times: "roads still end without a closure" — and every closure was there.
+ * tools/diag-terminus.mjs T1b/T8/T9 report 0 dead ends without a head, 0 heads with fewer than two
+ * bollards and 0 without a board, over 106 heads. What it also reported, and what the eye actually
+ * sees, is T5 and T6: the drawn head flying up to 0.157 m above the ground it is laid on, and its
+ * rim falling away from the road beside it. A paved lip hanging over an embankment is what a road
+ * that "just stops" looks like.
+ *
+ * The renderer already searches TERMINUS_RADII downwards trying to hold that fall under 0.16 m,
+ * but on a steep sidehill the search bottoms out at 1.0 — no widening at all — and the fall is
+ * still over a metre, because `carve()` holds the ground DEAD FLAT only inside the carriageway
+ * half-width and batters everything past it at 1:1.6. The head cannot be built level on ground the
+ * carve never levelled.
+ *
+ * So the ground is told about the head. Within a head's radius of an end that genuinely stops, the
+ * flat shelf grows to the head's own footprint and the batter starts from there. 1.55 is the same
+ * number as the renderer's widest radius, so the paved disc and the level ground are one disc by
+ * construction rather than two numbers that happen to agree.
+ *
+ * MEASURED: the chord sag over every head goes 0.157 m -> 0.0146 m worst, and the triangles flying
+ * above the 0.10 m of lift the overlay has go 44 of 51092 -> 0 of 42836. What it does NOT fix is
+ * T6's single outlier at (31213,-31823), 31 km out, which stays at ~1.2 m: that head sits on
+ * ground steep enough that a level disc of any size has a rim well below the road, and the honest
+ * answer there is a smaller head, not a flatter one. Recorded rather than hidden.
+ *
+ * Blended, not switched: a hard `if (dEnd < r)` would put a step in the carve exactly along the
+ * circle where the test flips, which is the failure this file keeps having. */
+const TERMINUS_PAVE = 1.55;
+/**
+ * The carriageway half-width to use at (x,z) — the edge's own, except near an end that stops dead,
+ * where it opens out to the turning head's footprint. Falls back to `e.width * 0.5` for any edge a
+ * caller built without `deadEnds` (RoadField fills it in; a bare edge from `edgesInBox` has none),
+ * so this can never be the reason a query changes its answer.
+ */
+function terminusHalf(e, x, z) {
+  const half = e.width * 0.5;
+  const ends = e.deadEnds;
+  if (!ends || !ends.length) return half;
+  const r = half * TERMINUS_PAVE;
+  let best = Infinity;
+  for (let i = 0; i < ends.length; i += 2) {
+    const d = Math.hypot(x - ends[i], z - ends[i + 1]);
+    if (d < best) best = d;
+  }
+  if (best >= r * 1.4) return half;
+  return lerp(r, half, smoothstep(r * 0.6, r * 1.4, best));
+}
+
 /** Deepest fill or cutting a road is allowed to ask the land for, in metres. */
 const MAX_EARTHWORK = 18;
 /* THE SAME BUDGET, DOUBLED, BUT ONLY WHERE TWO ROADS ACTUALLY CROSS.
@@ -2646,6 +2695,15 @@ export class RoadField {
       const p = canonicalProfile(e, tag, seed, landHeight, waterAt);
       e.y.set(p.y);
       e.water.set(p.water);
+      /* WHERE THIS EDGE STOPS DEAD, in world metres — [x,z,...], empty for a road that carries on
+       * at both ends. `carve` widens its flat shelf to a turning head's footprint at these points;
+       * see TERMINUS_PAVE. Computed once per field rather than per query because `edgeDeadEnds` is
+       * roads.js's own live-degree rule and the answer cannot change while a field is alive. */
+      const dead = edgeDeadEnds(e, seed, tag);
+      const n = e.pts.length;
+      e.deadEnds = [];
+      if (dead[0]) e.deadEnds.push(e.pts[0], e.pts[1]);
+      if (dead[1]) e.deadEnds.push(e.pts[n - 2], e.pts[n - 1]);
     }
   }
 
@@ -2769,7 +2827,7 @@ export class RoadField {
     let landH = NaN;
 
     for (const e of this.edges) {
-      const half = e.width * 0.5;
+      const half = terminusHalf(e, x, z);
       // The widest this edge could possibly reach: its shoulder grows with how far the road
       // sits above or below the land, and 60 m covers the tallest embankment the smoothing
       // can produce.
