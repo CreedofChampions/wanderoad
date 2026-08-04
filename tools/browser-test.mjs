@@ -1287,20 +1287,56 @@ async function main() {
      * carriageway. If no such moment exists the check fails on its own precondition, loudly,
      * instead of quietly measuring the wrong thing. This is how tools/diag-o2.mjs already does
      * it — that harness reports "peak onRoad DURING the leg" for exactly this reason. */
+    /* THE SAME PATCH OF GROUND EVERY RUN, AND ONE THE CAR CAN ACTUALLY DRIVE ON.
+     *
+     * This check used to cast its sixteen rays from wherever the PREVIOUS check left the car, so
+     * every run picked a different patch and the result went bimodal: measured on unchanged code,
+     * 30.4 / 31.1 / 31.5 / 37.1 / 37.3 / 37.4 / 37.4 km/h against a threshold near 35.3. The same
+     * build reported 40/40 or 39/40 at random, which makes every claim the suite supports a coin
+     * toss. That is a fault in the harness, not in the game.
+     *
+     * Two changes, and NEITHER touches the ratio being asserted — the bar is exactly what it was:
+     *
+     *   The rays start from a FIXED anchor rather than from the car, so the patch is a property of
+     *   the world and the seed instead of a property of what ran before.
+     *
+     *   The landing point has to be DRIVABLE. A previous attempt pinned the search to spawn and
+     *   was reverted because the car came down somewhere it could not move and reported 0.1 km/h —
+     *   which passes the check for entirely the wrong reason. So a candidate is rejected unless the
+     *   ground around it is gentle enough to accelerate on: four probes at 6 m, worst rise under
+     *   2.4 m, i.e. about 21 percent. Sand is NOT excluded; excluding it would bias the measurement
+     *   towards the fast mode and quietly make the check easier, which is the thing this must not
+     *   do. Whatever ground the rule picks, it picks the same ground every time.
+     */
     await evalJs(`(() => { const W = window.WANDEROAD; const c = W.car;
       const t = c.terrain;
+      // The anchor: the world's own spawn, which every other check in this file is relative to.
+      const ax = -32, az = -1094;
+      const drivable = (x, z) => {
+        const y0 = t.height(x, z);
+        let worst = 0;
+        for (let k = 0; k < 4; k++) {
+          const th = (k / 4) * Math.PI * 2;
+          worst = Math.max(worst, Math.abs(t.height(x + Math.cos(th)*6, z + Math.sin(th)*6) - y0));
+        }
+        return worst < 2.4;
+      };
       let best = null;
       for (let a = 0; a < 16; a++) {
         const yaw = (a / 16) * Math.PI * 2;
-        let x = c.x, z = c.z, d = 0;
+        let x = ax, z = az, d = 0;
         for (let i = 0; i < 60; i++) {
           x += Math.cos(yaw)*20; z -= Math.sin(yaw)*20;
           const q = t.roads.query(x, z);
           d = isFinite(q.d) ? q.d : 1e6;
           if (d > 90) break;
         }
+        if (!drivable(x, z)) continue;
         if (!best || d > best.d) best = { x, z, yaw, d };
       }
+      // If every ray landed somewhere unusable, fall back to the old behaviour rather than
+      // skipping the check — a check that quietly does not run is worse than a flaky one.
+      if (!best) best = { x: ax, z: az, yaw: 0, d: 0 };
       c.placeAt(best.x, best.z, best.yaw);
       c.vx = c.vy = c.vz = 0; c.yawRate = 0; c.gear = 1; })()`);
     await sleep(600);
