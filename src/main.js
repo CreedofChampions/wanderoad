@@ -32,6 +32,11 @@ import { Grass } from './render/grass.js';
 import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
+/* `edgeDeadEnds` is roads.js's own live-degree rule for "does this edge stop here". It is imported
+ * for TELEMETRY ONLY — exposed on window.WANDEROAD below so a diagnostic can find a real turning
+ * head instead of guessing at endpoint proximity, which is exactly how a B28 proof clip came out
+ * filming an ordinary stretch of road. The game itself never calls it. */
+import { edgeDeadEnds } from './world/roads.js';
 import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
 import { resumeFor, saveSession, spotIsSafe, AUTOSAVE_S } from './game/session.js';
 import {
@@ -2017,6 +2022,18 @@ async function boot() {
      * about a control reaching a surface, and the only honest way to check it is to press N and
      * ask the WINDOW whether it was told to skip. See tools/diag-radio.mjs and B25. */
     musicPanel,
+    /* Roads that STOP, as the world itself decides it — [{x, z, edge}], derived from the streamed
+     * edge list with roads.js's own rule rather than a re-derivation. See the import note. */
+    deadEnds: () => {
+      const out = [];
+      for (const e of car.terrain.roads.edges) {
+        const dead = edgeDeadEnds(e, SEED);
+        const n = e.pts.length;
+        if (dead[0]) out.push({ x: e.pts[0], z: e.pts[1], into: [e.pts[2], e.pts[3]], key: e.key });
+        if (dead[1]) out.push({ x: e.pts[n - 2], z: e.pts[n - 1], into: [e.pts[n - 4], e.pts[n - 3]], key: e.key });
+      }
+      return out;
+    },
     /* The aeroplane, so a diagnostic can ask whether it is flying and how high — the same reason
      * every other live object is on this handle. */
     plane,
