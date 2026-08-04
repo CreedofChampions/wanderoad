@@ -22,6 +22,9 @@ import {
   waterLevelAt,
 } from './biomes.js';
 import { RoadField, roadCamber } from './roads.js';
+/* The petrol-station apron, so `surface()` can call a forecourt a made surface — see the note where
+ * `onRoad` is set. props.js already imports nothing from terrain.js, so this direction is safe. */
+import { nearestStation, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH, STATION_OFFSET } from './props.js';
 import { landmarkView } from './landmarks.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
 /* The raw land and its water moved to field.js so that roads.js can read them directly —
@@ -332,6 +335,44 @@ export class Terrain {
 
     const c = this.roads.carve(x, z, this._carve);
     o.onRoad = c.edge;
+    /* A FORECOURT IS A MADE SURFACE TOO, and this line only ever knew about the ROAD CARVE.
+     *
+     * Operator, twice: "the road up to the gas station still does not work at all". Measured at
+     * five stations — the centreline passes 18.3 to 20.0 m away and `onRoad` reads
+     * 1.0 1.0 0.0 0.0 0.0 … from the kerb to the pumps, so the hard surface stops about two metres
+     * past the kerb and you cross bare ground to a forecourt that is DRAWN as tarmac. The apron and
+     * its access spur are built by props.js; nothing ever told the terrain they exist, so every
+     * system that asks — grip, roughness, the off-road warning, the streak — treated a petrol
+     * station as a field. Same class as the airstrip that did not count as tarmac for take-off (F39).
+     *
+     * The station is cached: `nearestStation` scans a box, and a query point moves a few metres
+     * between frames while the answer does not. */
+    {
+      const st =
+        this._apron && Math.hypot(x - this._apron.x, z - this._apron.z) < 400
+          ? this._apron
+          : (this._apron = nearestStation(x, z, this.seed, 400));
+      if (st) {
+        /* The apron's own rectangle in the station's frame — the same half-dimensions props.js lays
+         * the slab with, so the drivable patch and the drawn patch are one rectangle rather than two
+         * numbers that agree for now. */
+        const dx = x - st.x;
+        const dz = z - st.z;
+        const ca = Math.cos(-(st.yaw || 0));
+        const sa = Math.sin(-(st.yaw || 0));
+        const lx = dx * ca - dz * sa;
+        const lz = dx * sa + dz * ca;
+        if (Math.abs(lx) <= STATION_APRON_HALF_WIDTH && Math.abs(lz) <= STATION_APRON_HALF_DEPTH) o.onRoad = 1;
+        /* AND THE SPUR THAT JOINS IT TO THE ROAD. Teaching `surface()` about the apron alone left a
+         * band of bare ground between the kerb and the slab — measured 1.0 1.0 0.0 0.0 0.0 0.0 1.0
+         * 1.0 1.0 1.0 1.0 from kerb to pumps, i.e. the forecourt became drivable and the way onto it
+         * did not, which is the same complaint one step further in. The corridor is a lane's width
+         * about the station's own axis, reaching STATION_OFFSET (the distance props.js sets a station
+         * back from the centreline) plus a little for the kerb itself. Both signs of `lz`, because
+         * which way the station faces is props.js's business and this does not need to know. */
+        else if (Math.abs(lx) <= 4.5 && Math.abs(lz) <= STATION_OFFSET + 5) o.onRoad = 1;
+      }
+    }
     o.roadDist = c.d;
     /* The carriageway's own width here. `carve` has always computed it (roads.js blends it across
      * overlapping edges) and it was simply never put on the record, so every caller that wanted "how
