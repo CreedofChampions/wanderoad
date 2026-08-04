@@ -1171,6 +1171,32 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0, onlyTier) {
  * from disagreeing about whether a lane exists.
  */
 const CROSS_CULL_DEV = 32; // degrees off square; beyond this the lane yields rather than bends
+/* AND A LANE MAY NOT CROSS AN ARTERIAL ON TOP OF ITS OWN LATTICE NODE.
+ *
+ * This is the answer to B2's last survivors, and it is not a levelling problem at all — eight
+ * attempts aimed at levelAgainst (ramp length, capture radius, earthwork budget, feather shape,
+ * respect masks) moved the number by nothing, because the levelling was already working.
+ *
+ * Instrumented at the worst one, (-1459,-1562) on the shipped seed: the lane's sample 22 m along
+ * was pulled 22.2 m DOWN onto the arterial exactly as intended, with full authority and no clamp
+ * binding. Sample 0 is the lane's own lattice node, and a node cannot move — every other edge
+ * meeting there is pinned to the same height, which is what diag-seam's S3 measures and what
+ * killed BACKLOG attempts #3/#4/#5. The crossing falls BETWEEN those two samples, 18.6 m from the
+ * pinned one, so the polyline simply interpolates and the crossing point rides 3.94 m high.
+ *
+ * Nothing that levels roads can fix that, and the alternative — putting a sample on the crossing —
+ * would meet the arterial by asking the lane for a 24 m drop in 18.6 m, a 128% grade, which is a
+ * worse road than the step is. The honest answer is the one this file already takes for a crossing
+ * that is too far off square: a lane that cannot make a junction here does not make one. Measured
+ * over five seeds and 121 lane-x-arterial crossings, culling at 40 m removes the four worst
+ * mismatches (3.94, 3.92, 1.87 and 1.74 m — every one over 1.7 m) and costs six crossings that
+ * were level. The 1.0–1.3 m tail sits 114–400 m from any node and is a different question.
+ *
+ * 40 m: the four bad ones are at 10.4, 18.6, 34.8 and 38.0 m, and the nearest LEVEL crossing that
+ * this also removes is at 3.9 m — i.e. there is no clean gap to cut in, so the number is set at
+ * the far edge of the failures rather than pretending one exists. Same units and same spirit as
+ * LEVEL_END_KEEP, which is how much road the feather already refuses to spend near a node. */
+const CROSS_CULL_NODE = 40;
 const _cullCache = new Map();
 function crossesArterialBadly(i, j, dir, tier, seed, tag) {
   if (tier !== 1) return false; // arterials never yield
@@ -1179,10 +1205,26 @@ function crossesArterialBadly(i, j, dir, tier, seed, tag) {
   if (hit !== undefined) return hit;
   const base = baseGeomFor(i, j, dir, tier, seed);
   const arterials = geomsInBox(base.minX, base.minZ, base.maxX, base.maxZ, seed, CROSS_PAD, baseGeomFor, tag, 0);
+  /* This lane's own two lattice nodes, in world metres — the pins a crossing may not sit on top
+   * of. Read from `nodePos` rather than from the base polyline's ends so it is the same number
+   * `pinToNodes` uses; a base shape's first point IS the node, but saying so twice is how the two
+   * drift apart. */
+  const _n0 = [0, 0];
+  const _n1 = [0, 0];
+  nodePos(i, j, tier, seed, _n0);
+  nodePos(dir === 0 ? i + 1 : i, dir === 0 ? j : j + 1, tier, seed, _n1);
   let bad = false;
   for (const c of findCrossings([base, ...arterials])) {
     if (c.a !== base && c.b !== base) continue;
     if (c.deviationDeg > CROSS_CULL_DEV) {
+      bad = true;
+      break;
+    }
+    // See CROSS_CULL_NODE: too close to one of this lane's own pins to be levelled at all.
+    if (
+      Math.hypot(c.x - _n0[0], c.z - _n0[1]) < CROSS_CULL_NODE ||
+      Math.hypot(c.x - _n1[0], c.z - _n1[1]) < CROSS_CULL_NODE
+    ) {
       bad = true;
       break;
     }
