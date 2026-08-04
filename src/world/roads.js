@@ -1478,6 +1478,180 @@ function squareCrossings(base, seed, tag) {
   let cursor = -1; // last index of `src` already written to `out`
   let bent = false;
 
+  /* ── MERGED WINDOWS (hypothesis 7, 4 Aug) ──────────────────────────────────────────────────
+   *
+   * docs/BACKLOG.md, after hypothesis 6 was built and reverted: "the remaining untried half is
+   * MERGING overlapping windows into a single correction that squares both crossings at once,
+   * which does not create a large lone bend and so does not obviously walk into the same trap."
+   *
+   * The trap being avoided is recorded twice in this file — the asymmetric window and the
+   * severity-first order BOTH improved the mean and made the WORST crossing worse, because each
+   * gives one crossing a big lone window, and bending a long stretch hard swings a nearby stretch
+   * into near-parallel with something else.
+   *
+   * What the old loop did with a collision: `if (kc <= cursor) continue` dropped the second
+   * crossing ENTIRELY, and the window cap on the line below handed each of two near neighbours
+   * half the gap between them. So in a busy area the crossings that most need squaring are
+   * exactly the ones that get nothing — which is why widening the window never moved the mean
+   * (it buys more for the crossings that still fit and drops more of the ones that no longer do).
+   *
+   * Now: crossings whose windows overlap are one CLUSTER, and a cluster is corrected by ONE
+   * chain of hermites that passes through EVERY crossing in it, each with its own target tangent.
+   * No crossing is dropped, and no crossing gets a lone oversized bend — the room between two
+   * crossings is shared by the segment that joins them instead of being split down the middle.
+   *
+   * A cluster of one is bit-identical to the old two-segment path, so this can only differ where
+   * windows actually collided. */
+  const want = [];
+  for (const m of mine) {
+    const kc = clamp(Math.round(m.ka), 1, n - 2);
+    const thetaM = Math.atan2(m.mx, m.mz);
+    const thetaO = Math.atan2(m.ox, m.oz);
+    let raw = (thetaM - thetaO) % Math.PI;
+    if (raw <= -Math.PI / 2) raw += Math.PI;
+    else if (raw > Math.PI / 2) raw -= Math.PI;
+    const delta = raw >= 0 ? Math.PI / 2 - raw : -Math.PI / 2 - raw;
+    if (Math.abs(delta) < 1e-4) continue; // already square
+    const desiredM = clamp(24 + Math.abs(delta) * 320, 24, 420);
+    const win = Math.max(2, Math.round(desiredM / Math.max(base.span, 1e-3)));
+    if (want.length && kc === want[want.length - 1].kc) continue; // two crossings on one sample
+    want.push({ kc, delta, win, mx: m.mx, mz: m.mz });
+  }
+  if (!want.length) return base.pts;
+
+  /* Group into clusters: the next crossing joins this one when its window would start before
+   * this one's ends. Transitive by construction, walking left to right. */
+  const clusters = [];
+  for (const w of want) {
+    const last = clusters.length ? clusters[clusters.length - 1] : null;
+    if (last && w.kc - w.win <= last[last.length - 1].kc + last[last.length - 1].win) last.push(w);
+    else clusters.push([w]);
+  }
+
+  for (let ci = 0; ci < clusters.length; ci++) {
+    const cl = clusters[ci];
+    const first = cl[0];
+    const last = cl[cl.length - 1];
+    /* Room either side of the CLUSTER, not of each crossing: clamped by this edge's own nodes,
+     * by whatever the previous cluster already consumed, and by half the gap to the next cluster
+     * (the same rule the old loop applied between neighbouring crossings). */
+    let winL = Math.min(first.win, first.kc - Math.max(cursor, 0));
+    let winR = Math.min(last.win, n - 1 - last.kc);
+    if (ci < clusters.length - 1) {
+      const nextK = clusters[ci + 1][0].kc;
+      winR = Math.min(winR, Math.floor((nextK - last.kc) * 0.5));
+    }
+    if (winL < 2 || winR < 2) continue; // no room for this cluster at all
+
+    const k0 = first.kc - winL;
+    const k1 = last.kc + winR;
+    const p0x = src[k0 * 2],
+      p0z = src[k0 * 2 + 1];
+    const p1x = src[k1 * 2],
+      p1z = src[k1 * 2 + 1];
+
+    // The tangent the untouched curve already has at each end of the window — forward/backward
+    // differences into `src`, which this pass never writes to, so always safe to read.
+    let d0x = src[(k0 + 1) * 2] - p0x,
+      d0z = src[(k0 + 1) * 2 + 1] - p0z;
+    let l = Math.hypot(d0x, d0z) || 1;
+    d0x /= l;
+    d0z /= l;
+    let d1x = p1x - src[(k1 - 1) * 2],
+      d1z = p1z - src[(k1 - 1) * 2 + 1];
+    l = Math.hypot(d1x, d1z) || 1;
+    d1x /= l;
+    d1z /= l;
+
+    /* The chain: P0 -> C1 -> C2 -> ... -> P1. Interior knots are the crossings, each carrying its
+     * own target tangent; the two ends keep the tangent the untouched curve already had, which is
+     * what makes the join invisible. The backoff is applied to the WHOLE cluster at once, so the
+     * chain is either safe everywhere or backed off everywhere — a per-crossing backoff would let
+     * one knot keep a full-strength turn while its neighbour gave up, which is the lone-bend trap
+     * again in miniature. */
+    const knots = [{ x: p0x, z: p0z, tx: d0x, tz: d0z }];
+    for (const w of cl) knots.push({ x: src[w.kc * 2], z: src[w.kc * 2 + 1], tx: w.mx, tz: w.mz, delta: w.delta });
+    knots.push({ x: p1x, z: p1z, tx: d1x, tz: d1z });
+
+    let bestRadius = -Infinity;
+    let bestT = null;
+    let bestM = null;
+    for (const df of DELTA_BACKOFF) {
+      const tans = knots.map((k, i) => {
+        if (i === 0 || i === knots.length - 1) return [k.tx, k.tz];
+        const d = k.delta * df;
+        const ca = Math.cos(d),
+          sa = Math.sin(d);
+        return [k.tx * ca + k.tz * sa, -k.tx * sa + k.tz * ca];
+      });
+      const mags = [];
+      let worst = Infinity;
+      for (let s = 0; s < knots.length - 1; s++) {
+        const a = knots[s],
+          b = knots[s + 1];
+        const chord = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+        const mm = huntTangent(a.x, a.z, b.x, b.z, tans[s][0], tans[s][1], tans[s + 1][0], tans[s + 1][1], chord);
+        mags.push(mm);
+        const r = 1 / basePeak(a.x, a.z, b.x, b.z, tans[s][0], tans[s][1], tans[s + 1][0], tans[s + 1][1], mm);
+        if (r < worst) worst = r;
+      }
+      if (worst > bestRadius) {
+        bestRadius = worst;
+        bestT = tans;
+        bestM = mags;
+      }
+      if (worst >= CROSS_SAFE_RADIUS) break;
+    }
+
+    // Unchanged src up to (but not including) k0 — k0 itself is re-emitted as the chain's first
+    // sample, which lands on it exactly (hermite at t=0 reproduces it).
+    for (let k = cursor + 1; k < k0; k++) out.push(src[k * 2], src[k * 2 + 1]);
+
+    for (let s = 0; s < knots.length - 1; s++) {
+      const a = knots[s],
+        b = knots[s + 1];
+      const chord = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+      const mm = bestM[s];
+      const steps = clamp(Math.round(chord / CROSS_SQUARE_STEP), 2, 80);
+      for (let q = s === 0 ? 0 : 1; q <= steps; q++) {
+        hermite2(a.x, a.z, bestT[s][0] * mm, bestT[s][1] * mm, b.x, b.z, bestT[s + 1][0] * mm, bestT[s + 1][1] * mm, q / steps, _bp);
+        out.push(_bp[0], _bp[1]);
+      }
+    }
+    cursor = k1;
+    bent = true;
+  }
+  if (!bent) return base.pts;
+
+  for (let k = cursor + 1; k < n; k++) out.push(src[k * 2], src[k * 2 + 1]);
+  {
+    const result = Float32Array.from(out);
+    unknot(result, result.length / 2 - 1);
+    return result;
+  }
+}
+
+/** The pre-merge single-window pass, kept for reference only — see MERGED WINDOWS above. */
+function squareCrossingsSingle(base, seed, tag) {
+  const neighbors = baseNeighbors(base, seed, CROSS_PAD, tag);
+  if (!neighbors.length) return base.pts;
+
+  const found = findCrossings([base, ...neighbors]);
+  const mine = [];
+  for (const c of found) {
+    if (c.a !== base) continue;
+    if (!outranks(c.b, base)) continue;
+    mine.push({ ka: c.ka, mx: c.ax, mz: c.az, ox: c.bx, oz: c.bz });
+  }
+  if (!mine.length) return base.pts;
+  mine.sort((p, q) => p.ka - q.ka);
+
+  const src = base.pts;
+  const n = src.length / 2;
+  const out = [];
+  let cursor = -1; // last index of `src` already written to `out`
+  let bent = false;
+
   for (let idx = 0; idx < mine.length; idx++) {
     const m = mine[idx];
     const kc = clamp(Math.round(m.ka), 1, n - 2);
