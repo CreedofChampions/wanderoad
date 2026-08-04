@@ -246,6 +246,16 @@ async function boot() {
     return;
   }
 
+  /* THE CAR-SWAP FREEZE (garage swap to the Bubble and back locked the game). Two halves, this
+   * is the first: three.js ships with `debug.checkShaderErrors` ON, and its cost is not the
+   * check — reading a program's info log forces the driver to FINISH compiling right now, on
+   * the main thread. Measured on the live beta on this machine (GTX 1060, ANGLE D3D11):
+   * getProgramInfoLog blocked 978 ms swapping out of the Bubble and 949 ms swapping in, and in
+   * two runs of five the readback never returned at all — a context loss mid-compile and a
+   * permanently wedged tab. Off in production; a dev build keeps the readable shader errors.
+   * The other half lives in swapCar: `compileAsync` before the new car enters the scene. */
+  renderer.debug.checkShaderErrors = import.meta.env.DEV;
+
   /* Operator: "people without hardware acceleration lag tremendously — detect it and let
    * them know." Two checks, one gentle dismissible notice — see src/ui/perfNotice.js for both
    * the renderer-string sniff and the fps window, and tools/diag-perf-notice.mjs for the proof
@@ -732,6 +742,11 @@ const TOWN_HERE_M = 70;
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
    * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
   let carKeyLive = carKey;
+  /* ONE SWAP AT A TIME. `carKeyLive` only advances after the awaits below, so two quick presses
+   * — V twice, or a garage click racing a V — used to run two loadCars over the same `model`:
+   * two disposes of one rig and an orphan group left in the scene. The flag simply drops the
+   * second press; the key works again the moment the first swap lands. */
+  let carSwapBusy = false;
   async function swapCar(key) {
     if (!CARS[key] || key === carKeyLive) return;
     const spec = FLEET_BY_ID[key];
@@ -739,8 +754,18 @@ const TOWN_HERE_M = 70;
       hud.say(`${spec.label} unlocks at ${(spec.unlockAt / 1000).toFixed(1)} km`, 3);
       return;
     }
+    if (carSwapBusy) return;
+    carSwapBusy = true;
     try {
       const next = await loadCar({ car: key, paint: me.look?.paint ?? 0, base: new URL('./models/cars/', location.href).href });
+      /* The second half of the freeze fix: cook the new car's programs BEFORE it enters the
+       * scene. `compileAsync` rides KHR_parallel_shader_compile, so the driver compiles on its
+       * own threads while the OLD car keeps drawing; by the time this resolves, the first
+       * painted frame has no compile left to pay for. Without it the swap frame paid the whole
+       * bill at first draw — over a second of long tasks per swap, measured in
+       * tools/diag-carswap-freeze.mjs. Scene and camera are passed so the variant compiled is
+       * the variant rendered: lights and fog defines differ otherwise and the stall comes back. */
+      await renderer.compileAsync(next.group, camera, scene);
       scene.remove(model.group);
       model.dispose?.();
       model = next;
@@ -794,6 +819,8 @@ const TOWN_HERE_M = 70;
     } catch (err) {
       console.error('[car] swap failed', err?.message ?? err);
       hud.say('that one would not load', 2.5);
+    } finally {
+      carSwapBusy = false;
     }
   }
 
