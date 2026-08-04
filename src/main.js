@@ -48,7 +48,7 @@ import {
   SHOWROOM_HALF_W, AIRFIELD_HALF_LEN, nearestAirfield as worldNearestAirfield } from './world/props.js';
 import { Walker, EYE, ENTER_R, LEASH } from './game/walk.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
-import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
+import { BIOME_SHORT, setBiomeBias, waterLevelAt } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
 import { loadCar, loadGhostCar, CARS, CAR_KEYS } from './car/loadedCar.js';
 import { Vehicle } from './car/vehicle.js';
@@ -2139,6 +2139,15 @@ async function boot() {
      * about a control reaching a surface, and the only honest way to check it is to press N and
      * ask the WINDOW whether it was told to skip. See tools/diag-radio.mjs and B25. */
     musicPanel,
+    /* The one water-height function this game has, so a diagnostic can ask where the SEA SURFACE is
+     * at a point — `surface()` hands back the biome weights and the ground, and turning those into a
+     * water height is `waterLevelAt`'s job. Exposed for the same reason `deadEnds` is: a probe that
+     * has to re-derive this ends up inventing a helper that does not exist, which is exactly how the
+     * first B66 clip came back empty. Telemetry only. */
+    seaLevelAt: (x, z) => {
+      const s = car.terrain.surface(x, z);
+      return s && s.w ? waterLevelAt(s.w, s.y) : null;
+    },
     /* Roads that STOP, as the world itself decides it — [{x, z, edge}], derived from the streamed
      * edge list with roads.js's own rule rather than a re-derivation. See the import note. */
     deadEnds: () => {
