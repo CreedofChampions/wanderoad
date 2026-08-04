@@ -788,6 +788,31 @@ export class Menu {
     let ri = rows.findIndex((r) => r.contains(active));
     let bi = ri >= 0 ? buttons(rows[ri]).indexOf(active) : -1;
     if (ri < 0) {
+      /* FOCUS IS SOMEWHERE THIS WALKER DOES NOT KNOW — AND THAT IS NOT AN INVITATION TO MOVE IT.
+       *
+       * This branch used to seed at row 0 unconditionally, and it is the whole of B19: "drive
+       * togetheer buttons seem to push u to top of screen and do nothing else".
+       *
+       * `rows` is `.sheet .row, .sheet .foot`. The "Drive together" panel is a `<div id="invite">`
+       * and is neither, so pressing its Copy button gives `ri = -1` — and padNav, which runs every
+       * frame while the Garage is open, immediately took that as "nothing is focused", pulled the
+       * focus back to the first row and scrolled the sheet to it. Traced on the live beta, with the
+       * stack, in the millisecond after mousedown:
+       *
+       *   pointerdown on BUTTON[Copy]  top=2073
+       *   focusout BUTTON[Hatch] -> focusin BUTTON[Copy]      (the browser does the right thing)
+       *   focusout BUTTON[Copy]  -> focusin BUTTON[Hatch]  top=519   (padNav takes it straight back)
+       *   scrollIntoView(BUTTON[Hatch]) at padNav
+       *   mouseup on DIV[Garage] -> click on DIV[Garage]
+       *
+       * The sheet jumps 1554 px between press and release, so the button is no longer under the
+       * cursor and the click lands on the container: the view moves AND the handler never runs,
+       * which is both halves of his sentence from one cause.
+       *
+       * The guard below ("nothing asked for; do not steal a focus the player set with Tab") already
+       * states the correct rule — it just never covered this branch. A pad player still gets a
+       * highlight the moment they ask for one, because seeding is what dy/dx/confirm do here. */
+      if (!nav.dy && !nav.dx && !nav.confirm) return;
       ri = 0;
       bi = 0;
     } else if (nav.dy) {
