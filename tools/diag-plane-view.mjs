@@ -8,8 +8,8 @@
  *
  * Read that last one carefully, because it is the whole reason this file exists: he is not saying
  * the aeroplane turns the wrong way. He is saying it TURNS THE RIGHT WAY AND LOOKS WRONG. Three
- * separate fixes went into the mesh's rotation signs chasing that, and the mesh was fine every time.
- * The fault was one line in the chase camera:
+ * separate fixes went into the mesh's rotation signs chasing that, and for the first three reports
+ * the mesh was fine every time. The fault then was one line in the chase camera:
  *
  *     camera.up.set(Math.sin(plane.roll), Math.cos(plane.roll), 0)...
  *
@@ -21,6 +21,12 @@
  * PLAYER SEES: it projects the two wingtips through the live camera and asks which one is higher on
  * screen. That number cannot be argued with and does not care which of the three transforms is at
  * fault — mesh sign, euler order, or camera up.
+ *
+ * AND THE FIFTH REPORT (4 Aug: "the plane tilts to the right instead of the left, but it goes to
+ * the left") was the mesh sign after all — the camera fix had landed, and with a level horizon the
+ * mirrored roll finally showed itself plainly. This file would have caught it on the day, except
+ * its own wingtip labels carried the identical +X-is-the-right-wing error and cancelled it out.
+ * Labels corrected below; the assertions were always the honest ones.
  *
  *   node tools/diag-plane-view.mjs [url]
  *
@@ -149,7 +155,11 @@ const FLY = (code, key, ms) => `(async () => {
    * euler, the camera's position, and the camera's up vector. Screen y is +1 at the top. */
   const V = m.position.constructor;
   const at = (x, y, z) => { const v = new V(x, y, z); m.localToWorld(v); v.project(cam); return v; };
-  const R = at(4.5, 0, 0), L = at(-4.5, 0, 0), NOSE = at(0, 0, 3.5), TAIL = at(0, 0, -3.5);
+  /* WHICH TIP IS WHICH. The nose is +Z, and in a right-handed Y-up frame a body facing +Z has its
+   * RIGHT hand on -X (rotate +Z by -90 about Y and land on (-1,0,0)). The first version of this
+   * file put the right wing on +X, which flipped every wingtip verdict below and blessed a
+   * mirrored bank as correct — the same +X mistake main.js's roll sign was arguing from. */
+  const R = at(-4.5, 0, 0), L = at(4.5, 0, 0), NOSE = at(0, 0, 3.5), TAIL = at(0, 0, -3.5);
   k('keyup', ${JSON.stringify(code)}, ${JSON.stringify(key)});
   k('keyup', 'KeyW', 'w');
   const deg = (r) => +(r * 180 / Math.PI).toFixed(1);

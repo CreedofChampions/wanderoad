@@ -701,6 +701,9 @@ const TOWN_HERE_M = 70;
    * this level (padWas, offRoadFor, harbourWas...) — one place to look for "what does the loop
    * remember between frames", not two. */
   let propSpin = 0;
+  /* Whether the plane was stalling last frame — same latch idea as propSpin above, so the HUD
+   * callout below fires once on the way IN rather than every frame the wing is short of speed. */
+  let planeWasStalling = false;
 
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
    * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
@@ -1317,6 +1320,7 @@ const TOWN_HERE_M = 70;
         plane.stop();
         car.placeAt(plane.x, plane.z, plane.yaw);
         hud.say('back in the car', 2.4);
+        planeWasStalling = false; // the next flight starts with a clean slate for the callout below
       } else if (!plane.unlocked) {
         hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} away`, 3.4);
       } else if (!onHardSurface()) {
@@ -1556,6 +1560,12 @@ const TOWN_HERE_M = 70;
         throttle: cmd.throttleRaw,
         brake: cmd.brake,
       });
+      /* ONE GENTLE LINE ON THE WAY IN, not a klaxon — this is a cozy game, not a warning system.
+       * plane.state.stalling is already there for the taking; latched on planeWasStalling so it
+       * says its piece once per stall entered rather than once per frame the wing is short. */
+      const st = plane.state;
+      if (st.stalling && !planeWasStalling) hud.say('stalling — nose down for speed', 2.6);
+      planeWasStalling = st.stalling;
       car.placeAt(plane.x, plane.z, plane.yaw);
     }
 
@@ -1795,19 +1805,26 @@ const TOWN_HERE_M = 70;
        *
        * Reasoning about handedness is how this got backwards; the signs below are now measured.
        * See the B54 note on the rotation.set line itself for the numbers that settled it. */
-      /* ROLL IS NOT NEGATED, AND PITCH IS — they are different, and the comment above used to claim
-       * both were confirmed on film when neither clip was ever taken. B54, measured on the live
-       * beta holding A for 4.2 s: heading change +6 deg (positive is LEFT, the car's convention),
-       * model roll +21 deg, and the MESH at -21 deg. The aeroplane was turning left with its right
-       * wing dropped — "it looks left but goes right", exactly as reported, three times.
+      /* ROLL IS NEGATED, EXACTLY LIKE PITCH — and the comment that used to argue otherwise made
+       * the one mistake this line keeps inviting: it put the right wing on +X. Face along +Z in a
+       * right-handed Y-up frame and your right hand is on -X (rotate +Z by -90 about Y and land on
+       * (-1,0,0) — the same arithmetic that makes the car's yaw work). So a positive rotation
+       * about Z, which carries +X towards +Y, lifts the LEFT wing: that is a bank to the RIGHT on
+       * screen. The model means a bank to the LEFT by a positive roll — bench-plane's measured
+       * convention, +roll yaws the nose left — so the mesh takes the NEGATED model roll, the same
+       * way it already takes the negated pitch.
        *
-       * Why they differ: the nose is +Z and the right wing is +X. A positive rotation about X
-       * carries +Z towards -Y, so the nose goes DOWN — and the model means climbing by a positive
-       * pitch, so pitch must be negated. A positive rotation about Z carries +X towards +Y, so the
-       * RIGHT WING GOES UP, which is a bank to the LEFT — and the model already means a left bank
-       * by a positive roll (bench-plane asserts left.roll > 0, "banks INTO the turn"). Same sign,
-       * so roll must NOT be negated. One of the two axes needed flipping and both got flipped. */
-      planeMesh.rotation.set(-plane.pitch, plane.yaw, plane.roll, 'YXZ');
+       * The empirical anchor, so nobody re-argues this from handedness again. Operator, 4 Aug,
+       * on the live build carrying `plane.roll` unnegated: "when i go left on the stick, the
+       * plane tilts to the right instead of the left, but it goes to the left." Motion correct,
+       * picture mirrored — which is precisely this line and only this line. The earlier B54 film
+       * that seemed to show the opposite was shot while B78's bug still rolled the CAMERA with
+       * the plane, and a camera that rolls by +phi paints the world as if the plane rolled by
+       * -phi: the one instrument used to judge the sign was itself inverted. That fix landed
+       * first; this sign is judged against a level horizon. tools/diag-plane-view.mjs now asserts
+       * the SCREEN truth — wingtip pixels, not pose numbers — so the next argument is with a
+       * photograph. */
+      planeMesh.rotation.set(-plane.pitch, plane.yaw, -plane.roll, 'YXZ');
       /* THE PROPELLER, ACTUALLY TURNING. Operator: "the propeller doesn't move." render/plane.js's
        * buildPropDisc() explains the render half (a blurred disc, not a faster cross); this is the
        * per-frame half. There is no rpm anywhere in this flight model — see game/plane.js, throttle
@@ -2055,7 +2072,11 @@ const TOWN_HERE_M = 70;
     post.speed = sNorm;
     post.limit = car.limit;
 
-    hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name, wallet });
+    // THE SPEEDOMETER, WHILE FLYING. Operator: "the speedometer also is non-functioning." car.kph
+    // is a held-stale number up here — the car solver is frozen the instant the plane takes the
+    // wheel (see the plane.active guard earlier in this loop) — so the HUD gets the aeroplane's
+    // own reading instead, and only while it is the thing actually moving.
+    hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name, wallet, flightKph: plane.active ? plane.kph : null });
     fuelGauge.update(dt, fuel, car);
     lootCounter.update(dt, wallet);
     post.render(scene, camera);

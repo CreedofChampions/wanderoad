@@ -382,9 +382,11 @@ export class Hud {
     this.root.style.pointerEvents = on ? 'none' : '';
   }
 
-  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null }) {
+  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null, flightKph = null }) {
     // ── speed ──
-    const kph = Math.round(car.kph);
+    // While flying, flightKph is the aeroplane's own airspeed — the car underneath is parked and
+    // frozen, so car.kph would just show whatever it read the instant before take-off forever.
+    const kph = Math.round(flightKph ?? car.kph);
     this.kph.textContent = kph;
 
     const g = car.reverse ? 'R' : Math.abs(car.speed) < 0.6 ? 'N' : String(car.gear);
