@@ -1736,9 +1736,21 @@ async function boot() {
        * +Z nose about Y by that angle lands on exactly that vector, which is why the CAR — same
        * convention, same mapping — has never had this problem.
        *
-       * The signs below were confirmed by filming it, not by reasoning: see the clips for B53/B54
-       * on the proof page. Reasoning about handedness is how it got backwards in the first place. */
-      planeMesh.rotation.set(-plane.pitch, plane.yaw, -plane.roll, 'YXZ');
+       * Reasoning about handedness is how this got backwards; the signs below are now measured.
+       * See the B54 note on the rotation.set line itself for the numbers that settled it. */
+      /* ROLL IS NOT NEGATED, AND PITCH IS — they are different, and the comment above used to claim
+       * both were confirmed on film when neither clip was ever taken. B54, measured on the live
+       * beta holding A for 4.2 s: heading change +6 deg (positive is LEFT, the car's convention),
+       * model roll +21 deg, and the MESH at -21 deg. The aeroplane was turning left with its right
+       * wing dropped — "it looks left but goes right", exactly as reported, three times.
+       *
+       * Why they differ: the nose is +Z and the right wing is +X. A positive rotation about X
+       * carries +Z towards -Y, so the nose goes DOWN — and the model means climbing by a positive
+       * pitch, so pitch must be negated. A positive rotation about Z carries +X towards +Y, so the
+       * RIGHT WING GOES UP, which is a bank to the LEFT — and the model already means a left bank
+       * by a positive roll (bench-plane asserts left.roll > 0, "banks INTO the turn"). Same sign,
+       * so roll must NOT be negated. One of the two axes needed flipping and both got flipped. */
+      planeMesh.rotation.set(-plane.pitch, plane.yaw, plane.roll, 'YXZ');
       /* THE PROPELLER, ACTUALLY TURNING. Operator: "the propeller doesn't move." render/plane.js's
        * buildPropDisc() explains the render half (a blurred disc, not a faster cross); this is the
        * per-frame half. There is no rpm anywhere in this flight model — see game/plane.js, throttle

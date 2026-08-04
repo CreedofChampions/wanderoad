@@ -166,5 +166,38 @@ console.log('\n── landing is soft, and the ground holds ──────�
   check(p.kph < 90, 'at a speed a light aircraft would land at', `${p.kph.toFixed(0)} km/h`, '< 90 km/h');
 }
 
+/* 6. THE MODEL AND THE MOTION MUST AGREE */
+console.log('\n-- the aeroplane you SEE matches the one that flies -----------------------');
+{
+  /* Operator, three times: "the plane looks left but goes right", and separately "you push K, you
+   * go up, but the plane looks down". Every check above this line passed throughout, because they
+   * all ask the SOLVER what it did - and the solver was right. What was wrong was the mesh drawn on
+   * top of it, which no bench check could see.
+   *
+   * main.js boots a game and cannot be imported here, so this is a source scan for two specific
+   * signs, with the handedness written out beside them:
+   *
+   *   PITCH IS NEGATED. The nose is +Z; a positive rotation about X carries +Z towards -Y, i.e.
+   *   nose DOWN - and the model means CLIMBING by a positive pitch. Opposite senses, sign flips.
+   *
+   *   ROLL IS NOT. The right wing is +X; a positive rotation about Z carries +X towards +Y, i.e.
+   *   right wing UP, which is a bank to the LEFT - and the model already means a left bank by a
+   *   positive roll (check 4b asserts left.roll > 0, "banks INTO the turn"). Same sense, sign stays.
+   *
+   * Both were negated for weeks, and a comment in main.js claimed film had confirmed it when no
+   * clip had ever been taken. Measured on the live beta holding A for 4.2 s: heading +6 deg (left),
+   * model roll +21 deg, mesh -21 deg - turning left with the right wing dropped. After the fix:
+   * heading +8 deg, model roll +22, mesh +22, and three frames show the left wing low. */
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  const m = /planeMesh\.rotation\.set\(([^)]*)\)/.exec(src);
+  const args = m ? m[1].split(',').map((a) => a.trim()) : [];
+  check(!!m, 'the mesh takes its pose from the flight model at all', m ? args.slice(0, 3).join(' | ') : 'none', 'found');
+  check(args[0] === '-plane.pitch', 'PITCH is negated - a +X rotation points the nose down, the model means climb', args[0] || '(none)', '-plane.pitch');
+  check(args[1] === 'plane.yaw', 'YAW is not - a +Z nose rotated about Y lands on (sin yaw, cos yaw) exactly', args[1] || '(none)', 'plane.yaw');
+  check(args[2] === 'plane.roll', 'ROLL is NOT negated - a +Z rotation lifts the RIGHT wing, which is a LEFT bank, and the model already means left by a positive roll', args[2] || '(none)', 'plane.roll');
+  check(!/confirmed by filming/.test(src), 'and nothing claims film that was never taken - that claim protected the wrong sign for weeks', 'no such claim', 'absent');
+}
+
 console.log(`\n${failures ? `${failures} PLANE CHECK(S) FAILED` : 'all plane checks passed'}\n`);
 process.exit(failures ? 1 : 0);
