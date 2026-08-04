@@ -1101,6 +1101,19 @@ export { stationForEdge };
  * can still call this directly to PROVE the spur reaches both ends geometrically, which is
  * the reason this is its own exported function rather than inlined into the renderer.
  */
+/* THE SHOWROOM'S OWN DRIVEWAY, in the same two-point form the station's spur uses so the renderer
+ * can build both with one function. The mouth sits at the edge of the host road's tarmac; the far
+ * end tucks just inside the hall's frontage so the paving runs under the doorway rather than
+ * stopping short of it and leaving a step. */
+export function showroomSpur(h) {
+  const halfW = (h.width ?? 7) * 0.5;
+  const mouthX = h.roadX + h.nx * halfW;
+  const mouthZ = h.roadZ + h.nz * halfW;
+  const doorX = h.x - h.nx * (SHOWROOM_HALF_D - 0.6);
+  const doorZ = h.z - h.nz * (SHOWROOM_HALF_D - 0.6);
+  return { mouthX, mouthZ, apronX: doorX, apronZ: doorZ };
+}
+
 export function stationSpur(st) {
   const halfW = (st.width ?? 0) * 0.5;
   const mouthX = st.roadX + st.nx * halfW;
@@ -1515,6 +1528,37 @@ const SALT_SHOWROOM = 0x5b0a;
  *
  * The result is pure in (gi, gj, seed) once a probe has been applied, so it caches exactly. Keyed
  * with the probe's presence because a probe-less answer is the unchecked candidate. */
+/* COULD A HALL BE NEAR THIS BOX — answered in arithmetic, with nothing resolved.
+ *
+ * A showroom's candidate point is a pure hash of its cell (see `_showroomForCell` just below); the
+ * road snap can then move it by at most nearestRoadPoint's own search radius, and the setback by
+ * SHOWROOM_SETBACK. So two hashes per candidate are enough to rule a region out entirely, and only
+ * a region that survives this ever pays for `showroomsInBox`.
+ *
+ * It lives HERE rather than in the caller because every constant it needs is here, and a copy of
+ * these hashes anywhere else is a copy that will drift the first time a cell size changes. Used by
+ * world/scatter.js, where calling the real query from every terrain node put the worst props frame
+ * at 13.89 ms against a bar of 12. */
+export function showroomMaybeNear(x0, z0, x1, z1, seed, reach = 0) {
+  const R = 800 + SHOWROOM_SETBACK + reach; // nearestRoadPoint's radius, the setback, the caller's own
+  const g0 = Math.floor((x0 - R) / SHOWROOM_CELL);
+  const g1 = Math.floor((x1 + R) / SHOWROOM_CELL);
+  const h0 = Math.floor((z0 - R) / SHOWROOM_CELL);
+  const h1 = Math.floor((z1 + R) / SHOWROOM_CELL);
+  for (let gj = h0; gj <= h1; gj++)
+    for (let gi = g0; gi <= g1; gi++)
+      for (let k = 0; k < SHOWROOM_TRIES; k++) {
+        const h = hash3i(gi * 7919 + k, gj * 104729, SALT_SHOWROOM, seed);
+        const h2 = hash3i(gj * 7919 - k, gi * 104729, SALT_SHOWROOM ^ 0x2b, seed);
+        const cx = (gi + 0.12 + 0.76 * (h * F32)) * SHOWROOM_CELL;
+        const cz = (gj + 0.12 + 0.76 * (h2 * F32)) * SHOWROOM_CELL;
+        const dx = cx < x0 ? x0 - cx : cx > x1 ? cx - x1 : 0;
+        const dz = cz < z0 ? z0 - cz : cz > z1 ? cz - z1 : 0;
+        if (dx * dx + dz * dz <= R * R) return true;
+      }
+  return false;
+}
+
 const _hallCache = new Map();
 export function showroomForCell(gi, gj, seed, probe = null) {
   const ck = `${gi},${gj},${seed},${probe ? 1 : 0}`;
@@ -1565,7 +1609,21 @@ function _showroomForCell(gi, gj, seed, probe = null) {
     // and not beside a forecourt dealership, which would defeat the whole point
     const st = nearestStation(x, z, seed, SHOWROOM_MIN_STATION);
     if (st && st.dist < SHOWROOM_MIN_STATION) continue;
-    return { x, z, yaw, key: `hall:${gi},${gj},${k}`, roadX: rp.x, roadZ: rp.z };
+    /* THE NORMAL AND THE ROAD WIDTH TRAVEL WITH THE HALL, so a driveway can be built to it later
+     * without re-deriving where its road is. Operator, with a screenshot: "no way in or road
+     * connection" — a showroom 46 m off a road with nothing joining the two is a building in a
+     * field. Same three numbers a station carries for exactly the same reason (see stationSpur). */
+    return {
+      x,
+      z,
+      yaw,
+      key: `hall:${gi},${gj},${k}`,
+      roadX: rp.x,
+      roadZ: rp.z,
+      nx: nx * side,
+      nz: nz * side,
+      width: rp.width ?? 7,
+    };
   }
   return null;
 }

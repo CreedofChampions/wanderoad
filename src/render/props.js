@@ -36,7 +36,7 @@ import {
   warmOne,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
   SHOWROOM_SLOTS,
-  showroomsInBox, hallSpots, HALL_BAYS, HALL_DOOR, SHOWROOM_HALF_W, SHOWROOM_HALF_D,
+  showroomsInBox, showroomSpur, hallSpots, HALL_BAYS, HALL_DOOR, SHOWROOM_HALF_W, SHOWROOM_HALF_D,
 } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
 // The same freeboard the drawn road ribbon floats at, imported rather than copied: the access
@@ -2567,6 +2567,25 @@ export class Props {
       buildShowroomHall(L3, rng(hash3i(Math.round(hall.x), Math.round(hall.z), 0x5b0a, this.seed)), Math.max(0.5, hi - lo + 0.6));
       blit(M, L3, hall.x, hi, hall.z, hall.yaw, 1);
       hall.padY = hi;
+
+      /* THE DRIVEWAY. Operator, with a screenshot: "no way in or road connection". A showroom sits
+       * SHOWROOM_SETBACK (46 m) off its host road by construction, and nothing joined the two — so
+       * the building read as dropped in a field, and getting to the door meant driving over the
+       * verge. This is the SAME `buildAccessSpur` every petrol station already uses, given the
+       * hall's own mouth-and-door pair (world/props.js's `showroomSpur`), so the two structures get
+       * one driveway implementation rather than a second one that can drift.
+       *
+       * The ground probe goes with it for the reason the station's does: the paving FOLLOWS the
+       * ground the car drives on rather than spanning its two ends in a straight line over whatever
+       * is in between, which is what stops a driveway hanging in the air on sloping ground. */
+      if (Number.isFinite(hall.roadX) && Number.isFinite(hall.nx)) {
+        const sp = showroomSpur(hall);
+        const mouthY = height ? height(sp.mouthX, sp.mouthZ) : hi;
+        if (Number.isFinite(mouthY)) {
+          buildAccessSpur(M, sp.mouthX, sp.mouthZ, mouthY, sp.apronX, sp.apronZ, hi, hall.width ?? 7, height);
+        }
+      }
+
       tileHalls.push(hall);
       this.halls.push(hall);
     }
