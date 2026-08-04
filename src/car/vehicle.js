@@ -696,7 +696,22 @@ export class Vehicle {
      * it is not changing, so `groundV` is ~0 and the band stays at its original 0.06 m — the
      * water case gets the old behaviour by construction rather than by a flag. bench-boat's
      * barrier reads 0.25 m against its 1.0 m bar, unchanged from before this whole round. */
-    const band = 0.06 + clamp01(-groundV / 5) * (SUSPENSION.travel - 0.06);
+    /* THE BAND IS CAPPED, so a long-travel car can still be airborne.
+     *
+     * This rule widens the "not really airborne" band up to the full suspension travel exactly when
+     * the ground is receding fastest — which is precisely the moment you leave the lip of a jump. At
+     * the fleet's 0.22 m of travel that is a sensible anti-bounce guard. At the Warthog's 0.42 m it
+     * becomes a 42 cm dead zone: measured, the Warthog cleared a kicker that launched the Coupe for
+     * 0.15 s and reported `onGround` true for every single frame of it — the car was in the air and
+     * the game did not know, so no airborne assist, no wheels hanging, and no jump.
+     *
+     * `airBand` caps the widened part at whatever value a car says its anti-bounce guard is worth,
+     * independently of how far its springs actually move. It is undefined for every car in the fleet
+     * except the Warthog, and `?? SUSPENSION.travel` then reproduces the old expression character for
+     * character — so nothing that was not already broken changes. The Warthog sets it to 0.22, the
+     * travel this rule was originally tuned against. */
+    const bandTravel = Math.min(SUSPENSION.travel, SUSPENSION.airBand ?? SUSPENSION.travel);
+    const band = 0.06 + clamp01(-groundV / 5) * (bandTravel - 0.06);
     const airborne = gap > band;
     this.onGround = !airborne;
 
@@ -764,10 +779,48 @@ export class Vehicle {
        *
        * Clamped, because `groundY` is a terrain sample and a chunk seam or a teleport can step
        * it: ±6 m/s covers a 17% grade at 130 km/h and cannot inject an impulse worth having. */
-      const dampA = (SUSPENSION.damping * 4 * (groundV - this.vy)) / this.mass;
+      /* ONE DAMPER NUMBER IS NOT A SHOCK ABSORBER. Operator, on the off-road car: "Big springs.
+       * Shock absorption."
+       *
+       * A real damper is not symmetric, and no established vehicle model treats it as one. Bullet's
+       * `btRaycastVehicle` exposes `suspensionCompression` and `suspensionRelaxation` as two separate
+       * constants, and Rapier's `DynamicRayCastVehicleController` — the JS/WASM engine that inherits
+       * that model — exposes the same pair. Rebound is conventionally damped HARDER than bump, and
+       * that asymmetry is the whole trick: a soft spring can then swallow a hit without the car
+       * pogoing back up off it. Softening the spring alone, which is what "big springs" sounds like,
+       * produces a car that bounces for four cycles after every bump.
+       *
+       * `rate > 0` means the ground is rising into the body — the spring is compressing, so this is
+       * the bump stroke. Below zero the body is rising away from the ground and it is the rebound
+       * stroke.
+       *
+       * `dampingBump` and `dampingRebound` are deliberately NOT defined in the stock SUSPENSION
+       * table. Undefined means both fall through to `SUSPENSION.damping`, so every car that does not
+       * declare its own springs is bit-for-bit what it was before this existed — only the Warthog
+       * sets them (see its `feel.susp` in game/garage.js). */
+      const rate = groundV - this.vy;
+      const cDamp = rate > 0 ? (SUSPENSION.dampingBump ?? SUSPENSION.damping) : (SUSPENSION.dampingRebound ?? SUSPENSION.damping);
+      const dampA = (cDamp * 4 * rate) / this.mass;
       this.vy += (springA + dampA - g) * dt;
-      // A landing must not launch the car back up: kill upward rebound above 2 m/s.
-      if (this.vy > 2) this.vy = 2;
+      /* A landing must not launch the car back up: kill upward rebound above 2 m/s.
+       *
+       * BUT A RAMP IS NOT A REBOUND, and this cap could not tell the difference. Operator: "jumps
+       * that you can take that actually you can jump over." A 1.35 m kicker with a 19° face taken at
+       * 40 km/h should hand the car about 3.6 m/s upwards, which is 0.7 s of air; capped at 2 m/s it
+       * gets 0.4 s at the absolute best, and measured it was managing 0.09 s. Every jump in the game
+       * was being clipped by a rule written about landings.
+       *
+       * The two cases are physically distinct and `groundV` already separates them. `groundV` is the
+       * rate the terrain height under the car is changing, so driving UP a ramp face it is strongly
+       * POSITIVE — the ground itself is carrying the car upward. A spring rebounding after a landing
+       * happens on ground that is not moving at all, so `groundV` is ~0 there and the 2 m/s cap
+       * applies exactly as it always did.
+       *
+       * So: you may rise as fast as the ground beneath you is rising, or 2 m/s, whichever is more.
+       * That is not a licence to fly — it is a statement that the car cannot be held down by a rule
+       * about springs while the floor is genuinely lifting it. */
+      const riseCap = Math.max(2, groundV);
+      if (this.vy > riseCap) this.vy = riseCap;
     }
     this.y += this.vy * dt;
     if (this.y < rideYTip - SUSPENSION.travel) {

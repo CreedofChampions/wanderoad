@@ -18,7 +18,7 @@
  * 8 km to 9 km is not the achievement that going from 1 km to 2 km was.
  */
 
-import { STEER, TYRE, BRAKE, BODY } from '../car/tuning.js';
+import { STEER, TYRE, BRAKE, BODY, SUSPENSION } from '../car/tuning.js';
 import { MICRO_FLEET, installMicroTiers } from '../car/microPhysics.js';
 
 /* THE TWO MICRO TIERS HAVE TO EXIST WHEREVER THE FLEET DOES.
@@ -45,6 +45,30 @@ const BODY_STOCK = {
   rollClamp: BODY.rollClamp,
   visualRollMul: BODY.visualRollMul,
 };
+
+/* THE SPRINGS AS tuning.js SETS THEM, captured before any vehicle overwrites them.
+ *
+ * Operator, on the Rally: "The rally seems no different than the coupe." He was right, and this
+ * snapshot is the reason it was true. `SUSPENSION` in car/tuning.js was ONE TABLE FOR THE WHOLE
+ * FLEET — restLength 0.36, travel 0.22, stiffness 42000, damping 4200 — so the off-road car and the
+ * road car sat on identical springs and there was no number anywhere in the project that could make
+ * one of them soft. A car cannot be "made for the gravel" while riding the same rate as a coupe.
+ *
+ * The fix is the idiom this file already uses for STEER, TYRE, BRAKE and BODY, and nothing more:
+ * hold the stock values here, and let `applyCarFeel` overlay a car's own `feel.susp` on top. Every
+ * one of car/vehicle.js's seven reads of `SUSPENSION` is untouched — they keep reading the global,
+ * which now carries the springs of whichever car is being driven. A car that declares no
+ * `feel.susp` gets all six numbers back, so the rest of the fleet is bit-for-bit unchanged. */
+/* The two split-damper keys are listed FIRST, as explicit `undefined`, and that is not a stylistic
+ * choice — it is a bug that was caught by measuring rather than by reading. `Object.assign` can
+ * overwrite a key but it cannot DELETE one, so a snapshot spread from a table that has never seen
+ * `dampingBump`/`dampingRebound` cannot take them off again. Measured, before this line existed:
+ * drive the Warthog once, switch back to the Coupe, and the Coupe was left running the Warthog's
+ * bump/rebound valving (4520/6160) instead of its own 4200 — the whole fleet quietly inheriting the
+ * off-roader's shocks from the moment anybody test-drove it. Naming them here as undefined means
+ * every non-Warthog assignment puts them back to undefined, and vehicle.js's `?? SUSPENSION.damping`
+ * then falls through to the single stock number exactly as it did before any of this. */
+const SUSPENSION_STOCK = { dampingBump: undefined, dampingRebound: undefined, airBand: undefined, ...SUSPENSION };
 
 /** The stock mechanical turning floor, captured before any car overwrites it. */
 const STEER_MIN_RADIUS_DEFAULT = STEER.minRadius;
@@ -404,15 +428,70 @@ export const FLEET = [
     feel: { comfortG: 10.4, assist: 'sport', rearGrip: 0.9, buildRate: 3.2, brakeMul: 1.0 },
   },
   {
+    /* THE WARTHOG. Operator: "The rally seems no different than the coupe. In fact, they look the
+     * same as well ... Make it like the original Warthog in Halo ... a Jeep with big wheels ... Big
+     * springs. Shock absorption."
+     *
+     * He was right on both counts and they had the same two causes. It LOOKED like the Coupe because
+     * `rally.glb` was literally the Quaternius SportsCar mesh sitting next to the Coupe's NormalCar1
+     * — two low sleek road cars. It DROVE like the Coupe because (a) both declared `assist: 'sport'`,
+     * the same rung of the same ladder, and (b) `SUSPENSION` in car/tuning.js was one global table,
+     * so every car in the fleet rode identical springs and no per-car number existed that could have
+     * made this one soft.
+     *
+     * All three are now fixed in the three places they live: the mesh is authored by
+     * tools/make-warthog.mjs (0.60 m wheels, an open cockpit with a roll cage, and 0.94 m of daylight
+     * under the chassis — it cannot be mistaken for a coupe at any distance), the control set is the
+     * new `raid` rung in tuning.js's PRESETS, and the springs are `feel.susp` below.
+     *
+     * The id stays `rally`. Saved games, unlock records and `?car=rally` URLs all key off it, and
+     * renaming the id to rename the car on screen would cost somebody their garage.
+     *
+     * ── THE SPRINGS, AS ARITHMETIC RATHER THAN AS A CLAIM ────────────────────────
+     * vehicle.js's spring is `springA = stiffness * 4 * compression / mass`, so the undamped natural
+     * frequency is ω = sqrt(4k/m) and the static sag is g/ω². Putting the two cars through that:
+     *
+     *     Warthog   ω = sqrt(4·30000/2250) = 7.30 rad/s = 1.16 Hz   sag = 9.81/53.3  = 0.184 m
+     *     Coupe     ω = sqrt(4·42000/1450) = 10.76 rad/s = 1.71 Hz  sag = 9.81/115.9 = 0.085 m
+     *
+     * So the Warthog's springs are a third softer in frequency and sit more than twice as deep. Real
+     * long-travel off-road trucks run about 1.0–1.5 Hz where a sports car runs 1.5–2.0 Hz, so 1.16 Hz
+     * is on the right side of that line rather than merely "a smaller number than before".
+     *
+     * The sag matters as much as the rate: 0.184 m of the Warthog's 0.42 m of travel is used up
+     * standing still, which leaves 0.236 m of bump travel — MORE THAN THE COUPE'S ENTIRE TRAVEL OF
+     * 0.22 m. That is the number that means it can actually take a landing.
+     *
+     * Damping is split bump/rebound (see vehicle.js's damper, and the Bullet/Rapier precedent quoted
+     * there). Critical damping in this normalised form is c_crit = m·ω/2 = 2250·7.30/2 = 8213 N·s/m:
+     *     bump    4520  ->  ζ ≈ 0.55   soft, swallows the hit
+     *     rebound 6160  ->  ζ ≈ 0.75   firmer, kills the pogo on the way back up
+     * Rebound-biased, which is how a real shock is valved and why a soft car need not bounce.
+     *
+     * `restLength: 0.62` against the fleet's 0.36 is the ride height itself — this thing stands tall,
+     * and the mesh is built to match rather than the two disagreeing.
+     *
+     * `offRoad: 1.9` is the highest in the fleet (the pickup, the only other car with any, is 1.35).
+     * It feeds `TYRE.offRoadMul`, which caps how far the dune sand-bog can ever drag this car down.
+     * "The only one that is genuinely happy off the tarmac" is now a number, not a blurb. */
     id: 'rally',
     file: 'rally.glb',
-    label: 'Rally',
-    blurb: 'Made for the gravel. The only one that is genuinely happy off the tarmac.',
+    label: 'Warthog',
+    blurb: 'Big wheels, big springs, no roof. Made for the dirt, the jumps and the landings.',
     unlockAt: 20000,
     price: 180,
-    tier: 'sports',
-    length: 4.2,
-    feel: { comfortG: 11.6, assist: 'sport', rearGrip: 0.94, buildRate: 3.6, brakeMul: 1.05, offRoad: 1.35 },
+    tier: 'raid',
+    length: 4.9,
+    feel: {
+      comfortG: 7.8,
+      assist: 'raid',
+      rearGrip: 0.88,
+      buildRate: 3.0,
+      brakeMul: 0.95,
+      offRoad: 1.9,
+      minRadius: 5.0,
+      susp: { restLength: 0.62, travel: 0.42, stiffness: 30000, dampingBump: 4520, dampingRebound: 6160, airBand: 0.22 },
+    },
   },
   {
     id: 'taxi',
@@ -652,7 +731,20 @@ export function applyCarFeel(car) {
    * so switching Scooter -> anything else puts the cars back; a car that declares no `feel.body` is
    * bit-for-bit what it was before this existed. */
   Object.assign(BODY, BODY_STOCK, f.body || {});
+  applySuspFeel(car);
   return f;
+}
+
+/* THE SPRINGS OF THE CAR CURRENTLY BEING DRIVEN.
+ *
+ * Split out of `applyCarFeel` rather than left inline because src/main.js has to be able to call it
+ * on its own: `microPhysics.detach()` restores the stock `SUSPENSION` table AFTER `applyCarFeel` has
+ * run, so switching Tricycle -> Warthog would silently hand the Warthog the coupe's springs. main.js
+ * re-asserts this immediately after every `applyMicroPhysics` call for that reason. Re-asserting is
+ * six assignments and is idempotent, and the micro cars write their own tables afterwards, so
+ * nothing about the Tricycle changes. */
+export function applySuspFeel(car) {
+  Object.assign(SUSPENSION, SUSPENSION_STOCK, car?.feel?.susp || {});
 }
 
 /** Pick a car from the URL, falling back to the first one you can actually drive. */

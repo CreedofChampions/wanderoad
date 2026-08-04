@@ -264,6 +264,60 @@ export const TIERS = {
     wheelRadius: 0.40,
     drive: 'awd',
   },
+  /* ── THE RAID TIER — the Warthog ──────────────────────────────────────────────
+   *
+   * Operator: "Let's make it a Jeep with big wheels. Not like in the traditional Jeep, but more like
+   * the original Warthog. Like a big off-roading machine. Big springs. Shock absorption."
+   *
+   * The Rally used to be `tier: 'sports'` — the same tier as the Coupe — wearing the Quaternius
+   * SportsCar mesh, which is why his other sentence was "In fact, they look the same as well". It
+   * now has a tier of its own. Based on `truck` above, because a truck is the nearest thing in the
+   * fleet to a two-and-a-quarter-tonne off-roader, with four deliberate departures:
+   *
+   * 1. `track: 1.92` against the truck's 1.72 — the WIDEST in the fleet. This is the single most
+   *    important number here and it is doing a specific job. Read it against `cgHeight`:
+   *        Warthog  1.92 / 0.58 = 3.31
+   *        Truck    1.72 / 0.62 = 2.77
+   *    So the Warthog is a TALL vehicle that is nonetheless HARDER to tip than the pickup, because
+   *    the wheels are further apart than the centre of mass is high. That combination is the whole
+   *    design. Research on the Halo CE Warthog is unanimous that players remember it leaning
+   *    enormously, flying, and rolling — but CE also had no auto-recovery, and being parked on your
+   *    roof is not cozy. So: the lean is real and visible (`rollPerG` below), and the flip is not.
+   *
+   * 2. `rollPerG: 6.5`, the largest number in the fleet by 40% (the truck is 4.6, the sports car
+   *    1.7). This is the visible body lean per g of cornering. Big soft springs and a high body ARE
+   *    lean — a car on 0.42 m of travel that stayed flat would read as a bug. Paired with (1) this
+   *    is "leans like a boat, does not go over", which is the fun version of a Warthog.
+   *
+   * 3. `wheelRadius: 0.58` against the truck's 0.40 and the sports car's 0.35. The wheels are the
+   *    silhouette — the mesh (tools/make-warthog.mjs) is built at 0.60 m and scales with the body,
+   *    and this is the physics agreeing with what is drawn. It also raises the gearing at the
+   *    contact patch, which is why the ratios below are shorter than the truck's.
+   *
+   * 4. `topSpeed: 84`, a little above the truck's 78 and less than half the sports car's. It is not
+   *    a fast car and is not meant to be; it is the car that goes where the road stops. The
+   *    first-gear ratio is the longest crawler in the fleet so it out-climbs the pickup — see the
+   *    gt tier's own climb-gate note for why first gear alone is the lever that sets climbing. */
+  raid: {
+    name: 'Off-Road Raider',
+    mass: 2250,
+    izz: 3400,
+    wheelbase: 2.95,
+    track: 1.92,
+    cgHeight: 0.58,
+    weightRear: 0.48,
+    power: 240,
+    peakTorque: 150,
+    redline: 5400,
+    cdA: 1.45, // a brick with a roll cage, not a truck cab — more drag than the pickup
+    rollPerG: 6.5,
+    topSpeed: 84,
+    zeroTo60: 7.4,
+    ratios: [5.8, 3.25, 2.05, 1.45, 1.06, 0.85],
+    finalDrive: 9.6, // shorter than the truck's 12.5 because the 0.58 m wheel is doing that work
+    wheelRadius: 0.58,
+    drive: 'awd',
+  },
 };
 
 /* ── tyres ───────────────────────────────────────────────────────────────
@@ -589,6 +643,38 @@ export const PRESETS = {
   cruise: { counterSteer: 0.95, stability: 0.35, tcs: 0.4, abs: 0.8, autoGears: true, lockFloor: (10 * Math.PI) / 180, brakeMul: 1.0, airborne: 1.0 },
   sport: { counterSteer: 0.7, stability: 0.2, tcs: 0.2, abs: 0.6, autoGears: true, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
   off: { counterSteer: 0.3, stability: 0.05, tcs: 0.0, abs: 0.3, autoGears: true, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
+  /* ── RAID — the Warthog's own control set ─────────────────────────────────────
+   *
+   * Operator: "They need to have different control sets." The Rally and the Coupe both sat on
+   * `sport`, so a rung of its own is the literal answer to the literal complaint. Every number here
+   * is set against what is actually recorded about the original Halo Warthog, because he asked for
+   * that too: "Look up what people said about its control set."
+   *
+   * `lockFloor: 9°` — the big one. Every other car in this game tapers to `STEER.minAngle` (2.8°)
+   *     at speed, so at 130 km/h there is almost no wheel left. Halo CE did not do that: Bungie
+   *     designer Jaime Griesemer said linking turn rate to speed was something "we implemented in
+   *     Halo 2", and that it "made the Warthog easier to control at top speed". CE therefore had a
+   *     constant turn rate, which is the skittish, over-eager feel people remember. 9° is the middle
+   *     of that argument — the Warthog keeps real steering authority at speed where the road cars
+   *     have none, without going fully constant, because players who played CE afterwards also
+   *     called it janky and uncontrollable, and this is a cozy game.
+   *
+   * `tcs: 0.05`, `stability: 0.12`, `counterSteer: 0.5` — CE players describe the hog as "a giant
+   *     chunk of styrofoam, with blocks of ice for wheels", and a Bungie.net thread on the original
+   *     Xbox build describes "somewhat uncontrollable fishtailing" that "required more skill" before
+   *     later games damped it out. So the aids come down hard — but NOT to zero. This file's own
+   *     design rule is that a slide must be readable before it starts and catchable after, and
+   *     `hardcore` (everything at zero) is the rung that exists for people who want it gone.
+   *
+   * `airborne: 0.35` — vehicle.js scales its anti-air gravity assist by this, so most of the assist
+   *     comes off and a jump stays long and floaty. Same Bungie thread on CE hogs meeting an
+   *     explosion: "air born. Big air. Flip and rolls." The jumps this game is getting are meant to
+   *     feel like that, not like a car falling off a kerb.
+   *
+   * `autoGears: true` — never false. This file already carries the scar: `autoGears: false` with no
+   *     manual shift keys bound leaves the car stuck in first for ever, which is what happened to
+   *     the Drift preset on the first live build. */
+  raid: { counterSteer: 0.5, stability: 0.12, tcs: 0.05, abs: 0.35, autoGears: true, lockFloor: (9 * Math.PI) / 180, brakeMul: 0.95, airborne: 0.35 },
   hardcore: { counterSteer: 0.0, stability: 0.0, tcs: 0.0, abs: 0.0, autoGears: false, lockFloor: STEER.minAngle, brakeMul: 0.82, airborne: 0.0 },
 };
 
