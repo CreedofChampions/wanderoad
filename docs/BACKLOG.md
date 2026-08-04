@@ -335,8 +335,39 @@ spread above, arrived at from the other direction.
       to the crossings whose corrections are largest — and it starves their neighbours of room
       completely, where polyline order at least left them some.
 
-      **What that leaves.** The severity idea is dead as stated; the remaining untried half is
-      MERGING overlapping windows into a single correction that squares both crossings at once,
+      **HYPOTHESIS 7 — MERGED WINDOWS — BUILT, MEASURED, AND SHIPPED (4 Aug 2026).** Crossings
+      whose windows overlap are now one CLUSTER, corrected by ONE chain of hermites through every
+      crossing in it (P0 -> C1 -> C2 -> ... -> P1), each crossing carrying its own target tangent,
+      the backoff applied to the whole cluster at once. `if (kc <= cursor) continue` is gone, so no
+      crossing is dropped for being in a busy area.
+
+      | metric, 12 km box | before | after |
+      |---|---|---|
+      | crossing-angle mean | 5.49 deg | **4.85** |
+      | crossing-angle worst | 23.7 deg | **23.7 — unchanged** |
+      | lane facet max (diag-smooth) | 145.86 deg | **17.47** |
+      | lane facet mean | 4.62 deg | **4.47** |
+
+      The lane facet is the number that matters: 145.86 degrees is a near-reversal — a KINK — and
+      it is exactly the artefact the dropped-crossing rule produced. Arterial facets, junction
+      spread (12.8%), all six relief presets and seam S1/S2/S3 are all unchanged.
+
+      **Where the win actually comes from, measured rather than assumed.** Instrumented cluster
+      sizes over the 12 km box: **137 clusters of one and only 3 of two**. So merging itself fires
+      rarely; most of the gain is from no longer DROPPING a crossing whose window collided with its
+      neighbour's. Worth knowing before anyone expects merging to scale further — there is very
+      little left for it to merge.
+
+      **The worst crossing did not move, and that is the honest result.** It is 23.7 deg at
+      (-1949,-4012), and it was 23.7 deg before. NOT VERIFIED: whether that particular crossing is
+      one of the three merges — the debug tag is a hashed edge key, not a lattice name, so the
+      obvious guess ("it is a singleton, so merging cannot reach it") is a hypothesis and is
+      recorded here as one. What IS measured is that the tail did not improve and did not regress.
+      Both previous hypotheses improved the mean and made the worst WORSE; this one leaves it
+      exactly where it was, which is the bar this entry set.
+
+      **What that leaves.** The severity idea is dead as stated; the merged-window half is now
+      shipped. The original note read: MERGING overlapping windows into a single correction that squares both crossings at once,
       which does not create a large lone bend and so does not obviously walk into the same trap.
       Also worth knowing before anyone spends a day here: at 6.89 degrees mean the metric is
       already a quarter of what the operator's complaint was raised against, so the residual is
