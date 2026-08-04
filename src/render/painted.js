@@ -282,6 +282,37 @@ void main(){
   gl_Position = projectionMatrix*mv;
 }`;
 
+/* THE SAME SHADER, FOR AN InstancedMesh — AND IT HAS TO BE A SECOND ONE.
+ *
+ * three.js only rewrites a vertex shader to apply `instanceMatrix` for ITS OWN materials. A
+ * RawShaderMaterial gets no prefix and no USE_INSTANCING define, so every instance drawn with the
+ * one above collapses onto the same transform: a hundred bollards stacked in one spot, invisible
+ * wherever their matrices actually said they were.
+ *
+ * That is not hypothetical. It is B28. The operator reported "roads still end without a closure"
+ * four times; every closure WAS built (diag-terminus: 516 bollards over 106 heads, 106 boards),
+ * instanced into the scene, standing on the ground to within 0.04 m, and projecting to the middle
+ * of the screen — ndc(-0.11..0.08, 0.14..0.18) at 12 m out — while the rendered frame showed bare
+ * tarmac. Everything upstream of the draw call was right. The draw call threw the matrices away.
+ *
+ * A separate shader rather than a define, because a define on a RawShaderMaterial is not applied by
+ * three either: the caller asks for the instanced variant and gets one that always multiplies by
+ * `instanceMatrix`, so there is no configuration to get wrong. The normal is rotated by the
+ * instance too, or a bollard's shading would come from the geometry's own orientation and every
+ * one of them would be lit as if it faced the same way. */
+const PAINTED_VS_INSTANCED = /* glsl */ `
+in vec3 nrm; in vec3 vcol; in float vmat;
+in mat4 instanceMatrix;
+out vec3 vW; out vec3 vN; out vec3 vC; out vec3 vL; out float vM; out float vDist;
+void main(){
+  mat4 model = modelMatrix*instanceMatrix;
+  vec4 wp = model*vec4(position,1.0);
+  vW = wp.xyz; vN = normalize(mat3(model)*nrm); vC = vcol; vM = vmat;
+  vL = position;
+  vec4 mv = viewMatrix*wp; vDist = -mv.z;
+  gl_Position = projectionMatrix*mv;
+}`;
+
 function paintedFS(ghost) {
   // Ghosts carry their own constant alpha; everything else puts the fog amount in alpha,
   // which is the channel the post chain reads back as distance.
@@ -399,13 +430,14 @@ const CLOUD = glCloudField({ cshSpan: 9200, cloudDeck: 980 });
  * `uniforms.uLamp` is per-material (a Vector3, channels A/B/C in 0..1) so two cars can
  * have their headlights in different states while sharing every other uniform in the game.
  */
-export function createPaintedMaterial({ side = DoubleSide, ghost = false, opacity = 0.85, uniforms = {} } = {}) {
+export function createPaintedMaterial({ side = DoubleSide, ghost = false, opacity = 0.85, uniforms = {}, instanced = false } = {}) {
   const extra = { uLamp: { value: new Vector3(0, 0, 0) } };
   if (ghost) extra.uGhostAlpha = { value: opacity };
   const mat = new RawShaderMaterial({
     glslVersion: '300 es',
     uniforms: sharedUniforms(Object.assign(extra, uniforms)),
-    vertexShader: vertHead(PAINTED_VS),
+    // `instanced: true` for anything drawn as an InstancedMesh — see PAINTED_VS_INSTANCED.
+    vertexShader: vertHead(instanced ? PAINTED_VS_INSTANCED : PAINTED_VS),
     fragmentShader: fragHead(GL_HASH, GL_NOISE, CLOUD, GL_SHADOW, GL_LIGHT, paintedFS(ghost)),
     side,
   });

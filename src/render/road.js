@@ -1355,6 +1355,10 @@ export class Roads {
      * one; measured against bench-chunk before landing. */
     this.materialYield = createRoadMaterialYield();
     this.paintedMaterial = createPaintedMaterial();
+    /* Marker posts, chevrons, bollards and closing boards are all InstancedMeshes, and a
+     * RawShaderMaterial does not get three's instancing rewrite — see PAINTED_VS_INSTANCED in
+     * render/painted.js for the measurement chain that found this (B28). */
+    this.paintedInstancedMaterial = createPaintedMaterial({ instanced: true });
     this.furniture = buildFurnitureGeometry();
 
     this.live = new Map(); // edge key -> { mesh, posts, chevrons }
@@ -1440,7 +1444,7 @@ export class Roads {
         [this.furniture.endboard, endItems.filter((i) => i.kind === 'endboard')],
       ]) {
         if (!list.length) continue;
-        const im = new InstancedMesh(geo, this.paintedMaterial, list.length);
+        const im = new InstancedMesh(geo, this.paintedInstancedMaterial, list.length);
         const m = new Matrix4();
         const q = new Quaternion();
         const pos = new Vector3();
