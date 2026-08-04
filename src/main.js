@@ -2013,6 +2013,10 @@ async function boot() {
      * class on the readout). Same rule as `flora` and `spray`: ask the thing that actually did it.
      * Telemetry only; the game never reads window.WANDEROAD. */
     fuelGauge,
+    /* The music window, because "N is the radio and the radio is the YouTube window" is a claim
+     * about a control reaching a surface, and the only honest way to check it is to press N and
+     * ask the WINDOW whether it was told to skip. See tools/diag-radio.mjs and B25. */
+    musicPanel,
     /* The aeroplane, so a diagnostic can ask whether it is flying and how high — the same reason
      * every other live object is on this handle. */
     plane,
