@@ -2007,6 +2007,12 @@ async function boot() {
      * frame, which is birds.stats.drawn — not a flag, and not the number that exist. */
     birds,
     fuel,
+    /* The GAUGE as well as the tank. "Does the distance-to-pumps flash amber as the tank passes a
+     * meter point" cannot be answered from `fuel` — the tank knows how much is left, and the
+     * warning lives in the widget that draws it (`lastMark`, `markFlashCount`, and the `mark`
+     * class on the readout). Same rule as `flora` and `spray`: ask the thing that actually did it.
+     * Telemetry only; the game never reads window.WANDEROAD. */
+    fuelGauge,
     /* The aeroplane, so a diagnostic can ask whether it is flying and how high — the same reason
      * every other live object is on this handle. */
     plane,

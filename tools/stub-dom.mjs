@@ -29,7 +29,22 @@ export class El {
     this.disabled = false;
     this.hidden = false;
     this.textContent = '';
-    this.style = {};
+    /* A plain bag of declarations, plus the two methods a custom property needs. Widgets set CSS
+     * VARIABLES rather than named properties for anything the stylesheet then reads —
+     * src/ui/fuelGauge.js writes `--p` on each capacity segment — and `style['--p'] = x` is not
+     * how that is done in a real DOM, so the two methods are here rather than leaving a tool to
+     * discover the difference as a crash. */
+    this.style = {
+      setProperty(k, v) {
+        this[k] = String(v);
+      },
+      getPropertyValue(k) {
+        return this[k] ?? '';
+      },
+      removeProperty(k) {
+        delete this[k];
+      },
+    };
     this.dataset = {};
     this.attrs = {};
     this.children = [];
@@ -78,6 +93,15 @@ export class El {
   getAttribute(k) {
     return this.attrs[k] ?? null;
   }
+  /* A zero box, and it is READ FOR ITS SIDE EFFECT rather than its value: the fuel gauge's
+   * `_flashMark` does `void el.getBoundingClientRect().width` between removing and re-adding a
+   * class, which is the standard trick for forcing a browser to restart a CSS animation. Returning
+   * zeroes is honest here — the stub has no layout, and nothing that runs against it may believe
+   * otherwise. A tool that needs real geometry belongs in a browser. */
+  getBoundingClientRect() {
+    return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  }
+
   appendChild(n) {
     n.parentNode = this;
     this.children.push(n);
@@ -260,7 +284,32 @@ export function installStubDom({ search = '', href = 'http://localhost:5173/' } 
   const globalKeys = [];
   /* `activeElement` starts null exactly as a real document's does, and El.focus() moves it. That is
    * what lets a tool drive Menu.padNav(), which navigates by the document's focus. */
-  globalThis.document = { createElement: (t) => new El(t), body, activeElement: null };
+  /* `head` and `getElementById` exist because widgets INJECT THEIR OWN STYLESHEET on construction —
+   * src/ui/fuelGauge.js opens with `if (!document.getElementById('fuelGaugeCss'))` and appends a
+   * <style> to the head. Without these two a tool cannot build the widget at all, which is how the
+   * meter-point warning went unchecked in node for as long as it did. The id lookup walks the same
+   * tree `querySelector` walks, so a stylesheet is injected exactly once here too. */
+  const head = new El('head');
+  const findById = (n, id) => {
+    if (n.id === id) return n;
+    for (const c of n.children || []) {
+      const hit = findById(c, id);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  globalThis.document = {
+    createElement: (t) => new El(t),
+    /* SVG elements are created through a namespace — the fuel gauge's dial is an <svg> with a
+     * <path> per tick. The stub does not model namespaces at all, and does not need to: what a
+     * tool asks these nodes is "how many ticks are there" and "what is on the class list", both of
+     * which an ordinary El answers. So the namespace is accepted and dropped. */
+    createElementNS: (_ns, t) => new El(t),
+    body,
+    head,
+    getElementById: (id) => findById(head, id) || findById(body, id),
+    activeElement: null,
+  };
   globalThis.localStorage = storage;
   globalThis.addEventListener = (t, fn) => globalKeys.push([t, fn]);
   globalThis.location = { search, href };
