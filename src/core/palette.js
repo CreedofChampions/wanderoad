@@ -138,6 +138,17 @@ export const P = {
   paintE: '#4E7F79',
   paintF: '#2E3440',
   chrome: '#D7DCE0',
+  /* B46, the operator: "there's some gray parts still, leaving it somewhat uncoloured."
+   *
+   * A Synty body arrives as TWO tones baked into its vertex colours — a paint and a pale
+   * grey-green cladding (#ABB2AC on screen) that reads as bare primer rather than as a
+   * decision. Bumpers, rockers, arches and the bed rail are cladding on a real pickup and
+   * should stay a different material from the paint, so they are not simply painted over:
+   * they become dark iron. Chosen against the cosy palette's own tarmacShade/roofSlate
+   * family so a truck parked on a road does not look like it was cut out of a different
+   * game, and dark enough that painted.js's BODY branch — which lifts a colour hard — still
+   * lands it as graphite (~#5A6066 on screen) rather than as another pale grey. */
+  carTrim: '#43474C',
   glass: '#7FA2B8',
   tyre: '#2A2A2E',
   tail: '#E4573F',
