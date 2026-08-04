@@ -45,7 +45,7 @@ import {
   SHOWROOM_REACH,
   hallSpots,
   HALL_REACH,
-  SHOWROOM_HALF_W, AIRFIELD_HALF_LEN } from './world/props.js';
+  SHOWROOM_HALF_W, AIRFIELD_HALF_LEN, nearestAirfield as worldNearestAirfield } from './world/props.js';
 import { Walker, EYE, ENTER_R, LEASH } from './game/walk.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
 import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
@@ -59,7 +59,7 @@ import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
-import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
+import { Plane, PLANE_UNLOCK_GEMS, PLANE_PASS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
 import { FLEET, FLEET_BY_ID, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam } from './game/garage.js';
 /* `applyDrivingModel` REPLACES `applyCarFeel` here, and it has to be the only feel call in the file.
@@ -1267,12 +1267,27 @@ async function boot() {
      * once already (see roadCamber's note in world/roads.js). */
     const onHardSurface = () => {
       const s = car.terrain.surface(car.x, car.z);
-      return !!s && s.onRoad > 0.5;
+      if (s && s.onRoad > 0.5) return true;
+      /* AN AIRSTRIP IS TARMAC TOO, and `surface()` does not know that — it answers about the ROAD
+       * network, and a runway is not a road. Adding the tarmac rule for B56 therefore locked the
+       * aeroplane out of the one place it is supposed to leave from, which is the opposite of what
+       * that item asked for. Caught by F39's proof: ?fly=1 put the car on a strip and take-off was
+       * refused with onRoad 0.00.
+       *
+       * The world's own airfield search rather than the renderer's baked list, for the same reason
+       * ?fly=1 uses it — the baked list only knows tiles that have streamed. */
+      const strip = worldNearestAirfield(car.x, car.z, SEED);
+      return !!strip && Math.hypot(car.x - strip.x, car.z - strip.z) <= AIRFIELD_HALF_LEN;
     };
     const canTakeOffHere = () => {
       if (cheatOn()) return true;
-      const near = props.nearestAirfield ? props.nearestAirfield(car.x, car.z) : null;
-      return !!near && near.dist <= AIRFIELD_HALF_LEN;
+      /* The WORLD's airfield search, not the renderer's baked-per-tile list. Same fault as the two
+       * fixed beside this one: the baked list only knows tiles that have STREAMED, so standing on a
+       * strip that has not been drawn yet — which is exactly what ?fly=1 does — read as "no airfield
+       * anywhere" and refused the take-off. `worldNearestAirfield` is a pure function of position
+       * and seed, so it answers the same way whether or not anything has been drawn. */
+      const near = worldNearestAirfield(car.x, car.z, SEED);
+      return !!near && Math.hypot(car.x - near.x, car.z - near.z) <= AIRFIELD_HALF_LEN;
     };
     if (input.tapped('fly')) {
       if (plane.active) {
@@ -2020,6 +2035,45 @@ async function boot() {
 
   // for the console, and for tools/shoot.mjs
   window.THREE = THREE_NS; // debug/telemetry only — the game never reads it
+  /* ?fly=1 — ON A RUNWAY, READY TO ROLL. Operator: "for later: make it easy to test plane".
+   *
+   * Testing flight used to mean earning sea diamonds or knowing the unlock URL, then finding an
+   * airfield, which the 2 Aug gate made mandatory. That is a ten-minute errand before the thing
+   * you actually wanted to look at.
+   *
+   * This does NOT bypass the gate — it satisfies it. The plane is unlocked, the car is put on the
+   * nearest airfield's strip facing along it, and that is all: you still press P, the airfield
+   * check still runs and passes because you are genuinely standing on a runway, and the tarmac
+   * check passes because a strip is tarmac. A flag that flew you regardless would test a code path
+   * no player ever takes; this one leaves the player's own path intact and just walks you to the
+   * start of it. */
+  if (params.get('fly')) {
+    /* DEFERRED, because airfields are BAKED PER TILE and there are none at boot. The first version
+     * of this ran inline and reported "no airfield found" while standing on the spawn road: props
+     * had not streamed yet, so `nearestAirfield` had nothing to answer with. It polls instead, and
+     * gives up out loud rather than silently doing nothing. */
+    let tries = 0;
+    const toStrip = () => {
+      /* The WORLD's own airfield search, not the renderer's baked-tile one. The baked list only
+       * knows tiles that have streamed, and at spawn there are none within its reach — the poll
+       * below ran forty times against an empty list before this was noticed. world/props.js's
+       * `nearestAirfield` is a pure function of position and seed with a 12 km radius, so it can
+       * answer before anything has been drawn. */
+      const strip = worldNearestAirfield(car.x, car.z, SEED);
+      if (strip) {
+        wallet.unlockPlaneWithPass(PLANE_PASS, PLANE_PASS);
+        car.placeAt(strip.x, strip.z, strip.yaw ?? 0);
+        car.vx = car.vy = car.vz = 0;
+        car.gear = 1;
+        hud.say('on the strip — hold W, then P to fly', 5);
+        return;
+      }
+      if (++tries < 40) setTimeout(toStrip, 250);
+      else hud.say('no airfield streamed in to start from', 4);
+    };
+    setTimeout(toStrip, 250);
+  }
+
   window.WANDEROAD = {
     /* The seed this world was grown from. Exposed because several diagnostics have to ask the
      * PURE world functions about the same plane the page is showing — the renderer only knows
