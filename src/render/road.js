@@ -1453,6 +1453,13 @@ export class Roads {
         });
         im.instanceMatrix.needsUpdate = true;
         im.frustumCulled = false;
+        /* WHICH FURNITURE THIS IS. Every one of these is a `BufferGeometry` to anything walking the
+         * scene, so "is the closure at that road end actually standing there" could not be answered
+         * without guessing — a B28 probe found eight-vertex pieces a metre past a head and could not
+         * tell a bollard from a marker post. Naming them costs nothing and makes the scene
+         * self-describing. */
+        im.name = `road:${list[0].kind}`;
+        im.userData.kind = list[0].kind;
         this.group.add(im);
         rec.instanced.push(im);
       }
