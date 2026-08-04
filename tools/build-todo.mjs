@@ -30,7 +30,17 @@ const items = JSON.parse(readFileSync(DIR + '/TODO-ITEMS.json', 'utf8')).items;
  * are uploaded once. An item with no clip simply shows none — the absence IS the status. */
 const PROOF = (() => {
   try {
-    const rows = JSON.parse(readFileSync('shots/proof/manifest-out.json', 'utf8'));
+    /* READ THE ARCHIVE, NOT THE LAST RUN. `manifest-out.json` holds only the shots from the most
+     * recent proof-gallery invocation, so building the page from it silently strips the film off
+     * every card proved in an earlier session — the same accumulation bug that once published an
+     * empty proof page. `archive.json` is the accumulating record; the per-run file is kept only as
+     * a fallback for a checkout that has never archived. */
+    let rows;
+    try {
+      rows = JSON.parse(readFileSync('shots/proof/archive.json', 'utf8'));
+    } catch {
+      rows = JSON.parse(readFileSync('shots/proof/manifest-out.json', 'utf8'));
+    }
     const byItem = {};
     for (const r of rows) {
       if (!r.ok || !r.clip) continue;
