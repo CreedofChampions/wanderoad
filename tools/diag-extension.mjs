@@ -185,6 +185,12 @@ try {
       car: W && W.car ? [Math.round(W.car.x), Math.round(W.car.z)] : null,
       iframe: frames.length,
       search: !!document.querySelector('input'),
+      /* THE 50/50 THE PANEL PROMISES — measured off the live boxes rather than trusted to the
+       * stylesheet. Both halves are flex 1 1 0 with min-height and min-width 0, and that is the
+       * thing that breaks first when an iframe joins a flex row: the frame's intrinsic size wins
+       * and one half quietly eats the other. */
+      panelW: document.documentElement.clientWidth,
+      gameW: gf ? Math.round(gf.getBoundingClientRect().width) : 0,
     });
   })()`;
 
@@ -216,6 +222,12 @@ try {
    * the panel does not make on its own. What the URL builder does with the words is checked in node
    * by tools/diag-panel-urls.mjs, which needs no browser at all. */
   check('the watch half is there too — the search box, with the game in its own frame beside it', !!state.search && !!state.gameFrame, `input ${state.search}, game frame ${state.gameFrame}`);
+  const split = state.panelW ? state.gameW / state.panelW : 0;
+  check(
+    'and it really is a 50/50 — the iframe has not eaten the watch half',
+    Math.abs(split - 0.5) < 0.02,
+    `${state.gameW} of ${state.panelW} px = ${(split * 100).toFixed(1)}%`,
+  );
 
   if (out[3]?.data) {
     writeFileSync(resolve(SHOTS, 'panel.png'), Buffer.from(out[3].data, 'base64'));
