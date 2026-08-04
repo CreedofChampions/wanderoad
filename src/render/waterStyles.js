@@ -914,7 +914,15 @@ export const WATER_STYLES = [
 /** Where the choice is remembered between sessions. */
 export const WATER_STYLE_KEY = 'wanderoad.waterStyle';
 /** The shipped surface. Nothing about the water changes until somebody presses a button. */
-export const WATER_STYLE_DEFAULT = 'painted';
+/* TROPICAL, because the operator chose it. Verbatim, having driven all seven: "Water tropical is
+ * final good". His other verdicts, kept here so nobody re-litigates them: "Glass is close but not
+ * it -- keep it in mind" (kept as the runner-up), "low poly is definitely not it", "Deep Ocean is
+ * not it", "Flat Swell is definitely not it", and Ocean Swell "overwhelms the boat so that isn't
+ * practical unless the boat goes up and down with the water. But it looks pretty good, to be
+ * honest" — which is why the boat learned to ride waves (game/boat.js) before this line moved.
+ *
+ * 'painted' is still in the list and still selectable; it is simply no longer what you arrive to. */
+export const WATER_STYLE_DEFAULT = 'tropical';
 
 const byId = (id) => WATER_STYLES.find((s) => s.id === id) || null;
 

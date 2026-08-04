@@ -92,10 +92,15 @@ const hintOf = (g) => menu.root.querySelector(`[data-hint="${g}"]`)?.textContent
 /* ── 1. the two rows are really in the panel ─────────────────────────────── */
 head('1. the rows exist, and they say what is in force');
 
-for (const [g, title, list] of [
-  ['water', 'Water', WATER_STYLES],
-  ['drive', 'Driving', DRIVING_MODELS],
+for (const [g, title, list, defaultId] of [
+  ['water', 'Water', WATER_STYLES, WATER_STYLE_DEFAULT],
+  ['drive', 'Driving', DRIVING_MODELS, DEFAULT_DRIVING_MODEL],
 ]) {
+  /* Where this row STARTS, taken from the module rather than assumed to be entry zero. Every check
+   * below that used to say list[0] now says `start`, so moving a default — which the operator does
+   * by choosing one, as he did with Tropical — no longer breaks six checks that were never about
+   * the array's order in the first place. */
+  const start = list.find((x) => x.id === defaultId) || list[0];
   check(`there is a ${g} row in the Garage sheet`, !!row(g) && row(g).classList.contains('row'), row(g) ? 'found' : 'absent');
   check(
     `it is a cycler: one "the one before" button and one that names what is in force`,
@@ -107,19 +112,24 @@ for (const [g, title, list] of [
     nameBtn(g).textContent.startsWith(`${title}: `),
     `"${nameBtn(g).textContent}"`,
   );
+  /* THE STARTING ENTRY IS THE MODULE'S DEFAULT, not list[0] — and this check, of all of them,
+   * had the bug it is named after. It asserted "not a hard-coded first entry" by hard-coding the
+   * first entry, so it passed only while the default happened to be list[0], and failed the moment
+   * the operator chose Tropical ("Water tropical is final good") over Painted. `start` is derived
+   * from the module, so it follows the default wherever it goes. */
   check(
     `it names the ${g} actually in force, not a hard-coded first entry`,
-    nameBtn(g).dataset.key === list[0].id && nameBtn(g).textContent === `${title}: ${list[0].label}`,
-    `${nameBtn(g).dataset.key} vs ${list[0].id}`,
+    nameBtn(g).dataset.key === start.id && nameBtn(g).textContent === `${title}: ${start.label}`,
+    `${nameBtn(g).dataset.key} vs ${start.id}`,
   );
   check(
     `the blurb and the position are shown, so seven options do not hide behind one label`,
-    hintOf(g).includes(list[0].blurb) && /\b1 of 7\b/.test(hintOf(g)),
+    hintOf(g).includes(start.blurb) && hintOf(g).includes(`${list.indexOf(start) + 1} of ${list.length}`),
     `"${hintOf(g)}"`,
   );
   check(
     `the ${g} button carries the blurb as a tooltip too`,
-    nameBtn(g).getAttribute('title') === list[0].blurb,
+    nameBtn(g).getAttribute('title') === start.blurb,
     nameBtn(g).getAttribute('title'),
   );
   check(
@@ -173,6 +183,11 @@ for (const [g, title, list] of [
   ['water', 'Water', WATER_STYLES],
   ['drive', 'Driving', DRIVING_MODELS],
 ]) {
+  /* Where the walk begins is read off the row ITSELF, not assumed to be entry zero: section 1 has
+   * already been pressing these buttons, and the default is whatever the module says it is (it is
+   * Tropical for water now, not the first entry). What this section is actually about is that a
+   * lap of the ring returns to wherever it started and that both ends wrap — true from any seat. */
+  const start = list.find((x) => x.id === nameBtn(g).dataset.key) || list[0];
   const seen = [nameBtn(g).dataset.key];
   for (let i = 0; i < list.length; i++) {
     press(nameBtn(g));
@@ -180,22 +195,25 @@ for (const [g, title, list] of [
   }
   check(
     `${g}: seven presses walk every entry in order and come back to the first`,
-    seen.join(',') === [...list.map((s) => s.id), list[0].id].join(','),
+    /* Walk from wherever it STARTS, all the way round, and back to the start. Rotating the
+     * expectation rather than assuming the run begins at index 0 is what makes this survive the
+     * default moving. */
+    seen.join(',') === [start, ...list.slice(list.indexOf(start) + 1), ...list.slice(0, list.indexOf(start) + 1)].map((x) => x.id).join(','),
     seen.join(' → '),
   );
   check(
     `${g}: the label follows the choice on every press, never left stale`,
-    nameBtn(g).textContent === `${title}: ${list[0].label}`,
+    nameBtn(g).textContent === `${title}: ${start.label}`,
     nameBtn(g).textContent,
   );
   press(prevBtn(g));
   check(
     `${g}: ◀ off the front lands on the LAST one rather than dead-ending`,
-    nameBtn(g).dataset.key === list[list.length - 1].id,
-    `${nameBtn(g).dataset.key} (expected ${list[list.length - 1].id})`,
+    nameBtn(g).dataset.key === list[(list.indexOf(start) - 1 + list.length) % list.length].id,
+    `${nameBtn(g).dataset.key} (expected ${list[(list.indexOf(start) - 1 + list.length) % list.length].id})`,
   );
   press(nameBtn(g));
-  check(`${g}: and forward from the last wraps to the first`, nameBtn(g).dataset.key === list[0].id, nameBtn(g).dataset.key);
+  check(`${g}: and forward from there wraps round again`, nameBtn(g).dataset.key === start.id, nameBtn(g).dataset.key);
 }
 
 check(
@@ -222,12 +240,18 @@ liveWaterMaterials.add(plane);
 
 const whereBefore = { search: globalThis.location.search, href: globalThis.location.href };
 const sources = new Set();
+/* Read the seat the row is actually in before pressing. Two sections of presses have happened
+ * above, and the row starts on the module's default rather than on entry zero, so "the next style"
+ * has to be counted from HERE. The check is about the press reaching the sea; it is not about which
+ * style happens to be first in the array. */
+const from = WATER_STYLES.findIndex((x) => x.id === nameBtn('water').dataset.key);
+const nextStyle = (i) => WATER_STYLES[(from + 1 + i) % WATER_STYLES.length];
 for (let i = 0; i < WATER_STYLES.length; i++) {
   press(nameBtn('water'));
-  const want = WATER_STYLES[(i + 1) % WATER_STYLES.length].build(SEED);
+  const want = nextStyle(i).build(SEED);
   const ok = plane.fragmentShader === want.fragmentShader && plane.vertexShader === want.vertexShader;
   sources.add(plane.fragmentShader);
-  if (!ok) check(`pressing to ${WATER_STYLES[(i + 1) % WATER_STYLES.length].id} rewrote the material`, false);
+  if (!ok) check(`pressing to ${nextStyle(i).id} rewrote the material`, false);
 }
 check(
   'every press swapped the shader source on a registered water material, to that style exactly',
