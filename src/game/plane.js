@@ -36,6 +36,9 @@
  */
 
 import { clamp, clamp01, lerp } from '../core/math.js';
+/* The one water-height function this game has — the same one boat.js floats on. See the sea-floor
+ * note in the ground clamp. */
+import { waterLevelAt } from '../world/biomes.js';
 
 /** Gems — the diamonds out at sea — needed to earn the plane. */
 export const PLANE_UNLOCK_GEMS = 12;
@@ -303,7 +306,25 @@ export class Plane {
      * anywhere else in it either. Touch down and you roll along the ground losing speed; the
      * caller decides when that becomes "back in the car". */
     const t = this.terrain?.();
-    const ground = t && typeof t.height === 'function' ? t.height(this.x, this.z) : -Infinity;
+    const land = t && typeof t.height === 'function' ? t.height(this.x, this.z) : -Infinity;
+    /* THE SEA IS A FLOOR, NOT A WINDOW. Operator: "u can fly under water (should be a boat)."
+     *
+     * The clamp below only ever asked the LAND, and out at sea the land is the seabed — so the
+     * aeroplane descended straight through the surface and kept flying underwater. `waterLevelAt`
+     * is the same function game/boat.js floats on (via rescue.js's waterDepth), so the height the
+     * plane stops at and the height the boat sits on are ONE number rather than two that agree
+     * for now.
+     *
+     * It stops AT the surface rather than ditching. A ditching is a nicer idea and a much bigger
+     * one — it wants a wreck state, a way out of it and a way back to the car — and inventing that
+     * here would be a feature nobody asked for wearing a bug fix's clothes. What was asked for is
+     * that the sea not be a window. */
+    let ground = land;
+    if (t && typeof t.surface === 'function') {
+      const surf = t.surface(this.x, this.z);
+      const wl = surf && surf.w ? waterLevelAt(surf.w, surf.y) : null;
+      if (wl !== null && wl > ground) ground = wl;
+    }
     if (this.y < ground + 1.2) {
       this.y = ground + 1.2;
       if (this.vy < 0) this.vy *= -0.12; // a small bounce, then it settles
