@@ -1914,7 +1914,26 @@ async function boot() {
           plane.y - sp * back + up,
           plane.z - cy * cp * back,
         );
-        camera.up.set(Math.sin(plane.roll), Math.cos(plane.roll), 0).applyAxisAngle(UP_Y, plane.yaw);
+        /* THE CAMERA DOES NOT ROLL WITH THE AEROPLANE, and this line is why "left goes left but
+         * looks like going right" kept coming back after the mesh signs were fixed twice.
+         *
+         * It used to set the camera's up vector to the aeroplane's own banked up. Do that and the
+         * aircraft is drawn at the same angle as the frame, so the WING never appears to move —
+         * what tilts instead is the whole world, and it tilts the OPPOSITE way, because rolling
+         * the camera by +roll rotates everything in view by -roll. Filmed on the live beta holding
+         * A for 3.7 s, and every number underneath was already right:
+         *
+         *   model roll   +75.2 deg   (positive = banked left)
+         *   MESH z       +75.2 deg   (right wing up, which IS a left bank — verified against
+         *                             three.js by rotating a +X wingtip and reading its world Y)
+         *   heading      +17.1 deg   (positive = LEFT, the car's convention)
+         *
+         * — and the clip still shows an aeroplane sitting level in a sky rolled hard the other
+         * way. Three fixes had gone into the mesh signs chasing a fault that was never in them.
+         *
+         * So the horizon stays put and the AEROPLANE banks against it, which is what a chase
+         * camera in every flying game does and the only version where the wing tells the truth. */
+        camera.up.copy(UP_Y);
         camera.lookAt(plane.x + sy * cp * 14, plane.y + sp * 14, plane.z + cy * cp * 14);
         sNorm = Math.min(1, Math.hypot(plane.vx, plane.vz) / 90);
       } else {
