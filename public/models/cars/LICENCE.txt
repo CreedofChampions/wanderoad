@@ -14,3 +14,15 @@ Each model is untextured: geometry is POSITION + NORMAL only and every part is s
 material name (White / Grey / Black / Windows / Headlights / TailLights ...). Wanderoad reads
 those names and re-materials the whole car with its own painted shader, so nothing here ships
 a texture or a PBR material into the game.
+
+<!-- edited by AI from here -->
+`rally.glb` is not one of the original seven Quaternius car-pack models above — it is a
+different Quaternius model, from a different pack: "Pickup Truck Armored"
+(https://poly.pizza/m/RUwMItmU4B), also by Quaternius, also CC0 1.0 Universal, also fetched
+anonymously over plain HTTP from Poly Pizza. Unlike the seven above, the source file ships one
+texture atlas (a single embedded PNG) instead of separated materials, so it could not be used
+as downloaded — `tools/quaternius-car.mjs` converts it: node names are renamed onto what this
+game's wheel rig expects, and the atlas is sampled once per vertex, at build time only, purely
+to decide which of White / Grey / Black each triangle becomes. No texture, UV or baked colour
+survives into `rally.glb` itself — the shipped file is POSITION + NORMAL only, same as every
+other car here, and the same painted shader re-materials it the same way.

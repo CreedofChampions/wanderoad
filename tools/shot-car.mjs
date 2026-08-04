@@ -165,6 +165,13 @@ if (SETUP) {
  * which car it is of, which is the entire question being asked here. `sag` is the live spring
  * compression in metres — the number that says whether the suspension is the soft long-travel
  * one or the stock 42000 N/m fleet spring. */
+/* An EXTRA reading, taken after the drive rather than before it — `--read <expr>`. The built-in
+ * telemetry below says which car and how fast; a per-run question ("did the suns go up when I drove
+ * over that crate") can only be asked by the caller, and it has to be asked AFTER the driving, which
+ * is why it lives here and not in `--setup`. */
+const READ = arg('read', '');
+if (READ) console.log('   reading:', await ev(READ));
+
 const info = await ev(
   `JSON.stringify({
      car: (window.WANDEROAD.model && window.WANDEROAD.model.spec && window.WANDEROAD.model.spec.id) || 'unknown',
