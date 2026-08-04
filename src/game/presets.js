@@ -77,7 +77,7 @@ export const FEELS = {
   },
   hyper: {
     label: 'Hyper',
-    blurb: 'All-wheel drive, 800 hp, 340 km/h. Planted at speed, and quick enough to need the calm camera.',
+    blurb: 'All-wheel drive, 800 hp, 211 mph (340 km/h). Planted at speed, and quick enough to need the calm camera.',
     comfortG: 10.5,
     assist: 'sport',
     camera: 'sport',

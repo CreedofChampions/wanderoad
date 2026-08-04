@@ -209,6 +209,12 @@ for (const shot of shots) {
      * failed proof to anyone glancing at the page. */
     const { result: png } = await send('Page.captureScreenshot', { format: 'png' }, S);
     if (shutter) clearInterval(shutter);
+    // THE POSTER NEVER REACHED DISK. `png.data` was captured and then discarded — every prior run
+    // of this tool recorded a `file` name in the manifest and in the published page's <video
+    // poster=...> without ever having written the bytes, so the poster 404'd on every proof this
+    // tool has ever produced. Found while vision-checking the units-switch proof: the manifest
+    // claimed a PNG next to a clip and there was no PNG on disk.
+    writeFileSync(`${OUT}/${shot.id}.png`, Buffer.from(png.data, 'base64'));
     const clipBytes = readFileSync(webm).length;
     console.log(`ok  clip ${secs.toFixed(1)}s @${fps}fps ${(clipBytes / 1024).toFixed(0)} KB${reading ? '  ' + String(reading).slice(0, 36) : ''}`);
     results.push({ ...shot, file: `${shot.id}.png`, clip: `${shot.id}.webm`, seconds: +secs.toFixed(1), fps, frames: n, bytes: clipBytes, reading, ok: true });
