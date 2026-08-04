@@ -276,6 +276,40 @@ export class Streak {
     this._off = 0;
   }
 
+  /**
+   * Bank the current streak the instant auto-drive switches ON, rather than FREEZING it the way
+   * update()'s own `opts.paused` does for the ordinary hands-off-the-wheel case (see that
+   * method's long comment above for why freezing is the right call there).
+   *
+   * It has to be a different call because it is closing a different door. Operator, verbatim,
+   * on the hole a pure freeze leaves open: "Make it so that there's a 10 second cooldown when
+   * you go into auto drive mode related to this to break the streak. So you can't just go to
+   * auto and off of auto to get an infinite streak." Autopilot never drives off the road, so a
+   * player about to leave it could flip auto-drive on a frame before the crash, let it save
+   * them, then flip straight back to manual — a free save, at no cost, repeatable forever, and
+   * freezing is exactly what makes it free: nothing was lost, so nothing was risked.
+   *
+   * So this ends the run the way a real off-road break does — through the SAME `_commit()`
+   * every other way a streak ends already goes through, so there is never a second,
+   * independently-maintained copy of what "a fresh streak" resets to. The only thing that
+   * differs from an ordinary break is which event comes out of it: `auto: true`, so
+   * src/ui/hud.js can say something truer than "streak ended" when the reason is a dodge rather
+   * than a mistake. Gated on the SAME `this.distance > 250` guard the off-road break a few dozen
+   * lines up already uses — pushed BEFORE `_commit()` resets the fields it reads, exactly the
+   * order that sibling break already uses — because a streak barely begun is not worth a toast
+   * either way. The bank itself is unconditional: `_commit()` runs whenever there was anything
+   * to bank, whether or not anyone is told about it.
+   *
+   * The ten-second lock that actually stops the toggle-straight-back-to-manual half of the
+   * exploit lives in src/car/autopilot.js (`TOGGLE_COOLDOWN`) — this method only has to make
+   * sure that once the lock starts, there is nothing left behind it worth protecting.
+   */
+  breakForAutoDrive() {
+    if (this.distance === 0) return;
+    if (this.distance > 250) this._events.push({ kind: 'break', distance: this.distance, score: this.score, auto: true });
+    this._commit();
+  }
+
   /** Called on quit / page hide so a long streak is not simply lost. */
   flush() {
     if (this.distance > 0) this._commit();

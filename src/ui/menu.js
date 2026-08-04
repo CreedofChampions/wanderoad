@@ -16,6 +16,8 @@ import { FLEET, FLEET_BY_ID, isUnlocked, priceOf, unlockRule, cheatOn, fmtUnlock
 import { BOAT_UNLOCK_SUNS, CAN_PRICE, CAN_MAX } from '../game/wallet.js';
 import { mountInvite } from '../net/invite.js';
 import { PAD_HELP } from '../car/input.js';
+import { fmtBoard } from '../net/board.js';
+import { escapeHtml } from './hud.js';
 
 
 /* ── the seed ────────────────────────────────────────────────────────────────
@@ -176,6 +178,9 @@ export class Menu {
         <h3>Suns <small>everything you have ever collected, and what it opens next</small></h3>
         <div data-group="suns"></div>
 
+        <h3>Leaderboard <small>the longest anyone has driven without leaving the road, in this world</small></h3>
+        <div data-group="board"></div>
+
         <h3>Car <small>each one drives differently — the first three by collecting, the rest at a dealership</small></h3>
         <div class="row" data-group="car"></div>
 
@@ -232,6 +237,15 @@ export class Menu {
     this._fillTank();
     this._fillShop();
     this._fill('terrain', Object.keys(TERRAINS).map((k) => [k, TERRAINS[k].label]));
+    /* NOT this._fillBoard() here. Every other hook this constructor reads (wallet, fuel) is
+     * already a real, initialized variable in main.js by the time `new Menu(...)` runs — but
+     * `board` is declared further down in that same function (see the note on the `board: ()
+     * => board` hook above), and this constructor runs BEFORE that line executes. Calling
+     * `hooks.board()` this early would read `board` in its temporal dead zone and throw
+     * "Cannot access 'board' before initialization" on every single page load — found the hard
+     * way, live on the beta, the instant this shipped. show() below is the first SAFE place to
+     * fill this section: it only ever runs from a keypress, long after every module-scope
+     * declaration in main.js has finished running. */
 
     el.addEventListener('click', (e) => this._onClick(e));
     /* Enter inside the seed field does what the button does. Bound on the field itself so it
@@ -319,6 +333,49 @@ export class Menu {
       </div>
       <p class="ownedList">${owned.map((c) => c.label).join(' · ')}</p>
       ${bars || '<p class="ownedList">Every car is yours.</p>'}`;
+  }
+
+  /* ── THE LEADERBOARD ───────────────────────────────────────────────────────
+   *
+   * Same idiom as _fillSuns() just above: read the hook, render whatever is known right now,
+   * and do it again once fresh data arrives. `board.rows` can be stale or empty the FIRST time
+   * this runs right after opening the panel — a fetch is a network round trip, so show() below
+   * kicks one off and re-calls this method when it resolves rather than awaiting it here, which
+   * would make opening the Garage feel like it had hung.
+   *
+   * Names are OTHER PLAYERS' text, off the network. escapeHtml (src/ui/hud.js, which already had
+   * to solve exactly this for the nearby-peers list) is not optional here — a name is the one
+   * field on a leaderboard row a stranger chooses the contents of. */
+  _fillBoard() {
+    const box = this.root.querySelector('[data-group="board"]');
+    if (!box) return;
+    const board = this.hooks.board ? this.hooks.board() : null;
+    if (!board) {
+      box.innerHTML = '';
+      return;
+    }
+    const rows = board.rows;
+    if (!rows.length) {
+      box.innerHTML = '<p class="ownedList">Nobody has posted a run in this world yet — be the first.</p>';
+      return;
+    }
+    const mine = board.mine;
+    const list = rows
+      .map(
+        (r) =>
+          `<div class="boardRow${r.you ? ' you' : ''}"><span class="boardRank">${r.rank}</span><span class="boardName">${escapeHtml(r.name)}</span><span class="boardBest">${fmtBoard(r.best)}</span></div>`,
+      )
+      .join('');
+    // Only worth a second line when you are NOT already one of the rows just printed above —
+    // otherwise the panel would say "you: rank 3" directly under a list that already marked
+    // row 3 as yours.
+    const mineLine =
+      mine && mine.rank > rows.length
+        ? `<p class="ownedList">you: rank ${mine.rank} — ${fmtBoard(mine.best)}</p>`
+        : !mine
+          ? '<p class="ownedList">you: not on the board yet — beat your own best to join it</p>'
+          : '';
+    box.innerHTML = list + mineLine;
   }
 
   _fillCars() {
@@ -672,6 +729,7 @@ export class Menu {
      * headline reading 75 in your pocket. The panel contradicting itself is worse than it being
      * absent, and it is the sort of thing that reads as the game having lost your money. */
     this._fillSuns();
+    this._fillBoard();
     this._fillCars();
     this._fillTank();
     this._fillShop();
@@ -679,6 +737,13 @@ export class Menu {
     this.open = true;
     this.root.hidden = false;
     this._mark();
+    /* The panel just opened — exactly the moment net/board.js's own doc comment names as when
+     * to force a fetch ("only when the panel is actually open or the player has just beaten
+     * their own record"). The synchronous _fillBoard() just above already painted whatever was
+     * cached from an earlier poll, so the panel never reads as empty while this is in flight;
+     * this repaints it once the network actually answers. */
+    const board = this.hooks.board ? this.hooks.board() : null;
+    if (board) board.refresh(this.hooks.streakBest ? this.hooks.streakBest() : 0, true).then(() => this._fillBoard());
     /* Put the focus somewhere on the way in. A pad player who opens the Garage and has to flick the
      * stick once before anything highlights has been shown a dead panel for a second, which is
      * exactly long enough to conclude the controller does not work in here. */

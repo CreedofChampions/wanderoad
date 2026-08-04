@@ -66,10 +66,45 @@ import { Cinematic } from './game/cinematic.js';
 import { Menu } from './ui/menu.js';
 import { MusicPanel } from './ui/musicPanel.js';
 import { createTransport } from './net/transport.js';
+
+/* WHERE THE MULTIPLAYER API ACTUALLY LIVES.
+ *
+ * Ported in from the sibling branch that first found and fixed this — operator, over there:
+ * "whole multiplayer seems to never sync properly". It never synced on cozydriver.com because
+ * there was no server to sync with, and this branch's leaderboard has exactly the same failure
+ * mode for exactly the same reason: proof-gallery, run live against /beta, submitted a real
+ * streak and the panel still read "nobody has posted a run yet" — not because the PHP was wrong
+ * (it answers correctly — see server/drive.php's 'board' branch and tools/diag-board.mjs) but
+ * because nothing was ever reaching it.
+ *
+ * The PHP lives in exactly one place — crumbtown.org/wanderoad/api/ — deliberately, so there is
+ * one set of endpoints and one database rather than two. But the client asked for `./api/`,
+ * resolved against its own page. From https://cozydriver.com/beta/ that is
+ * https://cozydriver.com/beta/api/, which has never existed. The transport then walked its chain,
+ * found the PHP driver failing, and quietly settled on the `local` driver — a driver that works
+ * perfectly and has exactly one peer in it, you. No error, no warning, no multiplayer, and no
+ * leaderboard: `local`'s stand-in only understands 'save'/'load', so a 'board' request against it
+ * comes back with no `.board` field at all, and net/board.js correctly does nothing with that.
+ *
+ * So the base is chosen by ORIGIN rather than by path. Served from crumbtown, the API is a
+ * relative hop away. Served from anywhere else — the apex, /beta, a preview — it is the absolute
+ * home, which needs the origin on the server's CORS allowlist (server/drive.php already has it).
+ *
+ * localhost keeps the relative path ON PURPOSE: a dev server has no PHP, so it falls to `local`
+ * and a debugging session cannot write presence rows or leaderboard scores into the live database.
+ */
+const API_HOME = 'https://crumbtown.org/wanderoad/api/';
+function apiBase() {
+  const h = location.hostname;
+  const ownIt = /(^|\.)crumbtown\.org$/i.test(h) || h === 'localhost' || h === '127.0.0.1' || h === '';
+  return ownIt ? new URL('./api/', location.href).href : API_HOME;
+}
+
 import { Remotes } from './net/remotes.js';
 import { makeGhostFactory, ghostStats } from './net/ghostCar.js';
 import { identity } from './net/identity.js';
 import { WorldSave } from './net/save.js';
+import { Board } from './net/board.js';
 import { EngineAudio } from './audio/engine.js';
 
 const $ = (s) => document.querySelector(s);
@@ -309,6 +344,18 @@ async function boot() {
    * both call, so all three can never disagree about where "the road" is. */
   const auto = new Autopilot({ recover: backToRoad, say: (t, s) => hud.say(t, s), ping: () => audio.ping() });
   const streak = new Streak();
+  /* Entering auto-drive banks the streak instead of freezing it — game/streak.js's
+   * breakForAutoDrive() and car/autopilot.js's TOGGLE_COOLDOWN are the two halves of the fix
+   * for the flip-to-auto-and-back exploit (operator, verbatim, in the general instructions for
+   * this pass: "you can't just go to auto and off of auto to get an infinite streak"). There are
+   * TWO places in this file that can switch auto-drive on — the Garage's own button and the
+   * keyboard/pad action — and both have to go through this one function, or one of them would
+   * quietly stay a free save. `!auto.on` is read BEFORE toggle() flips it, which is the only
+   * way to know this call is an ENTRY rather than an exit. */
+  function toggleAutoDrive() {
+    if (!auto.on) streak.breakForAutoDrive();
+    return auto.toggle(car);
+  }
   let trail = null;
   const hud = new Hud();
   /* Retired — operator: "Rope in back of car does not look good... use the bottom blue line
@@ -590,10 +637,16 @@ async function boot() {
   }
 
   const menu = new Menu({
-    onAuto: () => auto.toggle(car),
+    onAuto: () => toggleAutoDrive(),
     isAuto: () => auto.on,
     onCar: swapCar,
     bestStreak: () => Math.max(bestStreak(), streak.state.best),
+    /* The leaderboard panel — src/net/board.js, wired up below once `transport` exists (`board`
+     * is declared with `const` further down in this same function; reading it through a closure
+     * here is safe because neither getter is ever CALLED until the player opens the Garage, long
+     * after that declaration has run — see the note by `const board =` for why). */
+    board: () => board,
+    streakBest: () => streak.best,
     /* The shop. The garage panel is where you pick a car you own; at a dealership it is also
      * where you buy one, and where a bigger tank is fitted — see ui/menu.js's `tank` group and
      * game/wallet.js's buyCar/buyTank. */
@@ -757,8 +810,17 @@ async function boot() {
   setStat('looking for company…', 0.7);
   const transport = createTransport({
     backend: OFFLINE ? 'none' : 'auto',
-    phpBase: new URL('./api/', location.href).href,
+    phpBase: apiBase(),
   });
+  /* The leaderboard — src/net/board.js, submit-and-fetch fused onto the same `transport` the
+   * drive tick already uses. `identity` (imported above from net/identity.js) is passed as-is
+   * rather than called here: Board reads it lazily on every submit/refresh, so a player who
+   * renames mid-session has the new name on their NEXT submission, not whatever was captured at
+   * boot. `lastBoardBest` is this file's own cheap watermark for "have I told the server about
+   * this number yet" — see the streak.update() call below for why it does NOT read this off
+   * streak.drain(): that queue belongs to ui/hud.js alone. */
+  const board = new Board({ transport, seed: SEED, identity });
+  let lastBoardBest = 0;
   /* Ghosts are now the SAME loaded GLB the driver is actually driving — src/net/ghostCar.js,
    * which has the whole story. Two separate bugs sat on top of each other here and only the
    * first was fixed:
@@ -1008,7 +1070,7 @@ async function boot() {
         hud.say(`can poured in — ${wallet.cans} left`, 2.8);
       }
     }
-    if (input.tapped('autodrive')) hud.say(auto.toggle(car) ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
+    if (input.tapped('autodrive')) hud.say(toggleAutoDrive() ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
     if (input.tapped('reset')) backToRoad();
     // 'Give fuel' is not in car/input.js's KEYMAP (that file is out of scope this pass) — the
     // same raw, already-edge-triggered check the assist-preset keys just below use. KeyF:
@@ -1095,6 +1157,17 @@ async function boot() {
       paused: auto.on || fuel.dry || fuel.refuelling,
       forgive: nearPump(),
     });
+    /* Tell the leaderboard whenever a run passes the best it already knows about. Deliberately
+     * NOT hooked off streak.drain()'s 'break' event — ui/hud.js already owns that queue
+     * exclusively (drain() is destructive, one shift() per call, so a second reader would
+     * silently steal every other event and start dropping the HUD's own toasts). Watching the
+     * plain `streak.best` number instead needs no queue and cannot collide with anything. Board's
+     * own submitIfBetter() is already a no-op unless this genuinely beats the last thing it sent,
+     * so `lastBoardBest` here is only a cheap guard against calling it every single frame. */
+    if (streak.best > lastBoardBest) {
+      lastBoardBest = streak.best;
+      board.submitIfBetter(streak.best);
+    }
 
     /* ── THE HINT THAT ARRIVES WHEN YOU NEED IT ──────────────────────────────
      * Operator: "KNOW how to do that and get hints at tirght times".
@@ -1482,7 +1555,7 @@ async function boot() {
     post.speed = sNorm;
     post.limit = car.limit;
 
-    hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name, wallet });
+    hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name, wallet, auto });
     fuelGauge.update(dt, fuel, car);
     lootCounter.update(dt, wallet);
     post.render(scene, camera);

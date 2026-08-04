@@ -114,6 +114,24 @@ function wr_db(): PDO
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         to_id TEXT NOT NULL, from_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, t REAL NOT NULL)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS signals_to ON signals(to_id, id)');
+    // One row per player PER SEED — see the 'board' op in wr_handle(). The composite
+    // primary key is the whole design: a player's streak on one procedurally generated
+    // world is not comparable to their streak on another, so there is no such thing as one
+    // "best" for a player, only a best-per-world, and the pair (player_id, seed) is what
+    // turns a resubmission into an UPDATE instead of a second, competing row. `name`
+    // defaults to '' rather than NULL so this table reads by the same non-null contract as
+    // every other column in this schema; the 'board' op always supplies one explicitly, but
+    // a defensive default costs nothing.
+    $pdo->exec('CREATE TABLE IF NOT EXISTS leaderboard(
+        player_id TEXT NOT NULL, seed INTEGER NOT NULL, name TEXT NOT NULL DEFAULT \'\',
+        best INTEGER NOT NULL, at REAL NOT NULL,
+        PRIMARY KEY(player_id, seed))');
+    // Every board fetch is "this seed, ordered by best" — the same shape as presence_cell
+    // and signals_to above, which exist for exactly the same reason: the primary key
+    // indexes (player_id, seed), not (seed, best), so without this the ranking query would
+    // fall back to scanning and sorting the whole table by hand once a board has grown
+    // past a handful of rows.
+    $pdo->exec('CREATE INDEX IF NOT EXISTS leaderboard_seed ON leaderboard(seed, best DESC)');
     // Bound, not inlined: SQLite reads a double-quoted literal as an identifier first,
     // and single quotes cannot appear inside these single-quoted PHP strings.
     $st = $pdo->prepare('INSERT OR IGNORE INTO meta(k, v) VALUES(?, ?)');
@@ -423,6 +441,83 @@ function wr_handle(): void
             }
         }
         $res['save'] = $save;
+        wr_send($res);
+        return;
+    }
+
+    /* ── leaderboard ────────────────────────────────────────────────────────
+     * The PHP twin of the 'board' branch in base44/functions/drive/index.js — same shape,
+     * same numbers, same guarantees. Submit-and-fetch in one call, the same fused idiom as
+     * tick below: the request carries a claimed best, in metres of streak, and the response
+     * carries the top of the table for the world that claim was set in.
+     *
+     * MONOTONIC BY CONSTRUCTION, not by convention: a row only ever moves up. A submission
+     * lower than what is already on file is silently kept rather than written over, which is
+     * what stops a player losing their place on the board because they opened the game again
+     * and immediately hit a tree — and it means src/net/board.js can submit on every streak
+     * end without ever having to ask the server what it already holds.
+     *
+     * Filtered by SEED, because a streak on one procedurally generated world is not
+     * comparable to a streak on another — different roads, different corners, different
+     * luck — so ranking them together would be meaningless and would quietly reward whoever
+     * happened to spawn on the straightest world rather than whoever actually drove best.
+     */
+    if ($op === 'board') {
+        $seed = wr_int($req['seed'] ?? 0, 0, PHP_INT_MAX);
+        // Deliberately NOT clamped to 4000000 the way $seed above is clamped to PHP_INT_MAX:
+        // index.js never caps the claim itself, it only ever gates the WRITE below on
+        // `claim > 0 && claim <= 4000000`. Capping the upper bound at this line instead would
+        // make that half of the gate unreachable — a claim of 50,000,000 would quietly become
+        // a claim of exactly 4,000,000 and get written as though it were a real run, which is
+        // precisely the submission the gate exists to throw away.
+        $claim = wr_int($req['best'] ?? 0, 0, PHP_INT_MAX);
+
+        // The one number a stranger supplies, so it is bounded here as well as on the client
+        // (src/net/board.js's own Math.max(0, Math.floor(best))). 4,000 km is far past any
+        // real run and still cheap to store; beyond that the submission is a bug or a lie
+        // and does not belong on the board. A claim of exactly 0 is not a real streak either
+        // — board.js sends `best: 0` on a plain poll that is not reporting a run at all — so
+        // it must return the board without ever creating a row for a player who has not
+        // driven yet.
+        if ($claim > 0 && $claim <= 4000000) {
+            // One upsert rather than a SELECT followed by an INSERT-or-UPDATE, so a
+            // resubmission costs the same single round trip to SQLite as a fresh claim — the
+            // same shape as the `saves` upsert above. The CASE WHEN expressions do the
+            // monotonic check INSIDE the statement: on a fresh row (no conflict) they never
+            // fire and the VALUES(...) go in untouched; on a conflict they only let the new
+            // numbers through if `excluded.best` (the claim just submitted) beats what is
+            // already stored, so a worse run cannot move the row — not even its name or
+            // timestamp. `name` uses the same length()-as-emptiness idiom as presence.name's
+            // CASE WHEN in the tick upsert below: a submission that does not beat the stored
+            // best has not earned the right to relabel the row, and even one that does beat
+            // it must not blank an existing name out just because this particular request's
+            // name came back empty.
+            $up = $pdo->prepare('INSERT INTO leaderboard(player_id, seed, name, best, at) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(player_id, seed) DO UPDATE SET
+                    best = CASE WHEN excluded.best > leaderboard.best THEN excluded.best ELSE leaderboard.best END,
+                    at = CASE WHEN excluded.best > leaderboard.best THEN excluded.at ELSE leaderboard.at END,
+                    name = CASE WHEN excluded.best > leaderboard.best
+                        THEN (CASE WHEN length(excluded.name) = 0 THEN leaderboard.name ELSE excluded.name END)
+                        ELSE leaderboard.name END');
+            $up->execute([$me, $seed, wr_name($req['name'] ?? ''), $claim, $now]);
+        }
+
+        $q = $pdo->prepare('SELECT name, best, player_id FROM leaderboard WHERE seed = ? ORDER BY best DESC LIMIT 20');
+        $q->execute([$seed]);
+        $board = [];
+        $rank = 1;
+        foreach ($q->fetchAll() as $r) {
+            $board[] = [
+                'rank' => $rank++,
+                // A blank name is not an error, just a player who has not typed one in yet,
+                // and the board still has to say something in the row — same fallback as
+                // index.js.
+                'name' => $r['name'] !== '' ? $r['name'] : 'someone',
+                'best' => (int) $r['best'],
+                'you' => $r['player_id'] === $me,
+            ];
+        }
+        $res['board'] = $board;
         wr_send($res);
         return;
     }

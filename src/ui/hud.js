@@ -378,7 +378,7 @@ export class Hud {
     this.root.style.pointerEvents = on ? 'none' : '';
   }
 
-  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null }) {
+  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null, auto = null }) {
     // ── speed ──
     const kph = Math.round(car.kph);
     this.kph.textContent = kph;
@@ -401,7 +401,17 @@ export class Hud {
 
     // ── streak ──
     const s = streak.state;
-    const live = s.distance > 0;
+    /* `|| s.paused` — found by actually watching the beta: breakForAutoDrive() (game/streak.js)
+     * always resets distance to exactly 0 the instant auto-drive engages, which is the NORMAL
+     * case now, not a rare edge — every activation starts the lock at 0 m. Without this, `live`
+     * read false the whole ten seconds, the caption fell through to the "at rest" branch below,
+     * and the lock countdown a few lines down never had a code path that could show it: a player
+     * who had just been locked into auto-drive saw "0 m / stay on the road", the exact words the
+     * game shows someone who has not started driving yet, with no sign the wheel was held at
+     * all. Distance can legitimately be 0 while paused now; it was never possible before this
+     * feature, because entering auto-drive used to FREEZE whatever distance already existed
+     * rather than bank and reset it. */
+    const live = s.distance > 0 || s.paused;
     this.streakEl.classList.toggle('live', live);
     if (live) {
       // Smooth the displayed distance so the last digit is not a blur at 300 km/h.
@@ -420,8 +430,19 @@ export class Hud {
        * (see CAP_MIN_HOLD_S/CAP_CONFIRM_S's own note above), and this is the caption the
        * operator called out by name as the thing fuzzing unreadable. */
       const capKey = s.paused ? 'paused' : s.grace ? 'grace' : 'onroad';
+      /* The lock countdown rides the SAME 'paused' key as the ordinary auto-drive caption — it
+       * is still one state, "auto-drive has the wheel", not a second one that needs its own
+       * confirm/hold pass through _setCaption(). The seconds themselves are free to change every
+       * frame: `_setCaption()`'s hysteresis only guards STATE changes (see its own note above),
+       * and re-writes `text` on every call for a key that has not changed, which is exactly what
+       * a live countdown needs. See src/car/autopilot.js's `cooldownLeft` for what this counts
+       * down from and why (the operator's own ten-second lock, closing the flip-to-auto-and-back
+       * exploit). */
+      const lockLeft = auto?.cooldownLeft ?? 0;
       const capText = s.paused
-        ? 'held while auto-drive has the wheel'
+        ? lockLeft > 0
+          ? `held while auto-drive has the wheel · ${Math.ceil(lockLeft)}s`
+          : 'held while auto-drive has the wheel'
         : s.grace
           ? 'off the road…'
           : 'without leaving the road';
@@ -572,7 +593,15 @@ export class Hud {
     if (ev) {
       if (ev.kind === 'milestone') this.say(ev.text, 3.2);
       else if (ev.kind === 'break') {
-        this.say(`${fmtDistance(ev.distance)} — streak ended`, 3.0);
+        /* `ev.auto` — src/game/streak.js's breakForAutoDrive(): the run ended because the wheel
+         * was handed to auto-drive, not because it left the road. Same visible effect (the bar
+         * flashes, the counter goes back to zero) but a different sentence, because "streak
+         * ended" reads as a mistake and this one was not — the operator's own fix for the exploit
+         * where flipping to auto-drive a frame before a crash used to cost nothing at all. */
+        this.say(
+          ev.auto ? `auto-drive on — ${fmtDistance(ev.distance)} banked` : `${fmtDistance(ev.distance)} — streak ended`,
+          3.0,
+        );
         // The blip: rust arrives instantly and fades out over the best part of a second. A
         // fade in and out both ways would read as a pulse, and a pulse is a scoreboard.
         this.bar.classList.add('broke');
@@ -677,6 +706,8 @@ export class Hud {
 }
 
 // Player names come off the network. They are rendered as text, never as markup.
-function escapeHtml(s) {
+// Exported so src/ui/menu.js can hold the leaderboard's remote names to the same rule
+// rather than growing a second copy — one place that turns a name into safe markup.
+export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }

@@ -313,7 +313,22 @@ console.log(`dead end found: edge ${edge.key}, dir ${dir}, edge length ${path.to
   }
   check('ping: does not fire again while just driving (not per-frame)', pings === 1, `pings=${pings} after 240 frames`);
 
-  auto.toggle(car); // off
+  /* An immediate toggle() straight off the 240-frame mark used to switch it off here, but this
+   * is now the middle of TOGGLE_COOLDOWN's ten-second lock (src/car/autopilot.js — the fix for
+   * the streak exploit named in this pass's own instructions: "you can't just go to auto and off
+   * of auto to get an infinite streak"), so a real attempt this early is correctly REFUSED —
+   * `auto.on` would still read true. Running the clock the rest of the way out first is not
+   * working around the lock, it is the honest way to test what happens once it has actually
+   * expired, which is the only moment a real "off" is possible. 1100 more frames at 120 Hz is
+   * ~9.17 s, on top of the 2 s already elapsed above — past the ten seconds with margin. */
+  for (let i = 0; i < 1100; i++) {
+    const cmd = auto.update(car, NOTHING, PHYSICS_DT) || NOTHING;
+    car._step(PHYSICS_DT, cmd);
+  }
+  check('ping: the lock has run out by the time we try to switch off', auto.cooldownLeft === 0, `${auto.cooldownLeft}s left`);
+
+  auto.toggle(car); // off — the lock has expired, so this one actually lands
+  check('ping: toggle-off actually switches it off once the lock has expired', auto.on === false, `auto.on = ${auto.on}`);
   check('ping: does not fire on deactivation', pings === 1, `pings=${pings} after toggle-off`);
 
   auto.toggle(car); // on again

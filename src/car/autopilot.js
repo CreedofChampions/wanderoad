@@ -103,6 +103,22 @@ const SLEW = 3.2;
  *  crawl is the run actually ending. */
 const CRAWL = 9;
 
+/* ── the ten-second lock ───────────────────────────────────────────────────
+ * Operator, verbatim, describing the exploit a pure freeze-on-auto-drive leaves open (see
+ * game/streak.js's breakForAutoDrive() for the other half of the fix): "Make it so that
+ * there's a 10 second cooldown when you go into auto drive mode related to this to break the
+ * streak. So you can't just go to auto and off of auto to get an infinite streak." Without a
+ * lock, flipping auto-drive on a frame before leaving the road (autopilot never drives off the
+ * road) and straight back off the instant it has saved you is a free rescue, at no cost, as
+ * many times as you like. See toggle() below for how the lock actually refuses an early
+ * switch-off, and update() for why a bump of the wheel cannot get around it either. */
+/** Seconds the wheel is locked out once auto-drive switches on. Ten, not some shorter guard
+ *  timer, because it has to outlast the exact manoeuvre it exists to close: long enough that
+ *  "flip on, let it save me, flip straight back off" is not a viable technique at all, short
+ *  enough that a player who turned it on to actually cruise is not left arguing with their own
+ *  car over a control they very much meant to press. */
+const TOGGLE_COOLDOWN = 10;
+
 /* ── dead end ahead ────────────────────────────────────────────────────────
  * Edges in this network run from one lattice node to the next — hundreds of metres at both
  * tiers (TIERS.cell is 620 m and 1800 m in src/world/roads.js) — so a dead end is visible on
@@ -329,6 +345,10 @@ export class Autopilot {
     this.say = say;
     this.ping = ping;
     this.lastReason = '';
+    /** Seconds left on the post-activation lock — see TOGGLE_COOLDOWN's own note above for what
+     *  this exists to close. Sits at 0 whenever the autopilot is off; toggle() sets it fresh
+     *  every time it actually switches on. */
+    this._cooldown = 0;
     this._lostFor = 0;
     this._stuckFor = 0; // seconds spent near-motionless while switched on — see STUCK_TIMEOUT
     this._steer = 0; // the wheel as commanded, so it can be slew-limited
@@ -359,6 +379,19 @@ export class Autopilot {
   }
 
   toggle(car) {
+    /* THE LOCK, HALF ONE: refuse an early switch-off outright.
+     *
+     * A toggle() call that arrives while `this.on` is already true and the cooldown has not yet
+     * run out is exactly the exploit's second half — a player switching straight back to manual
+     * the instant the car is safely back over the centreline — so it is refused completely: the
+     * call returns `true` unchanged and NONE of the state below runs. Not `_lostFor`/
+     * `_stuckFor`/`_edge`, and not even `this.on` itself — a refused toggle has to look, from
+     * every angle, as though it never happened, or there would still be some other observable
+     * side effect of "pressing the button" for a player to exploit around the lock. See
+     * update() below for HALF TWO: the same lock also has to survive a bump of the actual
+     * wheel, not just a second press of G. */
+    if (this.on && this._cooldown > 0) return this.on;
+
     this.on = !this.on;
     this._lostFor = 0;
     this._stuckFor = 0;
@@ -374,6 +407,15 @@ export class Autopilot {
       // Once per activation, never on the way off — a short cue that the wheel just let go,
       // additional to (never instead of) the HUD toast main.js already shows for this.
       this.ping?.();
+      // Starts the lock the instant the wheel is actually let go — see TOGGLE_COOLDOWN's own
+      // note at the top of this file for why ten seconds and why it exists at all.
+      this._cooldown = TOGGLE_COOLDOWN;
+    } else {
+      // A clean switch-off only ever reaches this branch once the lock has already run out (the
+      // guard above refuses every earlier attempt) — this is already 0. Set it explicitly
+      // anyway, so the NEXT activation always starts from a fresh, full ten seconds no matter
+      // what else about this method ever changes above.
+      this._cooldown = 0;
     }
     return this.on;
   }
@@ -383,6 +425,13 @@ export class Autopilot {
     this.on = false;
     this.lastReason = reason;
     return true;
+  }
+
+  /** Seconds left on the post-activation lock — see TOGGLE_COOLDOWN. Read by src/ui/hud.js so
+   *  the streak caption can say how much longer the wheel is held for, the same way it already
+   *  reads streak.state.paused for the ordinary auto-drive caption. */
+  get cooldownLeft() {
+    return this._cooldown;
   }
 
   /**
@@ -485,9 +534,25 @@ export class Autopilot {
   update(car, manual, dt) {
     if (!this.on) return null;
 
-    // Any real input from the player hands control straight back. A nudge on the stick is a
-    // nudge, not a request to be argued with.
-    if (Math.abs(manual.steer) > 0.12 || manual.brake > 0.15 || manual.throttle > 0.5 || manual.handbrake > 0.1) {
+    /* THE LOCK, HALF TWO: decremented every frame the autopilot is on, regardless of anything
+     * else happening this frame, so nothing can pause it except time itself passing. See
+     * TOGGLE_COOLDOWN's own note at the top of this file, and toggle()'s note for HALF ONE
+     * (refusing an early manual switch-off outright). */
+    this._cooldown = Math.max(0, this._cooldown - dt);
+
+    /* Any real input from the player hands control straight back — UNLESS the lock is still
+     * counting down. This is the operator's own loophole, named directly: a player who cannot
+     * press the button to switch off can just as easily bump the wheel instead, since
+     * manual.steer/brake/throttle/handbrake already reads as "I want my car back" to the check
+     * below. Silently ignoring it here does not change how the car actually drives during the
+     * lock — the autopilot's own steer/throttle/brake numbers are still what this method
+     * returns either way, exactly as before — it only suppresses the EARLY-RETURN that would
+     * otherwise have handed control back before the ten seconds were up. A nudge on the stick
+     * once the lock has run out is still a nudge, not a request to be argued with. */
+    if (
+      this._cooldown <= 0 &&
+      (Math.abs(manual.steer) > 0.12 || manual.brake > 0.15 || manual.throttle > 0.5 || manual.handbrake > 0.1)
+    ) {
       this.off('you took over');
       return null;
     }

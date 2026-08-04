@@ -1454,3 +1454,36 @@ canvas {
   opacity: 0.55;
   margin-top: 0.14rem;
 }
+
+/* ── the leaderboard ───────────────────────────────────────────────────────
+ * F69, operator (repeated across sessions): "a leaderboard for lonest without going off road".
+ * See ui/menu.js's _fillBoard for the data; this is only its shape — a plain ranked list, same
+ * quiet register as the sun ledger just above rather than anything that reads as a scoreboard. */
+#menu .boardRow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.82rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid rgba(58, 67, 86, 0.1);
+}
+#menu .boardRow.you {
+  /* The one row that is you gets the same warm tone the earned unlock bars use above — a
+   * colour the player has already learned means "this one is about you", not a new one. */
+  color: #b8791f;
+}
+#menu .boardRank {
+  min-width: 1.6rem;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+#menu .boardName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#menu .boardBest {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}

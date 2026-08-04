@@ -43,7 +43,7 @@ a remote car, the entire netcode has to be rewritten. Don't.
   "v": 1,
   "secret": "<64 hex>",          // 32 random bytes, localStorage. Body only — never a URL.
   "name": "Amber Fox",           // <=18 chars after sanitisation
-  "op": "tick" | "bye" | "save" | "load",
+  "op": "tick" | "bye" | "save" | "load" | "board",
   "cell": "c12_-3",              // advisory; the server recomputes it from x,z
   "t": 1785072024525,            // client clock, ms
   "car": {
@@ -73,6 +73,7 @@ never touch the secret. One file to audit.
   ],
   "rate": 2,                     // Hz the client must obey
   "save": { },                   // only for op save/load
+  "board": [ ],                  // only for op board — top 20, see "The leaderboard" below
   "rejected": true,              // only when the position failed a sanity check
   "signals": [ ]                 // only when a WebRTC signal was waiting
 }
@@ -162,6 +163,53 @@ hill, road and tree byte for byte. A save is:
 the backend on a 20 s debounce (it is a shared server and the local copy is already safe).
 Uploads are chunked to a 5800-byte budget so they fit inside the 8 KB cap; one `flush()`
 drains up to six batches.
+
+---
+
+## The leaderboard
+
+The streak — distance driven without leaving the road — is the only scoring mechanic in
+this game, so it is the only thing worth ranking. `op: "board"` is submit-and-fetch in one
+call, the same fused idiom as `tick`: the request carries a claimed best (metres), the
+response carries the top 20 for the world that claim was set in. `src/net/board.js` is the
+client: it polls every 60 s while the panel is open and submits immediately whenever a run
+beats the player's own last-sent number, never more often than that.
+
+* **Monotonic by construction, not by convention.** A row only ever moves up. A claim lower
+  than what is already on file is silently kept rather than written over — not politeness,
+  it is what stops a player losing their place on the board because they opened the game
+  again and immediately hit a tree. It also means the client never has to ask the server
+  what it already holds before submitting: it can submit on every streak end, and a run
+  that ends short simply costs nothing.
+* **A claim of exactly `0` never writes.** `src/net/board.js` sends `best: 0` on a plain
+  poll that is not reporting a run at all (`refresh()` with nothing to submit), and that
+  must return the board without ever creating a row for a player who has not driven yet.
+* **Bounded to `(0, 4,000,000]` metres.** 4,000 km is far past any real run and still cheap
+  to store; a claim outside that range is a bug or a lie and is discarded outright — not
+  clamped down to the cap and accepted, thrown away entirely, claim and all.
+* **Filtered by `seed`.** A streak on one procedurally generated world is not comparable to
+  a streak on another — different roads, different corners, different luck — so the table
+  is scoped per world and every seed gets its own ranking, from a clean table, in the same
+  `leaderboard` row space (`PRIMARY KEY(player_id, seed)`, one row per player per world —
+  see `wr_db()` in `server/drive.php`).
+* **Thin on purpose.** No history, no per-run rows, no fields beyond what the board renders.
+  A leaderboard that stores every attempt is a table that grows without limit for a number
+  nobody reads twice — see the comment at the top of `base44/entities/Leaderboard.jsonc`.
+
+The response's `board` is an array, nearest-to-first-place order, capped at 20:
+
+```jsonc
+"board": [
+  { "rank": 1, "name": "Amber Fox", "best": 48213, "you": false }
+]
+```
+
+`name` falls back to `"someone"` for a row whose player never set one. `you` is `true` for
+the row belonging to the caller's own derived `playerId`, so the client can highlight its
+own entry without comparing ids itself. Ties are broken however the backing store already
+orders equal values — neither backend imposes a secondary sort — since the entity schema's
+`at` field only documents an ordering intent that was never wired into either the Base44
+function or this PHP port; treat it as informational, not a guarantee.
 
 ---
 
@@ -261,8 +309,9 @@ Names must match `^[a-zA-Z0-9]+$` — the CLI rejects underscores.
 | `Presence` | One row per live car. Written every tick, read by everyone in the 3x3 neighbourhood, expired after 8 s. Nothing in it is authoritative. |
 | `WorldSave` | One row per player: seed, visited bitset, op log. Merged, never overwritten, so two devices converge. |
 | `RtcSignal` | A one-shot mailbox for a WebRTC offer/answer/ICE. Optional latency optimisation; nothing may depend on it. |
+| `Leaderboard` | One row per player per seed: longest streak ever, monotonic. See "The leaderboard" above. |
 
-All three set `rls` to deny direct client access on every verb. The `drive` function owns
+All four set `rls` to deny direct client access on every verb. The `drive` function owns
 every read and write through `asServiceRole`. A player who could write `Presence` directly
 could put their car anywhere and the sanity checks would never see it; and a player proves
 ownership by knowing their secret, which is not something row-level security can express —
