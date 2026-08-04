@@ -1855,11 +1855,33 @@ async function boot() {
          * flying feel like flying — and look slightly ahead of it. */
         const cy = Math.cos(plane.yaw);
         const sy = Math.sin(plane.yaw);
+        /* THE CAMERA FOLLOWS THE FLIGHT PATH, NOT THE COMPASS HEADING. B67, the operator: "the
+         * camera also gets stuck above the airplane when going up... the plane should remain in
+         * frame rather than falling out of frame."
+         *
+         * Two faults, and the second is the one that empties the frame. The offset was purely
+         * HORIZONTAL — 24 m back along the heading, 7 m up — so a climbing aeroplane rose while
+         * the camera stayed level behind it. And the look-at target used `plane.pitch * 30` as if
+         * pitch were a gradient, when it is an ANGLE IN RADIANS: at the 63 degrees a held climb
+         * reaches, that is 1.1 * 30 = 33 m above the aeroplane, so the camera aimed a full 33 m
+         * over its own subject's head. Filmed three times at three pitch rates while trying to
+         * shoot B53, and every clip is empty sky.
+         *
+         * So the offset now runs back along the FORWARD VECTOR, pitch included — behind and below
+         * in a climb, behind and above in a dive — and the target is the aeroplane's own nose a
+         * short way ahead, on the same vector. It cannot aim past its subject because the subject
+         * is on the line it is aiming down. */
+        const cp = Math.cos(plane.pitch);
+        const sp = Math.sin(plane.pitch);
         const back = 24;
         const up = 7;
-        camera.position.set(plane.x - sy * back, plane.y + up, plane.z - cy * back);
+        camera.position.set(
+          plane.x - sy * cp * back,
+          plane.y - sp * back + up,
+          plane.z - cy * cp * back,
+        );
         camera.up.set(Math.sin(plane.roll), Math.cos(plane.roll), 0).applyAxisAngle(UP_Y, plane.yaw);
-        camera.lookAt(plane.x + sy * 30, plane.y + plane.pitch * 30, plane.z + cy * 30);
+        camera.lookAt(plane.x + sy * cp * 14, plane.y + sp * 14, plane.z + cy * cp * 14);
         sNorm = Math.min(1, Math.hypot(plane.vx, plane.vz) / 90);
       } else {
         sNorm = chase.update(subject, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });
