@@ -453,9 +453,21 @@ export class Menu {
       else if (rule.how === 'earn')
         tag = `collect ${rule.at} suns in all — you have collected ${wallet.sunsEarned}`;
       else tag = `${price} suns at a dealership${wallet.suns >= price ? '' : ` — you have ${wallet.suns}`}`;
-      return `<button data-group="car" data-key="${c.id}" title="${c.blurb}"${
-        open ? '' : ` class="locked" data-unlock="${tag}"`
-      }>${c.label}</button>`;
+      /* AND IT HAS TO SAY WHICH ONES ARE YOURS. Operator: "the fact that I was able to change cars
+       * and yet it tells me to go to the dealership to buy the cars, suggests to me that maybe I
+       * started with two cars? It's really confusing. How would I know what cars I have?"
+       *
+       * He was reading a panel that only ever spoke about the cars he could NOT have: a locked car
+       * carried a reason, and an unlocked one carried nothing at all — so "mine", "for sale here"
+       * and "not yet" were three states with two appearances between them. Now every car says which
+       * of the three it is, in its own tooltip, and the one you are driving says so too. */
+      const yours = open;
+      const drivingIt = this.current && this.current.car === c.id;
+      const state = drivingIt ? 'driving' : yours ? 'yours' : 'locked';
+      const own = yours ? `${drivingIt ? 'you are driving this one' : 'yours — pick it to drive it'}` : tag;
+      return `<button data-group="car" data-key="${c.id}" data-state="${state}" title="${c.blurb} — ${own}"${
+        open ? (drivingIt ? ' class="on"' : '') : ` class="locked" data-unlock="${tag}"`
+      }>${yours ? '' : ''}${c.label}</button>`;
     }).join('');
   }
 
