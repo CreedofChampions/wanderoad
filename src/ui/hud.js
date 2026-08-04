@@ -57,10 +57,11 @@
  * the SAME say()/toast this file already had. See OFFROAD_HINT_KEY's own note for why.
  */
 
-import { fmtScore, fmtDistance } from '../game/streak.js';
+import { fmtScore } from '../game/streak.js';
 import { FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
 import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
+import { speedDisplay, fmtDistanceUnits } from '../game/units.js';
 
 /* How far the HUD steps back while the opening cinematic has the screen. NOT 0 — see
  * setCinematic() for why that was wrong. 0.4 is a shade above the level this game already
@@ -190,6 +191,7 @@ export class Hud {
   constructor() {
     this.root = document.getElementById('hud');
     this.kph = document.getElementById('kph');
+    this.speedUnit = document.getElementById('speedUnit');
     this.gear = document.getElementById('gear');
     this.biome = document.getElementById('biome');
     this.coords = document.getElementById('coords');
@@ -291,6 +293,7 @@ export class Hud {
     this._blip = 0;
     this._toastT = 0;
     this._lastGear = null;
+    this._lastSpeedUnit = null;
     this._lastBiome = -1;
     this._shownKm = 0;
     /* Which car the bar is currently counting towards. When this moves ON — and only when the
@@ -384,8 +387,16 @@ export class Hud {
 
   update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null }) {
     // ── speed ──
-    const kph = Math.round(car.kph);
-    this.kph.textContent = kph;
+    // American by default (game/units.js's own DEFAULT_IMPERIAL) — speedDisplay() does the one
+    // conversion and hands back a value and its unit word already agreeing with each other, so
+    // this file never has to know which system is in force. DOM write is guarded the same way
+    // `_lastGear` a few lines below is: only touch it when the label actually changed.
+    const sd = speedDisplay(car.kph);
+    this.kph.textContent = sd.value;
+    if (sd.label !== this._lastSpeedUnit) {
+      this.speedUnit.textContent = sd.label;
+      this._lastSpeedUnit = sd.label;
+    }
 
     const g = car.reverse ? 'R' : Math.abs(car.speed) < 0.6 ? 'N' : String(car.gear);
     if (g !== this._lastGear) {
@@ -410,7 +421,7 @@ export class Hud {
     if (live) {
       // Smooth the displayed distance so the last digit is not a blur at 300 km/h.
       this._shownKm += (s.km - this._shownKm) * Math.min(1, dt * 9);
-      this.streakKm.textContent = fmtDistance(this._shownKm * 1000);
+      this.streakKm.textContent = fmtDistanceUnits(this._shownKm * 1000);
       // The caption is what makes the big number mean anything. It says the mechanic out loud
       // once, quietly, forever — which is cheaper than a tutorial and calmer than a pop-up.
       /* `paused` comes first because it OVERRIDES the other two: while auto-drive has the wheel
@@ -529,7 +540,7 @@ export class Hud {
       // At rest the figure holds the all-time best, because that is the number the fleet
       // unlocks against — the bar underneath is measured in the same units. Never blank:
       // fmtDistance(0) is "0 m", which is a true statement and, more to the point, a box.
-      this.streakKm.textContent = fmtDistance(s.best);
+      this.streakKm.textContent = fmtDistanceUnits(s.best);
       this._setCaption(s.best > 0 ? 'best' : 'start', s.best > 0 ? 'your longest run' : 'stay on the road', dt);
       this.streakMul.textContent = '';
       this.streakPts.textContent = '';
@@ -591,7 +602,7 @@ export class Hud {
     if (ev) {
       if (ev.kind === 'milestone') this.say(ev.text, 3.2);
       else if (ev.kind === 'break') {
-        this.say(`${fmtDistance(ev.distance)} — streak ended`, 3.0);
+        this.say(`${fmtDistanceUnits(ev.distance)} — streak ended`, 3.0);
         // The blip: rust arrives instantly and fades out over the best part of a second. A
         // fade in and out both ways would read as a pulse, and a pulse is a scoreboard.
         this.bar.classList.add('broke');
