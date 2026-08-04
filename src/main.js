@@ -82,6 +82,7 @@ import { Spray } from './game/spray.js';
 import { Props } from './render/props.js';
 import { Loot } from './render/loot.js';
 import { Ramps } from './render/ramps.js';
+import { CRATE_VALUE } from './world/loot.js';
 import { rampsInBox } from './world/ramps.js';
 import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
@@ -2065,7 +2066,13 @@ const TOWN_HERE_M = 70;
      * for why that was the honest interim behaviour rather than a fake unlock. */
     loot.update(dt, car, boatMode.active);
     ramps.update(dt, car);
-    const gainedSuns = loot.drainSuns();
+    /* SALVAGE CRATES — the off-road goodies. Operator: "there should be special off-road goodies
+     * that you can get." Worth CRATE_VALUE suns each rather than a currency of their own: a second
+     * scoreboard for the same act of picking something up is a worse game, not a richer one, and
+     * world/loot.js's own note has the sizing against the unlock rungs. Folded into the sun gain so
+     * every downstream consumer — the wallet, the counter, the achievements — needs no new path. */
+    const gainedCrates = loot.drainCrates();
+    const gainedSuns = loot.drainSuns() + gainedCrates * CRATE_VALUE;
     if (gainedSuns) {
       wallet.addSuns(gainedSuns);
       audio.sun();
