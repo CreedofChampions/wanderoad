@@ -231,6 +231,12 @@ for (const shot of shots) {
      * reopened in the moment between the two. A poster that contradicts its own clip reads as a
      * failed proof to anyone glancing at the page. */
     const { result: png } = await send('Page.captureScreenshot', { format: 'png' }, S);
+    /* AND IT IS ACTUALLY WRITTEN. It was captured and then dropped on the floor: the manifest row
+     * below has always claimed `file: <id>.png`, tools/build-todo.mjs uses that as the <video>
+     * poster and tools/publish-proof.py uploads "every PNG" — so every item recorded since the
+     * poster was captured here has pointed at a file that was never created. A proof card whose
+     * still frame 404s reads as a broken proof. */
+    writeFileSync(`${OUT}/${shot.id}.png`, Buffer.from(png.data, 'base64'));
     if (shutter) clearInterval(shutter);
     // THE POSTER NEVER REACHED DISK. `png.data` was captured and then discarded — every prior run
     // of this tool recorded a `file` name in the manifest and in the published page's <video

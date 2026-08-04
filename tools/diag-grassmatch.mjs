@@ -108,7 +108,7 @@
 
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { decodePng } from './shot-stats.mjs';
 import { biomeWeights, BIOME, BIOME_COUNT } from '../src/world/biomes.js';
@@ -231,7 +231,29 @@ function findBiomeSites(seed) {
   return best;
 }
 
-const sites = findBiomeSites(SEED);
+/* FIXED SITES, when a before/after is being run — and this is not a nicety, it is what makes the
+ * two runs comparable at all. The scan below picks the strongest weight it can find and the car
+ * then drives for a few seconds before the shot, so two runs of this tool photograph two different
+ * places: the first before/after pair measured here had 89% grass coverage in one run's far band
+ * and 1.7% in the other's, which makes the two tables unrelatable no matter how careful the
+ * arithmetic afterwards is. `--spots file.json` pins the coordinates so only the CODE differs
+ * between runs. Format: [{"name":"steppe","x":2700,"z":-4677}]. */
+const spotsArg = (() => {
+  const i = argv.indexOf('--spots');
+  return i >= 0 ? argv[i + 1] : null;
+})();
+const sites = spotsArg
+  ? (() => {
+      const rows = JSON.parse(readFileSync(spotsArg, 'utf8'));
+      const out = {};
+      for (const b of BIOMES) {
+        const r = rows.find((x) => x.name === b.name);
+        if (!r) throw new Error(`--spots file has no entry for ${b.name}`);
+        out[b.i] = { x: r.x, z: r.z, w: biomeWeights(r.x, r.z, SEED).w[b.i] };
+      }
+      return out;
+    })()
+  : findBiomeSites(SEED);
 console.log(`\n── grass/ground colour match — seed ${SEED} — ${URL} ──\n`);
 console.log('sample sites (scanned outward from the origin, src/world/biomes.js biomeWeights):');
 for (const b of BIOMES) {
