@@ -298,7 +298,11 @@ const DRIVE_REACH = 2600;
  * arterial mid-edge with nothing in world/roads.js levelling the pair.
  */
 const BAR_ART = Number(process.env.CROSSLEVEL_BAR_ART ?? 10);
-const BAR_SWEEP = Number(process.env.CROSSLEVEL_BAR_SWEEP ?? 19);
+/* RATCHETED 3 Aug 2026, 19 -> 0. `CROSS_CULL_NODE` in src/world/roads.js took the sweep to 0 of
+ * 247 boxes and the worst mismatch anywhere to 0.00 m, and this file is now in `npm test`, so the
+ * bar is set where the world actually is. A bar left slack at 19 would let eighteen steps come back
+ * silently — which is the only way a fix like that one is ever lost. */
+const BAR_SWEEP = Number(process.env.CROSSLEVEL_BAR_SWEEP ?? 0);
 const okArt = artArt.length <= BAR_ART;
 const okSweep = boxesBad <= BAR_SWEEP;
 const okReverse = globalThis.__reverseBad === 0;
