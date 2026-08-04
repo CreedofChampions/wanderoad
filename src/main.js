@@ -334,6 +334,11 @@ async function boot() {
    * called from anywhere — so it was permanently wrong, on every viewport, not just on resize.
    * Grass aliasing at 100-300 m was reported; this is at minimum a real contributor. */
   grass.setAngular((camera.fov * DEG) / innerHeight);
+  /* The SAME number to the flowers. They had no angular floor at all until B37 — at the 190 m cull
+   * a flower subtended about 0.6 px and a sub-pixel white petal against green flickers rather than
+   * dims, which is the speckle that crawls over far hillsides. One source for both layers means a
+   * resize or a field-of-view change moves them together. */
+  flora.flowers?.setAngular?.((camera.fov * DEG) / innerHeight);
 
   setStat('finding a road…', 0.34);
   // LAND.spawnHigh: only the alpine preset sets it — "alpine start should be in the
@@ -1001,6 +1006,11 @@ async function boot() {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     grass.setAngular((camera.fov * DEG) / innerHeight);
+  /* The SAME number to the flowers. They had no angular floor at all until B37 — at the 190 m cull
+   * a flower subtended about 0.6 px and a sub-pixel white petal against green flickers rather than
+   * dims, which is the speckle that crawls over far hillsides. One source for both layers means a
+   * resize or a field-of-view change moves them together. */
+  flora.flowers?.setAngular?.((camera.fov * DEG) / innerHeight);
   });
   addEventListener('pagehide', () => {
     streak.flush();

@@ -281,6 +281,22 @@ const FLOWER_VS = /* glsl */ `
 uniform float uStemH;    // nominal height of this silhouette, metres
 uniform float uFlex;     // how loosely it moves: a tuft barely does, a spire whips
 uniform vec2  uRing;     // x = where the size fade starts, y = the cull radius
+/* THE ANGULAR SIZE FLOOR, in radians of screen per pixel times the pixels a flower must keep.
+ *
+ * Grass has had one of these since it was written — the max against dist * uLodB.x in
+ * render/grass.js — and flowers never did, which is the whole of B37: at the 190 m cull a flower
+ * subtends about 0.6 px on a 720 px viewport, and a sub-pixel white petal against green does not
+ * dim — it flickers on and off as the sample point moves, which is the speckle the operator sees
+ * crawling over far hillsides.
+ *
+ * Same rule, same source of truth: main.js hands both layers (camera.fov * DEG) / innerHeight, so
+ * a resize or a field-of-view change moves grass and flowers together. Zero disables it, which is
+ * what a tool measuring the BEFORE state sets. */
+uniform float uPixFloor;
+/* The width the flower geometry is BUILT at, in metres — everything is modelled at metre scale
+ * with the root at the origin (see buildFlower), and a head is about 12 cm across. Named rather
+ * than inlined so the floor above reads as a ratio of like for like. */
+const float FLOWER_REF_W = 0.12;
 in vec3 nrm; in vec3 vcol; in float vmat;
 in vec4 iPos;            // xyz = root on the ground, w = scale
 in vec4 iVar;            // yaw, species, phase, biome
@@ -306,6 +322,13 @@ void main(){
   // size is invisible for the last few metres of the ring anyway, and starting the shrink
   // from 1.0 makes the whole far field visibly breathe as the car moves.
   float sc = iPos.w * (0.4 + 0.6*fade);
+  /* ...and then never smaller than the floor. uPixFloor is radians-per-pixel times the pixels to
+   * hold, so dist times uPixFloor is the world width that subtends them at this range; dividing by
+   * the plant's own built width turns that into the scale it needs. FLOWER_REF_W is the width the
+   * geometry is built at (metre scale, root at the origin — see buildFlower), so this is a ratio
+   * of like for like rather than a fudge factor. Applied as a max, so nothing NEAR the camera is
+   * touched: the floor only ever bites once a plant is small enough to sparkle. */
+  sc = max(sc, dist * uPixFloor / FLOWER_REF_W);
   float rot = iVar.x;
   float ca = cos(rot), sa = sin(rot);
   vec3 lp = position * sc;
@@ -393,7 +416,7 @@ void main(){
   outColor = vec4(SAFE3(col), gFogAmt);
 }`;
 
-function flowerMaterial(kind, ring) {
+function flowerMaterial(kind, ring, pixFloor) {
   const A = FLOWER_ARCH[kind];
   return new RawShaderMaterial({
     glslVersion: '300 es',
@@ -403,6 +426,10 @@ function flowerMaterial(kind, ring) {
           uStemH: { value: A.h },
           uFlex: { value: A.flex },
           uRing: { value: ring },
+          // The SHARED object, not a copy — one write in setAngular has to reach all three
+          // materials, the same reason `ring` is shared. Defaults to 0, i.e. no floor at all,
+          // which is exactly the old behaviour and is what a tool sets to measure the BEFORE.
+          uPixFloor: pixFloor ?? { value: 0 },
         },
         windUniforms()
       )
@@ -457,7 +484,24 @@ export class Flowers {
     // One ring vector shared by all three materials: changing the cull distance at runtime
     // then costs one write instead of three.
     this._ring = new Vector2(this.fadeFrom, this.cull);
+    /* THE ANGULAR FLOOR, shared the same way the ring is. Grass has carried one since it was
+     * written; flowers never did, and that is B37 — see uPixFloor in the shader. It starts at 0
+     * (no floor, exactly the old behaviour) and main.js sets it from the live camera, so a build
+     * that forgets to call setAngular looks like it always did rather than silently different. */
+    this._pixFloor = { value: 0 };
     for (const kind of KINDS) this._batch(kind);
+  }
+
+  /**
+   * Radians of vertical field of view per screen pixel — the same number main.js hands
+   * `grass.setAngular`, so the two layers hold their far detail to one rule and a resize moves
+   * both. `px` is how many pixels wide the smallest flower may be; 1.5 rather than 1.0 because a
+   * white petal against green is a high-contrast sample and starts to twinkle before it is
+   * technically sub-pixel — measured on hillsides at 130-190 m, which is where the operator saw it.
+   */
+  setAngular(angPerPx, px = 1.5) {
+    this._pixFloor.value = angPerPx * px;
+    return this;
   }
 
   _batch(kind) {
@@ -482,7 +526,7 @@ export class Flowers {
     // against uCull in the vertex shader.
     geom.boundingSphere = new Sphere(new Vector3(), 1e6);
 
-    const mesh = new Mesh(geom, flowerMaterial(kind, this._ring));
+    const mesh = new Mesh(geom, flowerMaterial(kind, this._ring, this._pixFloor));
     mesh.frustumCulled = false;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
