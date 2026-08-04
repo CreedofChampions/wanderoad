@@ -294,6 +294,17 @@ export class Vehicle {
 
   setTier(tier) {
     this.tier = tier;
+    /* A TIER THAT DOES NOT EXIST FALLS BACK TO SPORTS, and used to do it silently.
+     *
+     * The fallback is right — a car that boots wrong is better than a car that does not boot — but
+     * a car quietly running another tier's mass, wheelbase, power and gearing is indistinguishable
+     * from a car that was tuned badly, and the whole fleet is tuned by measurement. So it says so,
+     * once per unknown tier.
+     *
+     * (Checked while adding this, and worth writing down because the opposite was assumed for an
+     * hour: `micro` and `trike` DO exist. tuning.js on its own exports five tiers, but the game's
+     * own import graph registers seven by the time any car is built, so the Bubble and the Tricycle
+     * are genuinely their own tiers and their numbers are their own.) */
     const S = TIERS[tier] || TIERS.sports;
     this.spec = S;
     this.mass = S.mass;
