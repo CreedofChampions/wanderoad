@@ -2298,10 +2298,71 @@ const TOWN_KIT = [
   ['shed', STATION_APRON_HALF_WIDTH + 9, -12],
   ['drystone_wall', -(STATION_APRON_HALF_WIDTH + 13), -13],
 ];
+
+/* ── WHAT AN UPGRADED TOWN IS ────────────────────────────────────────────────
+ * Operator: "Towns can be upgraded". TOWN_KIT above is the town every station starts with — the
+ * tier-0 town, and it is not repeated here. These two lists are what gets ADDED at tier 1 and at
+ * tier 2, so a town only ever grows and a save that predates the feature keeps exactly the town it
+ * had.
+ *
+ * TIER 1 IS A STREET. The tier-0 cluster is landmarks with gaps between them: a pole, a phone box,
+ * a shed, a clock tower. What it is missing is the ordinary stuff that makes a place look lived in
+ * at ground level, so this tier is dwellings and the boundary between them — two cottages facing
+ * the road, a wall and a fence line to give them plots, a gate, a village sign, and the two things
+ * every real village green has, a bench and a post box.
+ *
+ * TIER 2 IS A SKYLINE. The silhouette audit that shaped TOWN_KIT measured the problem exactly: at
+ * 200 m a 7.5 m telegraph pole subtends 2.1 degrees, under the tree line it stands behind, and no
+ * amount of placement fixes an object shorter than its backdrop. A 14 m clock tower is 4.0 degrees
+ * and that is what made tier 0 findable at all. Tier 2 buys three more of that class — a windmill,
+ * a water tower and a chapel — so an upgraded town is a place you can steer towards from much
+ * further out than an unimproved one, which is the entire reason to buy it.
+ *
+ * SAME DISCIPLINE AS THE ORIGINAL KIT, deliberately: every id is already in the catalogue (no new
+ * geometry family), every |dx| clears STATION_APRON_HALF_WIDTH so nothing can land on the forecourt
+ * or the access spur, the tall pieces sit furthest out where the ground is real rather than the
+ * apron's own batter, and several entries are near-duplicates on opposite sides with an `alt` tag
+ * so that whichever side of a given station is flat and dry gets the piece. The audit measured the
+ * old kit delivering 2 of 4 at a real station; a kit that needs every piece to land is a kit that
+ * usually looks half-built. */
+const TOWN_TIER_1 = [
+  ['cottage', -(STATION_APRON_HALF_WIDTH + 16), 9, 'home_a'],
+  ['cottage', STATION_APRON_HALF_WIDTH + 17, 8, 'home_a'],
+  ['cottage', STATION_APRON_HALF_WIDTH + 15, -17, 'home_b'],
+  ['log_cabin', -(STATION_APRON_HALF_WIDTH + 18), -16, 'home_b'],
+  ['drystone_wall', STATION_APRON_HALF_WIDTH + 11, 17],
+  ['pasture_fence', -(STATION_APRON_HALF_WIDTH + 10), 19],
+  ['wooden_gate', STATION_APRON_HALF_WIDTH + 8, 21],
+  ['village_sign', -(STATION_APRON_HALF_WIDTH + 7), -9],
+  ['bench', STATION_APRON_HALF_WIDTH + 6, -7],
+  ['post_box', -(STATION_APRON_HALF_WIDTH + 6), 7],
+];
+const TOWN_TIER_2 = [
+  ['windmill', -(STATION_APRON_HALF_WIDTH + 30), 22, 'mill'],
+  ['windmill', STATION_APRON_HALF_WIDTH + 31, 20, 'mill'],
+  ['water_tower', STATION_APRON_HALF_WIDTH + 26, -24, 'tall2'],
+  ['water_tower', -(STATION_APRON_HALF_WIDTH + 27), -22, 'tall2'],
+  ['chapel', -(STATION_APRON_HALF_WIDTH + 24), 27, 'chapel'],
+  ['chapel', STATION_APRON_HALF_WIDTH + 25, 26, 'chapel'],
+  ['market_stall', STATION_APRON_HALF_WIDTH + 13, 12],
+  ['tea_house', -(STATION_APRON_HALF_WIDTH + 14), 14],
+  ['dovecote', STATION_APRON_HALF_WIDTH + 19, 4],
+  ['lantern_pair', -(STATION_APRON_HALF_WIDTH + 9), -19],
+];
+/** The pieces a town of this tier is built from — tier 0's kit plus everything bought since. */
+export const TOWN_TIERS = [TOWN_KIT, TOWN_TIER_1, TOWN_TIER_2];
+export function townKitFor(tier) {
+  const t = Math.max(0, Math.min(TOWN_TIERS.length - 1, tier | 0));
+  const out = [];
+  for (let i = 0; i <= t; i++) out.push(...TOWN_TIERS[i]);
+  return out;
+}
+
 /** Furthest a town candidate can sit from the forecourt centre, and the query-box expansion —
- *  the widest TOWN_KIT offset above (STATION_APRON_HALF_WIDTH + 22 + a 14 m dz ~= 34) plus a
- *  margin for the piece's own footprint. */
-const TOWN_MAX_OFFSET = 60;
+ *  the widest offset in any tier (STATION_APRON_HALF_WIDTH + 31 + a 27 m dz ~= 55) plus a
+ *  margin for the piece's own footprint. Raised from 60 with the upgrade tiers, which put the
+ *  windmills and water towers further out than anything tier 0 has. */
+const TOWN_MAX_OFFSET = 92;
 
 /**
  * A station's own small landmark cluster, whose footprint lands inside the box. Same call
@@ -2314,7 +2375,7 @@ const TOWN_MAX_OFFSET = 60;
  * @param {object} probe same shape propsInBox takes: `.site(x,z)` and `.height(x,z)`.
  * @param {object} [stats] optional rejection tally, same convention as propsInBox.
  */
-export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
+export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null, townLevel = null) {
   const site = probe.site;
   const height = probe.height || ((x, z) => probe.site(x, z).y);
   const out = [];
@@ -2337,8 +2398,13 @@ export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
      * REDUNDANCY note on TOWN_KIT. One clock tower per station, not one per side. Deterministic
      * because the kit order is fixed and every test below is a pure function of position. */
     const filled = new Set();
-    for (let i = 0; i < TOWN_KIT.length; i++) {
-      const [id, ldx, ldz, alt] = TOWN_KIT[i];
+    /* THE KIT THIS TOWN HAS BOUGHT. `townLevel` is handed in by the caller (render/props.js reads
+     * it off the wallet) rather than looked up here, because this file is pure world: it knows
+     * where a town is, not what a player owns. Absent — every tool that calls this without a
+     * wallet — it is tier 0, which is the town that has always been here. */
+    const kit = townKitFor(townLevel ? townLevel(st.key) : 0);
+    for (let i = 0; i < kit.length; i++) {
+      const [id, ldx, ldz, alt] = kit[i];
       if (alt !== undefined && filled.has(alt)) continue;
       const kind = PROP_BY_ID[id];
       if (!kind) continue;

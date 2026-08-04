@@ -449,6 +449,11 @@ async function boot() {
    * the ones that do not (benches, flower beds, fingerposts) stay drive-through on purpose —
    * cans are never solid, by the same logic: you collect one by driving through it. */
   const props = new Props({ seed: SEED, scene, solids });
+/* HOW CLOSE COUNTS AS BEING IN THE TOWN, metres. The station apron is 11.5 m either side of the
+ * pumps and the town spreads out to about 55 m beyond that, so 70 m is standing among the buildings
+ * rather than merely on the same road as them. Deliberately tighter than the streak-forgiveness
+ * radius: that one is about not punishing you for stopping, this one is about whose town it is. */
+const TOWN_HERE_M = 70;
   /* Fuel reads the stations AND the cans the props renderer has already loaded rather than
    * re-deriving the road network — the pure lookups in world/props.js cost tens of
    * milliseconds. props.update() below is called with the car's own x/z every frame, so it
@@ -458,6 +463,9 @@ async function boot() {
    * — so the wallet has to exist before the fuel system and the garage, both of which read it.
    * See src/game/wallet.js's own header. */
   const wallet = new Wallet();
+  /* The tiler asks the wallet how big each town is. Set here rather than passed to the Props
+   * constructor because Props is built before the Wallet exists — see Props.setTownLevels. */
+  props.setTownLevels((stationKey) => wallet.townLevel(stationKey));
 
   /* The off-road dust cue. Owns one InstancedMesh and nothing else; see src/game/spray.js. */
   const spray = new Spray({ scene });
@@ -780,6 +788,21 @@ async function boot() {
     device: () => input.device,
     atPump: () => atPumpShop(),
     atHarbour: () => atHarbour(),
+    /* WHICH TOWN YOU ARE STANDING IN, for the Garage's town row. The same `findStation` answer the
+     * fuel gauge and the streak forgiveness use — one source for "the nearest station", so the row
+     * cannot disagree with the arrow pointing at it — gated on being close enough to call it being
+     * THERE rather than near it. `key` is the station's own world key (`st:<edgeKey>`), which is a
+     * pure function of the seed and the lattice, so the town you upgrade stays the town you
+     * upgraded across reloads. */
+    townHere: () => {
+      const st = fuel.nearest;
+      if (!st || !st.key || !(st.dist <= TOWN_HERE_M)) return null;
+      return { key: st.key, x: st.x, z: st.z, name: st.name || null, dist: st.dist };
+    },
+    /* Make the new buildings appear while you are standing in them — see Props.rebuildAround. */
+    rebuildTown: (here) => {
+      if (here) props.rebuildAround(here.x, here.z, 240);
+    },
     say: (t, secs) => hud.say(t, secs),
     onCheat: (on) => {
       setCheat(on);

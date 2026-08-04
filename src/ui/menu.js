@@ -211,6 +211,7 @@ export class Menu {
 
         <h3>Tank <small>a bigger tank for the car you are driving — bought at a dealership</small></h3>
         <div class="row" data-group="tank"></div>
+        <div class="row" data-group="town"></div>
 
         <h3>Shop <small>a boat at a harbour, spare fuel cans at a petrol station</small></h3>
         <div class="row" data-group="shop"></div>
@@ -270,6 +271,7 @@ export class Menu {
     this._fillDrive();
     this._fillCars();
     this._fillTank();
+    this._fillTown();
     this._fillShop();
     this._fill('terrain', Object.keys(TERRAINS).map((k) => [k, TERRAINS[k].label]));
 
@@ -483,6 +485,38 @@ export class Menu {
     }>${label}</button>`;
   }
 
+  /* ── UPGRADING THE TOWN YOU ARE STANDING IN ──────────────────────────────
+   * Operator: "Towns can be upgraded". A town belongs to a PLACE, so this row follows the shop's
+   * rule rather than the tank's: it is always shown, and when you are not at a station it says
+   * where to go instead of disappearing. A row that vanishes when it is not usable is a feature
+   * the player never learns exists. */
+  _fillTown() {
+    const row = this.root.querySelector('[data-group="town"]');
+    if (!row) return;
+    const wallet = this.hooks.wallet ? this.hooks.wallet() : null;
+    const here = this.hooks.townHere ? this.hooks.townHere() : null;
+    if (!wallet) {
+      row.innerHTML = '';
+      return;
+    }
+    if (!here || !here.key) {
+      row.innerHTML =
+        '<button class="locked" data-unlock="drive onto a forecourt to build up its town">Upgrade a town · at a station</button>';
+      return;
+    }
+    const tier = wallet.townLevel(here.key);
+    const price = wallet.townPrice(here.key);
+    if (price === null) {
+      row.innerHTML = `<button class="locked" data-unlock="every building this town can have is built">${here.name || 'This town'} is fully built</button>`;
+      return;
+    }
+    const canAfford = wallet.suns >= price;
+    const label = `Build up ${here.name || 'this town'} · tier ${tier + 1} · ${price} suns`;
+    row.innerHTML = `<button data-group="town" data-key="buy"${
+      canAfford ? '' : ` class="locked" data-unlock="you have ${wallet.suns}"`
+    }>${label}</button>`;
+  }
+
   /* The two purchases that belong to a PLACE rather than to the car: the boat at a harbour and a
    * spare fuel can at a pump. Operator: "buying a boat ... isn't automatic, but something you get at
    * the harbor", and "make it so you can buy gas cans in the petrol stations".
@@ -677,6 +711,26 @@ export class Menu {
       }
       this.hooks.say?.(`bigger tank fitted — ${(fuel.capacity / 60).toFixed(0)} min now`, 3.0);
       this._fillTank();
+    } else if (group === 'town') {
+      const wallet = this.hooks.wallet?.();
+      const here = this.hooks.townHere?.();
+      if (!wallet) return;
+      if (!here || !here.key) {
+        this.hooks.say?.('towns are built up at a station — drive onto a forecourt', 3.4);
+        return;
+      }
+      const price = wallet.townPrice(here.key);
+      if (price === null) return;
+      const tier = wallet.buyTown(here.key);
+      if (!tier) {
+        this.hooks.say?.(`building this town up costs ${price} suns — you have ${wallet.suns}`, 3.4);
+        return;
+      }
+      this.hooks.say?.(`${here.name || 'the town'} grew — tier ${tier}`, 3.2);
+      /* The town has to appear NOW, not the next time this tile streams — you are standing in it.
+       * See Props.rebuildAround for why forcing a reshape is not enough on its own. */
+      this.hooks.rebuildTown?.(here);
+      this._fillTown();
     } else if (group === 'shop') {
       const wallet = this.hooks.wallet?.();
       if (!wallet) return;

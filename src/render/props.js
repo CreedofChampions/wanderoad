@@ -2072,6 +2072,12 @@ function haloTexture() {
  */
 export class Props {
   constructor({ seed, scene, solids = null, range = RANGE, tile = TILE }) {
+    /* HOW BIG THE TOWN AT A GIVEN STATION IS, asked as a function rather than held as a value.
+     * Props is built at src/main.js before the Wallet that owns the answer is, so a reference
+     * taken here would be to nothing; and the answer changes mid-session the moment a town is
+     * bought. Null until setTownLevels() is called, and null means tier 0 — the town every
+     * station has always had — so any tool that builds a Props without a wallet still works. */
+    this._townLevel = null;
     this.seed = seed >>> 0;
     this.scene = scene;
     this.solids = solids;
@@ -2406,7 +2412,7 @@ export class Props {
         // BUILDERS[id] dispatch and picks up a collision hitbox for free wherever the
         // catalogue entry already declares one.
         job.props = propsInBox(ox, oz, ox + size, oz + size, this.seed, job.probe)
-          .concat(stationTownInBox(ox, oz, ox + size, oz + size, this.seed, job.probe));
+          .concat(stationTownInBox(ox, oz, ox + size, oz + size, this.seed, job.probe, null, this._townLevel));
         job.phase = 2;
         return;
       case 2:
@@ -2717,6 +2723,49 @@ export class Props {
 
     this.live.set(key, { mesh, props, stations, cans: canKeys, verts: M.n, tris: M.idx.length / 3 });
     this._recount();
+  }
+
+  /** Tell the tiler where to look up a town's tier. See `_townLevel` in the constructor. */
+  setTownLevels(fn) {
+    this._townLevel = typeof fn === 'function' ? fn : null;
+  }
+
+  /* ── REBUILDING A TOWN THAT JUST GREW ────────────────────────────────────
+   * A tile is baked once and then left alone: `_reshape` only releases tiles that have left the
+   * want-set, so a town you upgrade while standing in it would not appear until you drove far
+   * enough away to unload it and came back. Forcing `_lastCx = Infinity` does NOT help — that
+   * only re-runs `_reshape`, which skips every tile still in range, which is precisely the tile
+   * you are standing on.
+   *
+   * So this releases them explicitly, by world position, and lets the ordinary streaming path
+   * re-bake them nearest-first on the following frames. Radius rather than a single tile because
+   * a town spans up to TOWN_MAX_OFFSET from its station and can therefore straddle a tile edge.
+   * Returns how many were dropped, so a caller can say whether anything actually happened. */
+  rebuildAround(x, z, radius = 200) {
+    let n = 0;
+    for (const [key, rec] of [...this.live]) {
+      const [tx, tz] = key.split(',').map(Number);
+      const cx = tx * this.tile + this.tile / 2;
+      const cz = tz * this.tile + this.tile / 2;
+      if (Math.hypot(cx - x, cz - z) > radius + this.tile) continue;
+      this._release(key, rec);
+      n++;
+    }
+    /* The pending queue can hold a job for one of those tiles that was baked from the OLD tier —
+     * dropping it too means the rebuild is not racing a stale job. */
+    this.pending = this.pending.filter((pj) => {
+      const cx = pj.tx * this.tile + this.tile / 2;
+      const cz = pj.tz * this.tile + this.tile / 2;
+      return Math.hypot(cx - x, cz - z) > radius + this.tile;
+    });
+    if (this._job) {
+      const cx = this._job.tx * this.tile + this.tile / 2;
+      const cz = this._job.tz * this.tile + this.tile / 2;
+      if (Math.hypot(cx - x, cz - z) <= radius + this.tile) this._job = null;
+    }
+    /* Force the next update() to re-run _reshape, which is what queues the tiles just dropped. */
+    this._lastCx = Infinity;
+    return n;
   }
 
   _release(key, rec) {
