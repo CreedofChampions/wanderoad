@@ -407,7 +407,22 @@ void main(){
     lit = deep*1.18;
     mid = deep*0.74;
     shd = mix(deep*0.34, K_SHADOW*0.44, 0.22);
-    rim = 0.34;
+    /* B48, the operator: "the cars still look bad — try reflective paint."
+     *
+     * Coach paint had a rim of 0.34 and nothing else angle-dependent, so a body panel was three
+     * flat bands however the car sat in the light. That is what makes it read as coloured card:
+     * real paint has a clear coat over it, and a clear coat does two things this branch was not
+     * doing — it brightens hard towards a grazing angle, and it carries a small SKY-COLOURED
+     * highlight that is not the paint's own hue.
+     *
+     * Both are added from terms this shader already has, so there is no new uniform and no second
+     * light: fres is the same Fresnel curve the glass branch now uses (B49), and K_SKY_MID is
+     * the same sky colour every other surface here reflects. The tint is deliberately weak at 0.14
+     * — a clear coat is a thin layer, and mixing more sky in is exactly how a red car turns pink
+     * in the shade, which is the failure the MATTE note above this line already records. */
+    float fres = pow(1.0 - clamp(dot(normalize(vN), normalize(V)), 0.0, 1.0), 4.0);
+    lit = mix(lit, mix(lit, K_SKY_MID, 0.14)*1.35, fres);
+    rim = mix(0.34, 0.92, fres);
   }
 
   float ndl = dot(N,uSunDir);
