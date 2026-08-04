@@ -75,8 +75,38 @@ export const PLANE = {
   lift: 0.055,
   /** m/s below which the wing stops flying and the nose drops. */
   stallSpeed: 22,
+  /* A STALL THAT ACTUALLY STALLS. Operator: "they should stall out when going upwards." stallDrop
+   * is rad/s² of nose-down torque the wing forces at a full stall, deliberately MORE than
+   * pitchTorque (1.5) so holding the stick back cannot out-muscle it — a real wing does not care
+   * how hard the stick is pulled once it has stopped flying. 3.6 rather than the 2.4 first tried:
+   * at 2.4 the two torques found a polite equilibrium eleven degrees below the peak and the
+   * aeroplane MUSHED there, nose high, for ever (bench-plane check 8 measured it before this
+   * number moved). This nose-drop, and the HUD callout beside it in main.js, are what make
+   * running out of wing legible instead of the plane just quietly refusing to gain height. */
+  stallDrop: 3.6,
+  /** How much pitch authority fades at full stall — the stick still does something, just not as
+   * much as a wing that is still flying would give it. */
+  stallSoften: 0.6,
+  /* CLIMBING RAISES THE SPEED THE WING NEEDS. On paper a full-power climb equilibrates just under
+   * stallSpeed (thrust 14 minus gravity 9.81, over drag 0.0092 gives about 21 m/s straight up) —
+   * but the pitch clamp stops at 77 degrees, not the vertical, and MEASURED (bench-plane, 14 s of
+   * full power and full back stick) the climb bottoms out at 22.2 m/s: a hair ABOVE the wing's
+   * 22, so the "stall" never arrived and the aeroplane hung on its propeller for ever. Rather
+   * than nudge numbers until two curves happen to cross, the threshold does what a real wing
+   * does: demand more airspeed the harder you are climbing (a climb is flown at higher angle of
+   * attack, and gravity is taxing the airspeed the whole way up). The stall speed grows by this
+   * fraction of itself at a vertical climb, scaled by vy/v — zero when level, and a DESCENT can
+   * never stall, which is what keeps the hands-off glide (throttleNeutral's whole point) a glide. */
+  climbStall: 0.35,
   /** m/s² of gravity. The same number the cars fall at. */
   gravity: 9.81,
+  /* BANKING COSTS ALTITUDE. Operator: "planes should lose altitude when moving to the left or to
+   * the right, as they would naturally." A wing's lift points along the wing's own up, not the
+   * world's — bank it over and the vertical share of that lift shrinks, so gravity keeps whatever
+   * share it gave up. bankSink is that shortfall expressed as a fraction of g at knife-edge (90
+   * degrees of bank, no vertical lift left at all). See the forces section below for the term
+   * itself. */
+  bankSink: 1.5,
   /** Angular damping, 1/s: how quickly a rotation settles when the stick is released. */
   angularDamp: 2.4,
   /* Roll self-centring, 1/s^2 per radian of bank — a stand-in for the dihedral a real wing has.
@@ -127,6 +157,8 @@ export class Plane {
     this.r = 0; // roll rate
     this.throttle = PLANE.throttleNeutral;
     this._saidLocked = false;
+    /** 0..1, how stalled the wing was on the last step — update() writes it, state reads it. */
+    this._stall = 0;
   }
 
   /** Earned by gems at sea, by the pass, or already latched — same shape as the boat's. */
@@ -180,6 +212,7 @@ export class Plane {
     this.vz = Math.cos(this.yaw) * v;
     this.vy = 0;
     this.p = this.q = this.r = 0;
+    this._stall = 0;
     this.throttle = inAir ? 0.7 : 1;
     this.active = true;
     this.say(inAir ? 'in the air — S to ease off, W for power' : 'rolling — pull back to climb', 3.2);
@@ -209,6 +242,22 @@ export class Plane {
     const brakePower = PLANE.brakeDrag * clamp01((PLANE.throttleNeutral - want) / PLANE.throttleNeutral);
     const rate = PLANE.throttleRate * (1 + brakePower);
     this.throttle += clamp(want - this.throttle, -rate * dt, rate * dt);
+
+    /* ── stall, computed once and spent twice below ─────────────────────
+     * Operator: "they should stall out when going upwards." `stall` ramps 0 to 1 over the last 8
+     * m/s above stallSpeed, so what follows arrives as a fade rather than a cliff edge. Gated on
+     * being airborne — `altitude` is ground clearance, and Infinity with no terrain counts as
+     * airborne too, same as everywhere else this getter is read — because a slow ground roll or a
+     * landing flare is not a stall, it is the whole POINT of being slow near the runway, and the
+     * same v0 < stallSpeed test would otherwise nose the plane into the tarmac on takeoff. */
+    const v0 = this.speed;
+    const airborne = this.altitude > 4; // ground roll and landing flare must not nose-drop
+    /* The speed the wing needs right now: stallSpeed level, more in a climb (see climbStall's
+     * comment), never more in a descent. */
+    const climbing = v0 > 1e-4 ? Math.max(0, this.vy / v0) : 0;
+    const needed = PLANE.stallSpeed * (1 + PLANE.climbStall * climbing);
+    const stall = airborne ? clamp01((needed - v0) / 8) : 0;
+    this._stall = stall;
 
     /* ── the stick ───────────────────────────────────────────────────────
      * Torque per axis, then a damping term so releasing the stick settles rather than holding the
@@ -241,7 +290,7 @@ export class Plane {
     const stickRoll = clamp(i.steer || 0, -1, 1);
     const stickYaw = clamp(i.yaw || 0, -1, 1);
 
-    this.p += (stickPitch * PLANE.pitchTorque - this.p * PLANE.angularDamp) * dt;
+    this.p += (stickPitch * PLANE.pitchTorque * (1 - PLANE.stallSoften * stall) - stall * PLANE.stallDrop - this.p * PLANE.angularDamp) * dt;
     this.r += (stickRoll * PLANE.rollTorque - this.r * PLANE.angularDamp - Math.sin(this.roll) * PLANE.rollCentre) * dt;
 
     /* THE BANK TRICK, and it is the reason this model feels like flying.
@@ -293,6 +342,15 @@ export class Plane {
     az += (nz - (v > 1e-4 ? this.vz / v : 0)) * liftAccel;
 
     ay -= PLANE.gravity;
+    /* BANKING COSTS ALTITUDE. Operator: "planes should lose altitude when moving to the left or to
+     * the right, as they would naturally." `1 - cos(roll)` is the vertical share of lift a banked
+     * wing has given up — 0 wings-level, 1 at knife-edge — and `Math.min(1, ...)` holds it there
+     * rather than letting inverted flight (roll past 90) claim MORE than a full g back, which
+     * would double-charge what gravity is already collecting on its own. Multiplying by `flying`
+     * rather than gating it separately means a wing that has already stalled is not charged for
+     * banking on top of having no lift to lose in the first place — see bankSink's own comment in
+     * the PLANE constants above for the rest of the reasoning. */
+    ay -= PLANE.gravity * Math.min(1, 1 - Math.cos(this.roll)) * PLANE.bankSink * flying;
 
     this.vx += ax * dt;
     this.vy += ay * dt;
@@ -350,7 +408,10 @@ export class Plane {
       roll: this.roll,
       unlocked: this.unlocked,
       gemsToGo: this.gemsToGo,
-      stalling: this.active && this.speed < PLANE.stallSpeed,
+      /* True when the stall has actually taken hold — the same climb-aware measure the physics
+       * runs on, past the point where the nose-drop is winning — not at the first whisper of it,
+       * so the HUD callout means "the wing has let go", not "you are a little slow". */
+      stalling: this.active && this._stall > 0.35,
     };
   }
 }

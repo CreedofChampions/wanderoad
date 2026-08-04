@@ -180,14 +180,20 @@ console.log('\n-- the aeroplane you SEE matches the one that flies -------------
    *   PITCH IS NEGATED. The nose is +Z; a positive rotation about X carries +Z towards -Y, i.e.
    *   nose DOWN - and the model means CLIMBING by a positive pitch. Opposite senses, sign flips.
    *
-   *   ROLL IS NOT. The right wing is +X; a positive rotation about Z carries +X towards +Y, i.e.
-   *   right wing UP, which is a bank to the LEFT - and the model already means a left bank by a
-   *   positive roll (check 4b asserts left.roll > 0, "banks INTO the turn"). Same sense, sign stays.
+   *   ROLL IS NEGATED TOO — and the version of this check that said otherwise had put the right
+   *   wing on +X. Face along +Z in a right-handed Y-up frame and your right hand is on -X (rotate
+   *   +Z by -90 about Y: (-1,0,0) — the same arithmetic the yaw convention runs on). +X is the
+   *   LEFT wingtip. A positive rotation about Z carries +X towards +Y, so it lifts the LEFT wing:
+   *   a bank to the RIGHT on screen. The model means a bank to the LEFT by a positive roll (check
+   *   4b asserts left.roll > 0), so the mesh takes the negated roll, exactly like the pitch.
    *
-   * Both were negated for weeks, and a comment in main.js claimed film had confirmed it when no
-   * clip had ever been taken. Measured on the live beta holding A for 4.2 s: heading +6 deg (left),
-   * model roll +21 deg, mesh -21 deg - turning left with the right wing dropped. After the fix:
-   * heading +8 deg, model roll +22, mesh +22, and three frames show the left wing low. */
+   * The empirical anchor is the operator on 4 Aug, playing the build that fed roll through
+   * unnegated: "when i go left on the stick, the plane tilts to the right instead of the left,
+   * but it goes to the left." Motion right, picture mirrored. The earlier films that seemed to
+   * show +roll drawing a LEFT bank were all shot while B78 still rolled the CAMERA with the
+   * aeroplane, which paints the world as if the plane rolled the opposite way — the instrument
+   * doing the judging was itself inverted. tools/diag-plane-view.mjs now measures wingtip PIXELS
+   * against a camera whose up is world-up, which is the only reading that settles this. */
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
   const m = /planeMesh\.rotation\.set\(([^)]*)\)/.exec(src);
@@ -195,8 +201,64 @@ console.log('\n-- the aeroplane you SEE matches the one that flies -------------
   check(!!m, 'the mesh takes its pose from the flight model at all', m ? args.slice(0, 3).join(' | ') : 'none', 'found');
   check(args[0] === '-plane.pitch', 'PITCH is negated - a +X rotation points the nose down, the model means climb', args[0] || '(none)', '-plane.pitch');
   check(args[1] === 'plane.yaw', 'YAW is not - a +Z nose rotated about Y lands on (sin yaw, cos yaw) exactly', args[1] || '(none)', 'plane.yaw');
-  check(args[2] === 'plane.roll', 'ROLL is NOT negated - a +Z rotation lifts the RIGHT wing, which is a LEFT bank, and the model already means left by a positive roll', args[2] || '(none)', 'plane.roll');
+  check(args[2] === '-plane.roll', 'ROLL is negated - a +Z rotation lifts the LEFT wing (+X, on a +Z nose), a RIGHT bank on screen, and the model means LEFT by a positive roll', args[2] || '(none)', '-plane.roll');
   check(!/confirmed by filming/.test(src), 'and nothing claims film that was never taken - that claim protected the wrong sign for weeks', 'no such claim', 'absent');
+}
+
+/* ── 7. BANKING COSTS ALTITUDE ────────────────────────────────────────────── */
+console.log('\n── a bank pays for its turn in height ─────────────────────────────────────');
+{
+  /* Operator: "planes should lose altitude when moving to the left or to the right, as they would
+   * naturally." The physics is PLANE.bankSink — the vertical share of lift a banked wing gives up —
+   * and the check is relative on purpose: the level run and the banked run fly the same seconds at
+   * the same throttle, so trim drift cancels and what is left is the cost of the bank itself. */
+  const banked = airborne(w);
+  for (let i = 0; i < 8 / DT; i++) banked.update(DT, STICK({ throttle: 0.8, steer: 1 }));
+  const level = airborne(w);
+  for (let i = 0; i < 8 / DT; i++) level.update(DT, STICK({ throttle: 0.8 }));
+  const cost = level.y - banked.y;
+  console.log(`       8 s at 0.8 throttle: level ${level.y.toFixed(0)} m, banked ${banked.y.toFixed(0)} m (bank ${((banked.roll * 180) / Math.PI).toFixed(0)} deg) — the bank cost ${cost.toFixed(0)} m`);
+  check(cost > 30, 'a held bank sinks well below the level run', `${cost.toFixed(0)} m`, '> 30 m');
+  check(banked.active && banked.y > 0, 'and it is a descent, not a crash', `${banked.y.toFixed(0)} m`, '> 0 m');
+}
+
+/* ── 8. A SUSTAINED CLIMB RUNS OUT OF WING ────────────────────────────────── */
+console.log('\n── going up stalls, exactly as asked ──────────────────────────────────────');
+{
+  /* Operator: "they should stall out when going upwards." Full power, full back stick, held. The
+   * climb steepens, gravity taxes the airspeed, and the wing's own demand RISES with the climb
+   * (PLANE.climbStall — measured here first: without it the climb bottomed at 22.2 m/s, a hair
+   * above the flat 22, and hung on the propeller for ever). Once demand crosses supply,
+   * PLANE.stallDrop out-muscles the held stick and the nose comes DOWN with the stick still hard
+   * back. The peak-pitch comparison is the whole point — a plane that merely stopped climbing
+   * would keep its nose up and hang there, which is the "quietly refusing" this replaces. */
+  const p = airborne(w);
+  let minV = Infinity;
+  let peakPitch = -Infinity;
+  for (let i = 0; i < 14 / DT; i++) {
+    p.update(DT, STICK({ throttle: 1, pitch: 1 }));
+    if (p.speed < minV) minV = p.speed;
+    if (p.pitch > peakPitch) peakPitch = p.pitch;
+  }
+  console.log(`       14 s of full power, full back stick: slowest ${minV.toFixed(1)} m/s (level stall is ${PLANE.stallSpeed}), pitch peaked ${((peakPitch * 180) / Math.PI).toFixed(0)} deg, ended ${((p.pitch * 180) / Math.PI).toFixed(0)} deg`);
+  check(peakPitch > 0.7, 'it does get to climb steeply first', `${((peakPitch * 180) / Math.PI).toFixed(0)} deg`, '> 40 deg');
+  check(p.pitch < peakPitch - 0.25, 'then the nose comes DOWN with the stick still held back', `${(((peakPitch - p.pitch) * 180) / Math.PI).toFixed(0)} deg off the peak`, '> 14 deg off');
+}
+
+/* ── 9. THE STALL DOES NOT REACH THE RUNWAY ───────────────────────────────── */
+console.log('\n── slow near the ground is a take-off, not a stall ────────────────────────');
+{
+  /* The stall is gated on altitude > 4 m precisely so a ground roll — always below stallSpeed at
+   * first — is not nosed into the tarmac while trying to rotate. Runway start, slow, stick back. */
+  const p = new Plane({ wallet: w, terrain: FLAT, say: () => {} });
+  p.start({ x: 0, z: 0, y: 0, yaw: 0, speed: 10 }, false);
+  let minPitch = Infinity;
+  for (let i = 0; i < 1.2 / DT; i++) {
+    p.update(DT, STICK({ throttle: 0.5, pitch: 1 }));
+    if (p.y - 0 < 4 && p.pitch < minPitch) minPitch = p.pitch;
+  }
+  console.log(`       1.2 s of back stick from a 10 m/s ground roll: pitch never below ${((minPitch * 180) / Math.PI).toFixed(1)} deg while under 4 m`);
+  check(minPitch >= 0.05, 'the nose never drops during the roll', `${((minPitch * 180) / Math.PI).toFixed(1)} deg`, '>= 2.9 deg (the runway nose-up)');
 }
 
 console.log(`\n${failures ? `${failures} PLANE CHECK(S) FAILED` : 'all plane checks passed'}\n`);

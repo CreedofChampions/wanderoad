@@ -385,13 +385,16 @@ export class Hud {
     this.root.style.pointerEvents = on ? 'none' : '';
   }
 
-  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null }) {
+  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null, flightKph = null }) {
     // ── speed ──
     // American by default (game/units.js's own DEFAULT_IMPERIAL) — speedDisplay() does the one
     // conversion and hands back a value and its unit word already agreeing with each other, so
     // this file never has to know which system is in force. DOM write is guarded the same way
     // `_lastGear` a few lines below is: only touch it when the label actually changed.
-    const sd = speedDisplay(car.kph);
+    // While flying, flightKph is the aeroplane's own airspeed — the car underneath is parked and
+    // frozen, so car.kph would just show whatever it read the instant before take-off forever.
+    // The unit conversion applies to whichever one is carrying you.
+    const sd = speedDisplay(flightKph ?? car.kph);
     this.kph.textContent = sd.value;
     if (sd.label !== this._lastSpeedUnit) {
       this.speedUnit.textContent = sd.label;
