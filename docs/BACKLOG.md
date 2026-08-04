@@ -207,7 +207,35 @@ FIVE APPROACHES, ALL MEASURED, ALL REVERTED:
    the cost is entirely in the longitudinal profile: a short tangent makes the road hug its chord,
    and the chord does not follow the terrain.
 
-WHAT A SIXTH ATTEMPT SHOULD DO. The separation and the gradient are only in conflict because the
+THE SIXTH ATTEMPT, TRIED 4 AUG — HALF OF IT SHIPPED, THE OTHER HALF IS NOW CLOSED.
+
+The elevation half works and is live: a longer height-smoothing window either side of a node
+(`JOINT_GRADE_BOOST` 2.0 over `JOINT_WINDOW` 140 m in roads.js), applied AFTER the earthwork clamp.
+Position is a measurement, not a preference — run BEFORE the clamp it improved every median grade
+and made every WORST grade worse (meadow 26.3 -> 28.5, rolling 26.1 -> 29.0), because a flatter
+approach leaves the land further away, the clamp chops it back, and a clamp is a corner.
+
+That headroom was spent on `NODE_FAN` 0.28 -> 0.31: braiding **15.9% -> 12.8%** with nothing traded
+— all six diag-relief presets at or under baseline (meadow 26.3 -> 25.7, rolling 26.1 -> 25.5,
+alpine 28.1 -> 27.4, plains 21.8 -> 21.4, dunes 22.5 -> 22.1, marsh 19.0 -> 18.9), and
+diag-crossing-angle better too (mean 8.42 -> 5.49 deg, worst 61.5 -> 23.7). diag-smooth confirms the
+roads did not straighten: arterial facet mean 5.92 -> 5.87 deg.
+
+THE TANGENT HALF IS FALSIFIED A SECOND TIME, with the window in place — the one condition under
+which approach 5 was worth re-opening. `JOINT_TANGENT` 0.75 -> spread 14.0% but meadow 26.3 -> 36.9
+and rolling 26.1 -> 33.0; 0.60 -> spread 12.1% but alpine 28.1 -> **54.8** and meadow -> 44.7. The
+one-for-one trade below survives the longer window intact. The constant is left in the source at 1
+with these numbers beside it.
+
+Tuning fact worth more than the tuning: `passesFor` clamps at 320 passes, so BOOST 2.0 and 2.6 give
+an identical profile — the WINDOW is the only live lever. 140 m is the only value clean on all six
+presets (170 regresses meadow to 27.2, 200 to 28.7, 260 and 300 worse again).
+
+**So all six recorded approaches are now measured and closed. A seventh has to be a NEW mechanism,
+not another sweep of these.** The untried one still on the list is MERGING overlapping correction
+windows into one, from the 2 Aug severity-first note.
+
+WHAT A SIXTH ATTEMPT SHOULD DO (the original note, kept for the reasoning). The separation and the gradient are only in conflict because the
 tangent is doing both jobs. Give the node a SHORT tangent for the first few samples and let the
 profile smooth over a longer window than the geometry does — i.e. decouple the plan view from the
 elevation at a junction, rather than trading one for the other. Verify with diag-junction-spread
