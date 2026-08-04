@@ -992,7 +992,7 @@ function buildBaseGeom(i, j, dir, tier, seed) {
    * a very short tangent turns the corner in almost no distance, which is just as tight — so
    * this keeps the LONGEST length that clears the floor, and if none of them does, the least
    * bad. It runs the measurement on every edge but only shortens a handful in a 12 km square. */
-  const want = chord * Math.min(T.curve * 2, 1.25);
+  const want = chord * Math.min(T.curve * 2, 1.25) * JOINT_TANGENT;
   let m = want;
   let bestPeak = Infinity;
   for (let a = 0; a < 5; a++) {
@@ -2061,6 +2061,38 @@ const LEVEL_RAMP = 260;
 const LEVEL_PLATEAU_W = 0.55;
 const LEVEL_SITE_MAX = 70;
 
+/* ── THE ELEVATION HALF OF THE SIXTH APPROACH (B1) ───────────────────────────────────────────
+ *
+ * docs/BACKLOG.md, after five falsified attempts: "The separation and the gradient are only in
+ * conflict because the tangent is doing both jobs. Give the node a SHORT tangent for the first few
+ * samples and let the profile smooth over a longer window than the geometry does."
+ *
+ * The plan half of that already shipped as NODE_FAN. This is the other half, and it exists because
+ * of the table in approach 5: shortening the tangent buys separation and pays for it in GRADIENT,
+ * one for one (0.60 -> spread 25.8% but alpine 39.0%; 0.22 -> spread 7.3% but 63.6%). The reason is
+ * written down there — "a short tangent makes the road hug its chord, and the chord does not follow
+ * the terrain". That is an ELEVATION consequence of a PLAN decision, so it can be answered in
+ * elevation: near a node, smooth the height profile over a longer window than the rest of the edge
+ * uses, and the road rides over the ground the chord cuts through instead of following it.
+ *
+ * JOINT_GRADE_BOOST multiplies the tier's own `grade` smoothing length, and JOINT_WINDOW is how far
+ * from a node that longer window applies, in metres of road — the same unit as LEVEL_RAMP, and
+ * chosen to sit just inside it so this releases before the junction feather does. The blend is a
+ * smoothstep, so there is no grade break where the two windows meet.
+ *
+ * Both end samples are untouched by construction (the mask is applied to a blur of the SAME
+ * profile, and `pinToNodes` runs afterwards and owns the ends), so S3 — a node has one height —
+ * cannot move. diag-seam is the check that would catch it if it did.
+ */
+const JOINT_GRADE_BOOST = 2.0;
+const JOINT_WINDOW = 140;
+
+/* The PLAN half's second lever: the tangent length itself, as a fraction of what the backoff loop
+ * would otherwise keep. This is approach 5 out of docs/BACKLOG.md, which was falsified ON ITS OWN
+ * because it traded separation for gradient one for one. It is only worth re-opening WITH the
+ * longer elevation window above, which is the whole idea of the sixth approach. 1 = off. */
+const JOINT_TANGENT = 1;
+
 /* How close to this edge's own lattice node the feather's PLATEAU may come, metres.
  *
  * MEASURED, and it is the single thing that decides whether this change ships. `pinToNodes` puts
@@ -2258,6 +2290,7 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
   const T = TIERS[e.tier];
   blur(e.y, tmp, n, passesFor(T.grade, e.span, 0.25), 0.25);
 
+
   /* Both edges at a junction to the junction's own height, BEFORE the earthwork clamp and the
    * two smoothing passes below, so those can absorb the correction the way they were designed
    * to. They preserve the end samples themselves, so the pin survives them. */
@@ -2268,6 +2301,30 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
     if (d > MAX_EARTHWORK) e.y[k] = land[k] + MAX_EARTHWORK;
     else if (d < -MAX_EARTHWORK) e.y[k] = land[k] - MAX_EARTHWORK;
     if (e.y[k] < wl[k]) e.y[k] = wl[k];
+  }
+
+  /* THE ELEVATION HALF OF THE SIXTH APPROACH (B1): a LONGER smoothing window for the road either
+   * side of a node than the middle of the edge gets. See JOINT_GRADE_BOOST above for why.
+   *
+   * IT RUNS AFTER THE EARTHWORK CLAMP, and that position is a measurement, not a preference. Run
+   * BEFORE the clamp it made every median grade better (alpine 5.7 -> 5.1%) and every WORST grade
+   * worse (meadow 26.3 -> 28.5, rolling 26.1 -> 29.0, alpine 28.1 -> 28.8): a flatter approach
+   * leaves the land further away, the clamp then chops it back to MAX_EARTHWORK, and a clamp is a
+   * corner. Here the long window smooths the corner the clamp just made instead of feeding it.
+   *
+   * The floors are re-applied below, so this cannot put the road under water. Both end samples are
+   * untouched (`pinToNodes` owns them and has already run), so S3 cannot move. */
+  if (JOINT_GRADE_BOOST > 1 && n > 4) {
+    const long = Float32Array.from(e.y);
+    blur(long, tmp, n, passesFor(T.grade * JOINT_GRADE_BOOST, e.span, 0.25), 0.25);
+    for (let k = 1; k < n - 1; k++) {
+      // metres of road to the nearer end — e.span is this edge's own mean sample spacing
+      const d = Math.min(k, n - 1 - k) * e.span;
+      if (d >= JOINT_WINDOW) continue;
+      const w = 1 - smoothstep(0, JOINT_WINDOW, d);
+      const y = e.y[k] + (long[k] - e.y[k]) * w;
+      e.y[k] = y > wl[k] ? y : wl[k];
+    }
   }
 
   // Clamping breaks the smoothness it was applied to, so smooth once more — gently. Then
@@ -2352,7 +2409,7 @@ const CROSS_PAD = 24;
  *  the crossing-STEP census improves alongside it (34 boxes/7.03 m -> 26 boxes/3.94 m), so the fan
  *  is taken — but a road crossing another at 61 degrees off square is a real thing he can see, and
  *  it is now its own tracked item rather than a footnote. */
-const NODE_FAN = 0.28;
+const NODE_FAN = 0.31;
 
 /**
  * The furthest a road can reach into carve(), and therefore the smallest pad any field may
