@@ -22,6 +22,9 @@ import {
   waterLevelAt,
 } from './biomes.js';
 import { RoadField, roadCamber } from './roads.js';
+/* The petrol-station apron, so a forecourt can be MADE GROUND without being called a carriageway —
+ * see `o.made` where the surface is assembled. */
+import { nearestStation, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH, STATION_OFFSET } from './props.js';
 import { landmarkView } from './landmarks.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
 /* The raw land and its water moved to field.js so that roads.js can read them directly —
@@ -353,9 +356,42 @@ export class Terrain {
     }
     const offGrip = lerp(0.52, 0.72, o.w[0] + o.w[4]); // grass and marsh bite more than sand
     const offRough = lerp(0.85, 0.45, o.w[0]);
-    o.grip = lerp(offGrip, roadGrip, o.onRoad);
-    o.rough = lerp(offRough, roadRough, o.onRoad);
-    o.surfaceKind = o.onRoad > 0.5 ? BIOME_ROAD[b.dominant].surface : 'ground';
+    /* MADE GROUND IS A THIRD KIND, and it is deliberately NOT `onRoad`.
+     *
+     * Operator, twice: "the road up to the gas station still does not work at all" — a forecourt is
+     * drawn as tarmac and drives like a field, because `onRoad` came off the road carve alone and
+     * props.js's apron was never mentioned to the terrain.
+     *
+     * The first attempt at this simply set `onRoad = 1` over the apron, and it had to be reverted
+     * the same day: browser-test's C3 (turn around, wants > 100 deg) went from 140/141/140 and
+     * 40/40 every run to 83/pass/53/60 and three failures in four. `onRoad` is read by the streak,
+     * the off-road warning and the auto-drive as "am I on the network", and an apron is 23 by 18 m
+     * of somewhere that is emphatically not the network.
+     *
+     * So it lands on GRIP and ROUGHNESS only — the two things the driver actually feels crossing a
+     * forecourt — and `onRoad` is left alone. `o.made` is exposed so a caller that genuinely wants
+     * "is this a made surface" can ask, rather than the next person reaching for `onRoad` again. */
+    o.made = 0;
+    {
+      const st =
+        this._apron && Math.hypot(x - this._apron.x, z - this._apron.z) < 400
+          ? this._apron
+          : (this._apron = nearestStation(x, z, this.seed, 400));
+      if (st) {
+        const dx = x - st.x;
+        const dz = z - st.z;
+        const ca = Math.cos(-(st.yaw || 0));
+        const sa = Math.sin(-(st.yaw || 0));
+        const lx = dx * ca - dz * sa;
+        const lz = dx * sa + dz * ca;
+        if (Math.abs(lx) <= STATION_APRON_HALF_WIDTH && Math.abs(lz) <= STATION_APRON_HALF_DEPTH) o.made = 1;
+        else if (Math.abs(lx) <= 4.5 && Math.abs(lz) <= STATION_OFFSET + 5) o.made = 1;
+      }
+    }
+    const hard = Math.max(o.onRoad, o.made);
+    o.grip = lerp(offGrip, roadGrip, hard);
+    o.rough = lerp(offRough, roadRough, hard);
+    o.surfaceKind = hard > 0.5 ? BIOME_ROAD[b.dominant].surface : 'ground';
     return o;
   }
 
