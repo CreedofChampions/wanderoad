@@ -159,8 +159,17 @@ export class Vehicle {
   constructor({ tier = 'sports', terrain = null, preset = 'sport' } = {}) {
     this.setTier(tier);
     this.terrain = terrain;
-    this.assist = { ...PRESETS[preset] };
-    this.presetName = preset;
+    /* AN UNKNOWN PRESET NAME MUST NOT SILENTLY DESTROY THE CAR. `PRESETS[name]` for a name that is
+     * not one of cruise/sport/off/hardcore spreads `undefined` into an empty assist table, and the
+     * solver then produces NaN for every pose from the first step — a car that never moves, never
+     * stops and never turns, with nothing in the console to say why. Found by handing this 'road',
+     * which is a word the UI uses for a different thing entirely.
+     *
+     * `setPreset` below already refuses an unknown name; the constructor did not, which is the more
+     * dangerous of the two because there is no earlier state to fall back to. */
+    const known = PRESETS[preset] ? preset : 'sport';
+    this.assist = { ...PRESETS[known] };
+    this.presetName = known;
 
     // pose
     this.x = 0;
