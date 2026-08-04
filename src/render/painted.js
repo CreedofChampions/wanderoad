@@ -364,7 +364,23 @@ void main(){
     rim = 0.62;
   }
   if(vM > 2.5 && vM < 3.5){                 // glass / dark opening
-    lit = mix(base, K_SKY_MID, 0.55); mid = base*0.7; shd = base*0.42; rim = 0.75;
+    /* B49, the operator: "the windows are flat grey paint and look bad."
+     *
+     * They were: one mix towards the sky at a fixed 55%, identical at every angle, so a windscreen
+     * read as a grey panel however you looked at it. Glass does not do that — it is nearly clear
+     * face-on and a mirror at a glancing angle, and that swing is the whole reason a glasshouse
+     * reads as glass rather than as paint.
+     *
+     * So the sky mix now RUNS with the view angle, and the rim — which this shader already uses as
+     * its glancing-edge term — runs with it too. The dark end stays dark: an interior seen through
+     * glass really is darker than the body around it, and lifting that is what makes glass look
+     * like plastic. No new texture, no new uniform, no extra cost: the same two numbers this
+     * branch already had, driven by the geometry instead of pinned. */
+    float fres = pow(1.0 - clamp(dot(normalize(vN), normalize(V)), 0.0, 1.0), 3.0);
+    lit = mix(base, K_SKY_MID, mix(0.30, 0.92, fres));
+    mid = base*mix(0.62, 0.86, fres);
+    shd = base*0.42;
+    rim = mix(0.55, 1.35, fres);
   }
   if(vM > 6.5){                             // coach paint — the body of a car
     /* Two measured losses are being paid back here, both of them downstream of this
