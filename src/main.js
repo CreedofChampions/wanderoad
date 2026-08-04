@@ -1970,15 +1970,42 @@ const TOWN_HERE_M = 70;
     camera.getWorldDirection(dir);
     U.uCull.value.set(dir.x, dir.z, Math.cos(1.15), 0);
 
+    /* ── INSIDE A SHOWROOM, THE WORLD STOPS BEING BUILT ──────────────────────
+     * F17, his own suggestion: a walk-in showroom is effectively an INTERIOR LEVEL, so the open
+     * world should not go on costing frame time while you are standing in one looking at cars.
+     *
+     * The condition is deliberately narrow — ON FOOT and inside the hall's own footprint, not
+     * merely near it. Walking the forecourt still streams normally, because from out there you can
+     * see the countryside and it has to keep arriving; from INSIDE, with four walls around you, the
+     * only thing the streamer and the prop tiler can do is spend milliseconds on tiles nobody can
+     * see. Everything else in the frame keeps running: the grass and flora already have their own
+     * distance culls, the car is parked, and pausing the RENDERER rather than the two BUILDERS
+     * would freeze the picture you walked in to look at.
+     *
+     * It restores on the frame you step back out, and there is nothing to undo: both are pull-based
+     * (`update(x, z)` decides what it wants from where you are), so a resumed streamer simply asks
+     * for the tiles it wants now. That is also why this is a guard on the call rather than a paused
+     * flag inside either class — no new state can get stuck on. */
+    /* THE WALKER'S OWN POSITION, not the car's. `hallNow` above is measured from the CAR, which is
+     * parked outside on the forecourt the whole time you are indoors — reading its distance here
+     * would have paused the world while you stood at the door and never while you stood inside. */
+    const insideHall = (() => {
+      if (!walker.active || !hallNow) return false;
+      const dx = walker.x - hallNow.x;
+      const dz = walker.z - hallNow.z;
+      const ca = Math.cos(hallNow.yaw || 0);
+      const sa = Math.sin(hallNow.yaw || 0);
+      return Math.abs(dx * ca + dz * sa) <= SHOWROOM_HALF_W && Math.abs(-dx * sa + dz * ca) <= SHOWROOM_HALF_D;
+    })();
     /* world */
-    streamer.update(car.x, car.z);
+    if (!insideHall) streamer.update(car.x, car.z);
     roads.update(car.x, car.z);
     wind.update(dt, camera.position);
     grass.update(car.x, car.z, car.y, dt);
     clouds.update(dt, camera.position);
     water.update(dt, camera.position);
     flora.update(dt, camera.position);
-    props.update(dt, car.x, car.z);
+    if (!insideHall) props.update(dt, car.x, car.z);
     ships.update(dt, car.x, car.z);
     /* Loot: suns along the road, gems on open water — src/render/loot.js. `boatMode.active`
      * replaces workstream B's own `const boatActive = false` placeholder now that
