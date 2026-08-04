@@ -124,7 +124,7 @@ function shadeSnow(vSnow, worldY, normalUp) {
 
 console.log('\n  TREE_FS\'s own snow formula, replicated in JS, top-facing foliage (N.y = 1):');
 console.log('  biome        world Y   snowC   lit colour (r,g,b)');
-for (const [name, vSnow] of [['Cobalt Highlands', 1.0], ['Hoshi Meadow', 0.0]]) {
+for (const [name, vSnow] of [['Cobalt Highlands', 1.0], ['Clover Meadow', 0.0]]) {
   for (const y of [40, 150, 260]) {
     const { snowC, lit } = shadeSnow(vSnow, y, 1.0);
     console.log(
@@ -135,7 +135,7 @@ for (const [name, vSnow] of [['Cobalt Highlands', 1.0], ['Hoshi Meadow', 0.0]]) 
 }
 console.log(
   '\n  Cobalt Highlands moves from green toward (0.95,0.96,0.99) as altitude crosses the same\n' +
-    '  120-240 m band render/terrainMaterial.js and render/grass.js already use; Hoshi Meadow\n' +
+    '  120-240 m band render/terrainMaterial.js and render/grass.js already use; Clover Meadow\n' +
     '  (snow=0.0) stays at the plain green colour at every altitude — confirms the material is\n' +
     '  wired to the real per-biome scalar, not a flag that never reaches the fragment.'
 );

@@ -241,7 +241,8 @@ const float SUN_I = 1.38;
  */
 export const BIOME_TINT = [
   {
-    // 0 — Hoshi Meadow: the pen's own valley, unmodified. The reference mood.
+    // 0 — Clover Meadow: the pen's own valley, unmodified in COLOUR. Renamed for B26 — see
+    // world/biomes.js's BIOME_NAMES note; the mood is the reference, the name is ours.
     ground: [1.0, 1.0, 1.0],
     rock: [1.0, 1.0, 1.0],
     foliage: [1.0, 1.0, 1.0],

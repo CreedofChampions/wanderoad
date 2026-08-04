@@ -30,7 +30,21 @@ export const BIOME = {
 
 export const BIOME_COUNT = 5;
 
-export const BIOME_NAMES = ['Hoshi Meadow', 'Amber Steppe', 'Cobalt Highlands', 'Bara Dunes', 'Kiri Wetland'];
+/* THE FIVE VALLEYS, IN THIS GAME'S OWN WORDS.
+ *
+ * B26 — the operator asked for legal differentiation from the reference pen: "fonts, gradients,
+ * tell-tale signs". The clearest tell-tale sign in the whole game was on this line: the first
+ * biome was called "Hoshi Meadow", which is the pen's own name for its own valley, printed to the
+ * player on the biome banner. Three of the five carried the pen's naming (Hoshi, Bara, Kiri); the
+ * other two were already generic. They are now named in the register the rest of the game uses —
+ * the same plain, warm English as the place-name generator in net/identity.js (Hollow Finch, Pale
+ * Wren, Copper Drifts) — so nothing the player reads points at somebody else's work.
+ *
+ * The SHORT names below are unchanged: they were already 'Meadow', 'Steppe', 'Highlands', 'Dunes',
+ * 'Wetland', which are English words for terrain and belong to nobody. The palette, relief presets
+ * and every tool that groups by biome key off the INDEX, not the string, so this renames what is
+ * shown without moving anything that is measured — see the checks in tools/diag-lineage.mjs. */
+export const BIOME_NAMES = ['Clover Meadow', 'Amber Steppe', 'Cobalt Highlands', 'Copper Dunes', 'Reed Wetland'];
 
 /** Short label for the HUD compass. */
 export const BIOME_SHORT = ['Meadow', 'Steppe', 'Highlands', 'Dunes', 'Wetland'];

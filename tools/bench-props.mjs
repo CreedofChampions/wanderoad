@@ -188,7 +188,7 @@ console.log('\n── rarity, clearance and seating (a 4 x 4 km sweep) ───
    * (corr(perKm, candidates/km) = 0.04; corr(perKm, yield) = 0.95) — specifically how much of
    * this seed's fixed box happens to sit clear of its own local water table
    * (corr(perKm, rejectWater rate) = -0.39). No single biome explains most of it (strongest is
-   * Hoshi Meadow area at 0.42, Bara Dunes at -0.38, both well short of dominant) — this is the
+   * Clover Meadow area at 0.42, Copper Dunes at -0.38, both well short of dominant) — this is the
    * same spatially-correlated, seed-varying effect already measured for relief/cliffs/stations
    * elsewhere in this project, not a bug in one biome. Retuning SLOT_P to chase the high tail
    * down was rejected: the LOW end has almost no headroom to give (measured min 0.43 against
@@ -278,7 +278,7 @@ console.log('\n── rarity, clearance and seating (a 4 x 4 km sweep) ───
    * corr(canPerKm, yield) = 0.80), and within yield the single strongest lever is how much of
    * the box sits clear of its own local water table (corr(canPerKm, rejectWater rate) = -0.69
    * — the biggest correlation this sweep found, for either props or cans). No one biome
-   * dominates (Hoshi Meadow area correlates 0.37, Bara Dunes -0.50, everything else weaker) —
+   * dominates (Clover Meadow area correlates 0.37, Copper Dunes -0.50, everything else weaker) —
    * this is the water table's seed-to-seed placement, the same spatially-correlated effect
    * diag-stations.mjs already documented for petrol stations, not a mistuned biome. Retuning
    * CAN_SLOT_P down to chase the tail was rejected for the same reason as the props ceiling
