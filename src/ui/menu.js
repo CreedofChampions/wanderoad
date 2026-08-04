@@ -19,6 +19,7 @@ import { PAD_HELP } from '../car/input.js';
 import { GRASS_STEPS, grassQuality, setGrassQuality } from '../render/grass.js';
 import { WATER_STYLES, currentWaterStyle, setWaterStyle } from '../render/waterStyles.js';
 import { DRIVING_MODELS, currentDrivingModel, cycleDrivingModel } from '../car/drivingModels.js';
+import { isImperial, setImperial } from '../game/units.js';
 
 /* ── STEP A CYCLING LIST ──────────────────────────────────────────────────────
  * The Water and Driving rows are the same control twice over, so they are one function once.
@@ -219,6 +220,9 @@ export class Menu {
         <h3>Grass <small>how far the meadow reaches — turn it down if the game runs slowly</small></h3>
         <div class="row" data-group="grass"></div>
 
+        <h3>Units <small>miles or kilometres on the speedometer — American by default</small></h3>
+        <div class="row" data-group="units"></div>
+
         <h3>Water <small>seven different seas — click the name for the next, the sea changes at once</small></h3>
         <div class="row" data-group="water"></div>
         <p class="hint" data-hint="water"></p>
@@ -267,6 +271,7 @@ export class Menu {
 
     this._fillSuns();
     this._fillGrass();
+    this._fillUnits();
     this._fillWater();
     this._fillDrive();
     this._fillCars();
@@ -332,6 +337,22 @@ export class Menu {
     row.innerHTML = GRASS_STEPS.map(
       (q) => `<button data-group="grass" data-key="${q.id}"${q.id === now ? ' class="on"' : ''}>${q.label}</button>`
     ).join('');
+  }
+
+  /** mph or km/h on the speedometer. Operator: "a switch... defaulted to the American system." Not
+   * a cycler like Water/Driving — there are only two states, so two buttons side by side (like the
+   * Land row) says both options and the current one at a glance, which a one-button cycler cannot. */
+  _fillUnits() {
+    const row = this.root.querySelector('[data-group="units"]');
+    if (!row) return;
+    const on = isImperial() ? 'us' : 'metric';
+    row.innerHTML = [
+      ['us', 'MPH (US)'],
+      ['metric', 'km/h (Metric)'],
+    ]
+      .map(([k, label]) => `<button data-group="units" data-key="${k}"${k === on ? ' class="on"' : ''}>${label}</button>`)
+      .join('');
+    this.current.units = on;
   }
 
   /* ── THE TWO CYCLERS: WATER AND DRIVING ──────────────────────────────────────
@@ -643,6 +664,14 @@ export class Menu {
       return;
     }
 
+    if (group === 'units') {
+      setImperial(key === 'us');
+      this._fillUnits();
+      this._mark();
+      this.hooks.say?.(`speed shown in ${key === 'us' ? 'mph' : 'km/h'}`, 2.4);
+      return;
+    }
+
     /* THE SEA, CHANGED WHILE YOU LOOK AT IT. No reload and no `setTimeout` — compare the grass
      * branch directly above, which needs both. `setWaterStyle` remembers the choice and puts the new
      * shader on every water material in the scene before it returns; the panel is still open over a
@@ -918,6 +947,7 @@ export class Menu {
      * than no picker — it is the panel disagreeing with the sea in the window behind it. */
     this._fillWater();
     this._fillDrive();
+    this._fillUnits();
     this.refreshSeed();
     this.open = true;
     this.root.hidden = false;

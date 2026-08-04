@@ -71,7 +71,7 @@ import {
   glCloudField,
   vertHead,
 } from '../core/glsl.js';
-import { C, BIOME_TINT } from '../core/palette.js';
+import { C, BIOME_TINT, biomeGroundArrays, GROUND_SHARPEN } from '../core/palette.js';
 import { U, sharedUniforms } from './uniforms.js';
 import { GL_WIND, windUniforms } from './wind.js';
 import { Terrain } from '../world/terrain.js';
@@ -333,10 +333,14 @@ const HALL_REGION_DRIFT = STATION_REGION_DRIFT;
  * (measured cost model: ~2.0 ms/frame at 90 m/s, ~1.0 ms/frame at 45 m/s). */
 const DEFAULT_BUDGET_MS = 2.5;
 
-/* Per-blade instance data, 10 bytes:
+/* Per-blade instance data, 14 bytes:
  *   iPos  u16 x2  position as a fraction of the chunk  (<2.5 mm even on the 160 m chunks)
  *   iGrd  u16     ground height, normalised over the chunk's own Y range
  *   iTint u8  x4  dryness, snow, wetness, lushness — all five biomes blended by weight
+ *   iGnd  u8  x4  the ground colour this blade stands on — the SAME blended colour
+ *                 render/terrainMaterial.js paints at this spot (see _buildChunk pass 1/3),
+ *                 linear rgb, sqrt-encoded (GRASS_FS squares it back). `.a` rides along
+ *                 unused — itemSize 4 for attribute alignment, not a fourth channel.
  * The pen stored 4 bytes and read everything else from textures; at these instance counts
  * a byte removed is a byte removed a million times a frame, which is why the ground rides
  * in as 16 bits against a per-chunk range rather than as a float. */
@@ -349,18 +353,39 @@ const TINT_DRY = BIOME_TINT.map((b) => b.dryness);
 const TINT_SNOW = BIOME_TINT.map((b) => b.snow);
 const TINT_WET = BIOME_TINT.map((b) => b.wet);
 
-const glv3 = (a) => `vec3(${a[0].toFixed(4)},${a[1].toFixed(4)},${a[2].toFixed(4)})`;
+/* The SAME four-stop-per-biome ground ramp render/terrainMaterial.js paints the terrain
+ * from (core/palette.js's BIOME_GROUND, via biomeGroundArrays()) — imported rather than
+ * re-hardcoded, so the ramp the grass matches against can never silently drift out of step
+ * with the one the ground is actually painted from. See _buildChunk pass 1 below for what
+ * it feeds. */
+const GROUND = biomeGroundArrays();
+/* Scratch for GROUND_SHARPEN's own per-node weights, reused rather than allocated: pass 1
+ * below evaluates this at every lattice node of every chunk build — up to (lat+1)² of them,
+ * 225 on the coarse rings' own 14-subdivision lattice, and an allocation there is an
+ * allocation a couple of hundred times over on every chunk rebuild. */
+const GND_GW = new Float32Array(BIOME_COUNT);
 
-/* The foliage multipliers straight out of BIOME_TINT. The blade shader does not branch per
- * biome and does not carry five weights, so the three that actually differ from the meadow
- * reference are reconstructed from the three axes the instance already carries. Steppe and
- * dunes differ from each other by less than 8% and both ride the dryness axis; the dunes
- * carry 6% of the meadow's grass anyway. */
-const GRASS_TINTS = /* glsl */ `
-const vec3 F_DRY  = ${glv3(BIOME_TINT[BIOME.STEPPE].foliage)};
-const vec3 F_COLD = ${glv3(BIOME_TINT[BIOME.HIGHLAND].foliage)};
-const vec3 F_WET  = ${glv3(BIOME_TINT[BIOME.WETLAND].foliage)};
-`;
+/* How hard a blade's colour is pulled toward the CHROMATICITY of the blended ground colour it
+ * stands on (GRASS_FS's `gch`, built from the `vGnd` varying — see _buildChunk pass 1/3 and
+ * the `iGnd` instance attribute above). The operator's own words: "Grass color should almost
+ * match the color of the ground it's around ... as far as the base color is concerned." Not
+ * 1.0 — at full strength every blade's hue/chroma would simply BE the ground's, and grass
+ * would lose its own colour identity (the tip-to-root hue path, the curing-to-straw dryness
+ * mix, the seed heads) entirely into a mono-hued patch — it would keep its own shading only.
+ *
+ * MEASURED, NOT PICKED: swept 0.60/0.78/0.90 against all five ground ramps and all three
+ * blade plates (lit/mid/shd), scoring each as hue error in degrees against that biome's own
+ * ground. Worst plate per biome, before -> at 0.78:
+ *     meadow 1->1   steppe 29->9   highland 37->22   dunes 90->10   wetland 5->5
+ * (tools/diag-grasstint.mjs prints the full table.) 0.90 pulls hue error under 10° everywhere
+ * but takes the grass close enough to the dirt that it stops reading as grass at all; 0.60
+ * leaves steppe and dunes visibly still wrong (higher hue error, and dunes barely below its
+ * pre-fix 90°). 0.78 is the point where every biome reads as grass standing on ITS OWN ground
+ * rather than grass standing on nobody's — "almost match", the operator's own word, taken
+ * literally: close, not fused. Saturation moves too, which a value-only fix never could:
+ * highland grass goes from 0.85 saturated standing on 0.43-saturated stone to 0.56 — visibly
+ * greyer without going grey. */
+const GROUND_MATCH = 0.78;
 
 /* ── geometry ───────────────────────────────────────────────────────────────── */
 
@@ -452,6 +477,7 @@ uniform float uPlayerPush;
 in vec2  iPos;
 in float iGrd;
 in vec4  iTint;                // dryness, snow, wetness, lushness
+in vec4  iGnd;                 // ground colour this blade stands on, sqrt-encoded (see below)
 ${
   depthOnly
     ? ''
@@ -462,6 +488,7 @@ out float vT;        // height along the blade 0..1
 out float vBend;     // how far the blade is laid over 0..1
 out vec3  vTint;     // swale, tussock, dryness
 out vec2  vBio;      // snow, wetness
+out vec3  vGnd;      // the blended ground colour here, linear rgb (decoded from iGnd)
 out float vSide;     // -1..1 across the blade
 out float vOccl;     // shaded by taller neighbours
 out float vVar;      // per-blade value/hue jitter, seed head packed in
@@ -676,6 +703,9 @@ ${
   // wobble so a biome border reads as grass drying out patch by patch, not as a gradient.
   vTint = vec3(clumpB, clumpA, clamp(dryv + (rH-0.5)*0.22, 0.0, 1.0));
   vBio  = vec2(snowv, iTint.z);
+  // Undo the sqrt encode (see the iGnd instance attribute's own comment in grass.js for why
+  // it is sqrt rather than a plain linear u8 — the dark stops would band).
+  vGnd  = iGnd.rgb * iGnd.rgb;
 `
 }
   gl_Position = projectionMatrix * viewMatrix * vec4(pos, 1.0);
@@ -686,7 +716,7 @@ ${
    tier 3   = cloud shadow only (it is beyond the shadow map anyway).          */
 const GRASS_FS = (tier) => /* glsl */ `
 in vec3 vW; in vec3 vN; in float vT; in float vBend;
-in vec3 vTint; in vec2 vBio; in float vSide; in float vOccl; in float vVar;
+in vec3 vTint; in vec2 vBio; in vec3 vGnd; in float vSide; in float vOccl; in float vVar;
 out vec4 outColor;
 
 void main(){
@@ -723,12 +753,47 @@ void main(){
   mid = mix(mid, ${C.gDry}*0.72, dry*0.48);
   shd = mix(shd, ${C.gDry}*0.36, dry*0.30);
 
-  // BIOME_TINT's foliage multipliers, along the three axes the instance carries.
-  float snowB = vBio.x, wetB = vBio.y;
-  vec3 fol = mix(vec3(1.0), F_DRY,  dryB);
-  fol *= mix(vec3(1.0), F_COLD, snowB);
-  fol *= mix(vec3(1.0), F_WET,  wetB);
-  lit *= fol; mid *= fol; shd *= fol;
+  float snowB = vBio.x;
+
+  /* BIOME_TINT's foliage multipliers used to end here — three hand-authored per-biome colour
+   * multipliers (F_DRY/F_COLD/F_WET, built from BIOME_TINT[].foliage) applied along the three
+   * scalar axes the instance carries. That table was a SECOND, independently-authored answer
+   * to "what colour is this biome's ground", and BIOME_GROUND (core/palette.js) is already the
+   * first one — the one the terrain itself is painted from. A blade standing on lichen-grey
+   * highland stone tinted itself 0.72/0.86/0.86 (a COOLER GREEN) while the ground under it had
+   * already committed to a desaturated grey; the two never had to agree, and they disagreed
+   * hardest exactly where the operator kept looking — a biome border, or a biome extreme like
+   * the highlands or the dunes. Replaced with a real match to 'vGnd' — the SAME blended ground
+   * colour render/terrainMaterial.js paints at this exact spot (see _buildChunk's pass 1/3 and
+   * the 'iGnd' instance attribute, both in this file) — so the grass and the ground share one
+   * source of truth and can no longer disagree about which biome's palette a spot belongs to.
+   *
+   * FIRST ATTEMPT, MEASURED WRONG: ratio the blade's ramp against the MEADOW's own ground
+   * (vGnd / a meadow reference), clamp, then divide out the luma so only hue/chroma moved. It
+   * barely touched the two biomes that needed it most — hue error 29°->27° on steppe, 90°->85°
+   * on dunes (tools/diag-grasstint.mjs's own before/after table) — because a ratio against a
+   * strongly green, nearly-blue-free reference is dominated by the REFERENCE's own channel
+   * imbalance: the raw steppe ratio came out (7.17, 2.88, 0.73), and renormalising THAT by luma
+   * lands red:green back around (1.09:1.05) — no real change on the one axis, green-to-gold,
+   * that actually matters. It only ever crushed blue, and a blade's blue is already near zero,
+   * so nothing visible happened.
+   *
+   * WHAT ACTUALLY WORKS: blend CHROMATICITY at constant luma, with no reference at all. Divide
+   * a colour by its own luma to get its chromaticity (colour direction, brightness removed),
+   * mix that toward the ground's chromaticity, then multiply that SAME colour's own luma back
+   * on. Applied separately to 'lit', 'mid' and 'shd' below — each keeps its OWN luma throughout,
+   * so only the COLOUR moves: the blade keeps every bit of its own light/dark shading, its
+   * tip-to-root gradient, its per-patch mosaic. */
+  vec3 gch = vGnd / max(dot(vGnd, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+  // How hard a blade's colour is pulled toward that ground chromaticity — see grass.js's own
+  // comment on this constant for the operator's ask and the sweep that picked 0.78.
+  const float GROUND_MATCH = ${GROUND_MATCH.toFixed(4)};
+  float litLum = dot(lit, vec3(0.2126, 0.7152, 0.0722));
+  float midLum = dot(mid, vec3(0.2126, 0.7152, 0.0722));
+  float shdLum = dot(shd, vec3(0.2126, 0.7152, 0.0722));
+  lit = mix(lit / max(litLum, 1e-4), gch, GROUND_MATCH) * litLum;
+  mid = mix(mid / max(midLum, 1e-4), gch, GROUND_MATCH) * midLum;
+  shd = mix(shd / max(shdLum, 1e-4), gch, GROUND_MATCH) * shdLum;
 
   // Snow above the line, on the same curve the terrain material uses so a snowfield and
   // the grass poking through it agree about where the line is.
@@ -809,7 +874,14 @@ ${
   // camera moves. Converging it toward the sward mean keeps every bit of the texture and
   // takes the edge energy out of it — which is, not coincidentally, exactly what a painter
   // does at that depth.
-  col = mix(col, mix(col, ${C.tMid}, 0.62), smoothstep(90.0, 430.0, vDist)*0.42);
+  //
+  // Converges toward vGnd — THIS spot's own blended ground colour — rather than the old
+  // hard-coded meadow tMid. The constant made every biome's distant grass fade toward meadow
+  // green regardless of what was actually underneath it, which is the single most visible half
+  // of the mismatch the operator reported: a grey highland hillside wearing a green haze at
+  // range, because the one thing that DOES resolve at 300 m — the field's mean colour — was
+  // wrong for every biome except the one it was authored on.
+  col = mix(col, mix(col, vGnd, 0.62), smoothstep(90.0, 430.0, vDist)*0.42);
 
   col = aerial(col, vDist, V, vW.y);
   outColor = vec4(SAFE3(col), gFogAmt);
@@ -841,16 +913,18 @@ class GrassChunk {
     this.minY = 0;
     this.ySpan = 1;
     // The terrain lattice this chunk was built from, kept so a densening does not have to
-    // resample the ground. ~5.2 kB on the coarse rings, and it is the single biggest saving
+    // resample the ground. ~7.4 kB on the coarse rings, and it is the single biggest saving
     // in the whole rebuild path: half of all rebuilds are densenings. 6th channel per node is
     // the raw "is this node submerged" flag, 7th is the node's own clearance from the nearest
-    // tarmac edge — see pass 3's own comments on why both are kept separately from the
-    // already-suppressed density channel.
-    this.lat = new Float32Array((ring.R.lat + 1) * (ring.R.lat + 1) * 7);
+    // tarmac edge, 8th-10th are the blended ground colour (linear rgb) GRASS_FS matches its
+    // blade colour to — see pass 3's own comments on why the first two ride separately from
+    // the already-suppressed density channel, and _buildChunk pass 1 for the colour blend.
+    this.lat = new Float32Array((ring.R.lat + 1) * (ring.R.lat + 1) * 10);
 
     this.iPos = new Uint16Array(cap * 2);
     this.iGrd = new Uint16Array(cap);
     this.iTint = new Uint8Array(cap * 4);
+    this.iGnd = new Uint8Array(cap * 4);
 
     const g = new InstancedBufferGeometry();
     g.setAttribute('position', ring.blade.position); // shared with every chunk of the ring
@@ -858,9 +932,11 @@ class GrassChunk {
     this.aPos = new InstancedBufferAttribute(this.iPos, 2, true);
     this.aGrd = new InstancedBufferAttribute(this.iGrd, 1, true);
     this.aTint = new InstancedBufferAttribute(this.iTint, 4, true);
+    this.aGnd = new InstancedBufferAttribute(this.iGnd, 4, true);
     g.setAttribute('iPos', this.aPos);
     g.setAttribute('iGrd', this.aGrd);
     g.setAttribute('iTint', this.aTint);
+    g.setAttribute('iGnd', this.aGnd);
     // The blade is displaced entirely in the vertex shader, so no bounding volume three
     // could compute would mean anything. Culling is ours: per chunk on the CPU, per blade
     // against uCull in the shader.
@@ -1011,7 +1087,7 @@ export class Grass {
       glslVersion: '300 es',
       uniforms: uni,
       vertexShader: vertHead(GL_HASH, GL_NOISE, GL_WIND, GRASS_VS(false)),
-      fragmentShader: fragHead(GL_HASH, GL_NOISE, GRASS_TINTS, cloud, GL_SHADOW, GL_LIGHT, GRASS_FS(index)),
+      fragmentShader: fragHead(GL_HASH, GL_NOISE, cloud, GL_SHADOW, GL_LIGHT, GRASS_FS(index)),
       side: DoubleSide,
     });
 
@@ -1245,6 +1321,7 @@ export class Grass {
     c.iPos.set(old.iPos.subarray(0, old.count * 2));
     c.iGrd.set(old.iGrd.subarray(0, old.count));
     c.iTint.set(old.iTint.subarray(0, old.count * 4));
+    c.iGnd.set(old.iGnd.subarray(0, old.count * 4));
     c.lat.set(old.lat);
     c.count = old.count;
     c.built = old.built;
@@ -1261,6 +1338,7 @@ export class Grass {
     c.aPos.needsUpdate = true;
     c.aGrd.needsUpdate = true;
     c.aTint.needsUpdate = true;
+    c.aGnd.needsUpdate = true;
     c.dirty = true;
   }
 
@@ -1285,7 +1363,7 @@ export class Grass {
     const c = new GrassChunk(ring, need);
     this._group.add(c.mesh);
     this.stats.chunks++;
-    this.stats.bytes += need * 10;
+    this.stats.bytes += need * 14;
     return c;
   }
 
@@ -1304,7 +1382,7 @@ export class Grass {
       this._group.remove(c.mesh);
       c.dispose();
       this.stats.chunks--;
-      this.stats.bytes -= c.cap * 10;
+      this.stats.bytes -= c.cap * 14;
     }
   }
 
@@ -1437,6 +1515,41 @@ export class Grass {
             snow += wb * TINT_SNOW[b];
             wet += wb * TINT_WET[b];
           }
+
+          /* ── ground colour: the SAME blended colour terrainMaterial.js paints here ──────
+           * Sharpened exactly as render/terrainMaterial.js's TERRAIN_FS does (GROUND_SHARPEN,
+           * core/palette.js) — the grass and the ground pull toward the SAME dominant biome's
+           * ramp, so a blade standing on lichen-grey highland stone can never choose green
+           * while the ground beneath it has already committed to grey. Deliberately over ALL
+           * five biomes, unthresholded (unlike the `wb < 0.002` skip just above) — the terrain
+           * shader's own gw[]/gsum loop (TERRAIN_FS) never skips a biome either, and matching
+           * it term-for-term is the whole point: the two must never be free to disagree.
+           *
+           * MEAN BLOT rather than the shader's real per-pixel fbm (`blot`): this runs once per
+           * LATTICE NODE — up to (lat+1)² of them, 225 on the coarse rings' own 14-subdivision
+           * lattice — rather than once per screen pixel, and a blade root does not need to
+           * resolve paint-grain fine enough that its own mean would read any differently. See
+           * GRASS_FS's `vGnd`/`gch` comment for the rest of this reasoning. */
+          let gsum = 0;
+          for (let b = 0; b < BIOME_COUNT; b++) {
+            GND_GW[b] = Math.pow(Math.max(w[b], 0), GROUND_SHARPEN);
+            gsum += GND_GW[b];
+          }
+          gsum = Math.max(gsum, 1e-6);
+          let gr = 0,
+            gg = 0,
+            gb = 0;
+          for (let b = 0; b < BIOME_COUNT; b++) {
+            const f = GND_GW[b] / gsum;
+            const m = b * 3;
+            // mix(B_MID[i], B_SHADE[i], blot*0.40) at blot's own mean (0.5) -> mix(...,0.20) —
+            // render/terrainMaterial.js's TERRAIN_FS mid plate, verbatim, at the mean rather
+            // than the sample.
+            gr += f * (GROUND.mid[m] + (GROUND.shade[m] - GROUND.mid[m]) * 0.2);
+            gg += f * (GROUND.mid[m + 1] + (GROUND.shade[m + 1] - GROUND.mid[m + 1]) * 0.2);
+            gb += f * (GROUND.mid[m + 2] + (GROUND.shade[m + 2] - GROUND.mid[m + 2]) * 0.2);
+          }
+
           // The carriageway is bald. 'edge' is the tarmac mask, so the verge — where the
           // carve mask is high but the edge mask is falling — keeps its grass, which is
           // what makes a road read as cut into the land rather than mown around.
@@ -1505,7 +1618,7 @@ export class Grass {
               break;
             }
           }
-          const k = (j * N + i) * 7;
+          const k = (j * N + i) * 10;
           lat[k] = y;
           lat[k + 1] = submerged || inApron || inHall ? 0 : g * (1 - clamp01(edge)) * (1 - CANOPY_THIN * shade);
           lat[k + 2] = dry;
@@ -1519,6 +1632,12 @@ export class Grass {
           // node being clear does not mean the CELL is, if a narrow road threads between
           // this node and its neighbours without touching any of the cell's four corners.
           lat[k + 6] = rc.width > 0 ? rc.d - rc.width * 0.5 : Infinity;
+          // The blended ground colour this node sits on, linear rgb — see the block above
+          // that computed gr/gg/gb. Bilinearly interpolated in pass 3 exactly like dry/snow/
+          // wet just above, then sqrt-encoded into iGnd once per surviving BLADE.
+          lat[k + 7] = gr;
+          lat[k + 8] = gg;
+          lat[k + 9] = gb;
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
         }
@@ -1534,10 +1653,10 @@ export class Grass {
           const im = i > 0 ? i - 1 : i;
           const ip = i < N - 1 ? i + 1 : i;
           const dx = (ip - im) * step;
-          const gx = (lat[(j * N + im) * 7] - lat[(j * N + ip) * 7]) / dx;
-          const gz = (lat[(jm * N + i) * 7] - lat[(jp * N + i) * 7]) / dz;
+          const gx = (lat[(j * N + im) * 10] - lat[(j * N + ip) * 10]) / dx;
+          const gz = (lat[(jm * N + i) * 10] - lat[(jp * N + i) * 10]) / dz;
           const ny = 1 / Math.sqrt(gx * gx + gz * gz + 1);
-          lat[(j * N + i) * 7 + 1] *= smoothstep(SLOPE_N0, SLOPE_N1, ny);
+          lat[(j * N + i) * 10 + 1] *= smoothstep(SLOPE_N0, SLOPE_N1, ny);
         }
       }
 
@@ -1557,6 +1676,7 @@ export class Grass {
     const iPos = chunk.iPos;
     const iGrd = chunk.iGrd;
     const iTint = chunk.iTint;
+    const iGnd = chunk.iGnd;
     const seed = this.seed;
     const cx = chunk.cx;
     const cz = chunk.cz;
@@ -1572,10 +1692,10 @@ export class Grass {
       if (iz > L - 1) iz = L - 1;
       const tx = fx - ix;
       const tz = fz - iz;
-      const k00 = (iz * N + ix) * 7;
-      const k10 = k00 + 7;
-      const k01 = k00 + N * 7;
-      const k11 = k01 + 7;
+      const k00 = (iz * N + ix) * 10;
+      const k10 = k00 + 10;
+      const k01 = k00 + N * 10;
+      const k11 = k01 + 10;
       const w00 = (1 - tx) * (1 - tz);
       const w10 = tx * (1 - tz);
       const w01 = (1 - tx) * tz;
@@ -1691,6 +1811,11 @@ export class Grass {
       const dry = lat[k00 + 2] * w00 + lat[k10 + 2] * w10 + lat[k01 + 2] * w01 + lat[k11 + 2] * w11;
       const snow = lat[k00 + 3] * w00 + lat[k10 + 3] * w10 + lat[k01 + 3] * w01 + lat[k11 + 3] * w11;
       const wet = lat[k00 + 4] * w00 + lat[k10 + 4] * w10 + lat[k01 + 4] * w01 + lat[k11 + 4] * w11;
+      // Bilinearly interpolated exactly like dry/snow/wet just above — see pass 1's own
+      // comment on where the four corner values came from.
+      const gr = lat[k00 + 7] * w00 + lat[k10 + 7] * w10 + lat[k01 + 7] * w01 + lat[k11 + 7] * w11;
+      const gg = lat[k00 + 8] * w00 + lat[k10 + 8] * w10 + lat[k01 + 8] * w01 + lat[k11 + 8] * w11;
+      const gb = lat[k00 + 9] * w00 + lat[k10 + 9] * w10 + lat[k01 + 9] * w01 + lat[k11 + 9] * w11;
 
       iPos[out * 2] = ux;
       iPos[out * 2 + 1] = uz;
@@ -1700,6 +1825,14 @@ export class Grass {
       iTint[o4 + 1] = (clamp01(snow) * 255) | 0;
       iTint[o4 + 2] = (clamp01(wet) * 255) | 0;
       iTint[o4 + 3] = (clamp01(dens) * 255) | 0;
+      // sqrt-encode: a plain linear u8 quantises the dark stops (a shaded highland stone, a
+      // dark peat) far too coarsely — GRASS_VS squares it straight back (`vGnd = iGnd.rgb *
+      // iGnd.rgb`). `.a` (o4+3) is left at 255, unused — itemSize 4 purely for attribute
+      // alignment, see the byte-layout comment by INV_U16 above.
+      iGnd[o4] = Math.round(Math.sqrt(clamp01(gr)) * 255);
+      iGnd[o4 + 1] = Math.round(Math.sqrt(clamp01(gg)) * 255);
+      iGnd[o4 + 2] = Math.round(Math.sqrt(clamp01(gb)) * 255);
+      iGnd[o4 + 3] = 255;
       out++;
     }
 
@@ -1708,6 +1841,7 @@ export class Grass {
     chunk.aPos.needsUpdate = true;
     chunk.aGrd.needsUpdate = true;
     chunk.aTint.needsUpdate = true;
+    chunk.aGnd.needsUpdate = true;
 
     // Position drives the depth sort AND, via the model matrix, everything the vertex
     // shader needs that is constant across the chunk: the origin, the ground-height range

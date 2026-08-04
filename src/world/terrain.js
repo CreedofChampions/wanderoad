@@ -26,6 +26,7 @@ import { RoadField, roadCamber } from './roads.js';
  * see `o.made` where the surface is assembled. */
 import { nearestStation, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH, STATION_OFFSET } from './props.js';
 import { landmarkView } from './landmarks.js';
+import { nearestRamp, rampLiftAt } from './ramps.js';
 import { clamp01, smoothstep, lerp } from '../core/math.js';
 /* The raw land and its water moved to field.js so that roads.js can read them directly —
  * this file imports roads.js, so roads.js can never import this one. See field.js's header.
@@ -386,6 +387,43 @@ export class Terrain {
         const lz = dx * sa + dz * ca;
         if (Math.abs(lx) <= STATION_APRON_HALF_WIDTH && Math.abs(lz) <= STATION_APRON_HALF_DEPTH) o.made = 1;
         else if (Math.abs(lx) <= 4.5 && Math.abs(lz) <= STATION_OFFSET + 5) o.made = 1;
+      }
+    }
+    /* ── THE KICKERS ─────────────────────────────────────────────────────────
+     *
+     * Operator: "jumps that you can take that actually you can jump over."
+     *
+     * A ramp is not a prop and not a collider — game/collide.js props are WALLS, and a wall is the
+     * one thing a jump must not be. It is ground: this block raises the floor over a nine-metre
+     * patch and tilts the normal with it, so the four wheel probes in car/vehicle.js climb the face,
+     * pitch the car nose-high, and leave the lip with the airborne test firing on its own. No
+     * physics code was added for any of that; it all already existed for driving over a crest.
+     *
+     * Only `surface()` sees this. `height()` — what the chunk mesher builds tiles from — is
+     * deliberately left alone, because deforming the terrain mesh for a nine-metre object would mean
+     * regenerating and re-seaming tiles against the streamer. render/ramps.js draws the wedge
+     * instead, by SAMPLING the same `rampProfile` this uses, so the picture and the physics are the
+     * same function and cannot drift. world/ramps.js's header has the rest.
+     *
+     * The nearest ramp is cached exactly the way `_apron` above is cached, for the same reason: this
+     * runs four times per physics step and a fresh spatial query per probe would be absurd.
+     *
+     * `o.made = 1` on the face. A dirt kicker is a built surface — you want grip on it and you do not
+     * want the dune sand-bog treating a launch as an excursion into soft sand. */
+    {
+      const rp =
+        this._ramp && Math.hypot(x - this._ramp.x, z - this._ramp.z) < 200
+          ? this._ramp
+          : (this._ramp = nearestRamp(x, z, this.seed, 260));
+      if (rp) {
+        const L = rampLiftAt(rp, x, z, this._rampOut || (this._rampOut = { lift: 0, nx: 0, ny: 1, nz: 0 }));
+        if (L.lift > 0) {
+          o.y += L.lift;
+          o.nx = L.nx;
+          o.ny = L.ny;
+          o.nz = L.nz;
+          o.made = 1;
+        }
       }
     }
     const hard = Math.max(o.onRoad, o.made);

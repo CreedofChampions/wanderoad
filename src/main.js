@@ -61,7 +61,7 @@ import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
 import { Plane, PLANE_UNLOCK_GEMS, PLANE_PASS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
-import { FLEET, FLEET_BY_ID, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam } from './game/garage.js';
+import { FLEET, FLEET_BY_ID, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam, applySuspFeel } from './game/garage.js';
 /* `applyDrivingModel` REPLACES `applyCarFeel` here, and it has to be the only feel call in the file.
  *
  * A driving model is a modifier layered over a car — see car/drivingModels.js — and it writes fields
@@ -81,6 +81,9 @@ import { BoatMode } from './game/boat.js';
 import { Spray } from './game/spray.js';
 import { Props } from './render/props.js';
 import { Loot } from './render/loot.js';
+import { Ramps } from './render/ramps.js';
+import { CRATE_VALUE, CRATE_TILE, cratesForTile } from './world/loot.js';
+import { rampsInBox } from './world/ramps.js';
 import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
 import { LootCounter } from './ui/lootCounter.js';
@@ -373,6 +376,19 @@ async function boot() {
    * swapCar() and nowhere else. The Tricycle is FLEET[0], so on a fresh profile this is the call that
    * makes the very first car anyone drives behave like three wheels. */
   applyMicroPhysics(car, CAR);
+  /* AND THE SPRINGS BACK ON TOP, because `applyMicroPhysics` just took them off.
+   *
+   * Handed an ordinary fleet car that call DETACHES the micro model, and detaching restores the
+   * stock `SUSPENSION` table — which runs AFTER the feel pass, so it silently overwrites whatever
+   * springs the car declared. Left alone, stepping out of the Tricycle and into the Warthog would
+   * hand the Warthog the coupe's 42000 N/m springs, and the one car in the fleet built around its
+   * suspension would quietly stop having any. Re-asserting here is six assignments, it is
+   * idempotent, and the micro cars rewrite their own tables afterwards, so the Tricycle is
+   * untouched. game/garage.js's applySuspFeel has the rest of the reasoning.
+   *
+   * This lives here rather than in car/microPhysics.js on purpose: that file is owned by another
+   * branch right now, and the fix does not need it. */
+  applySuspFeel(CAR);
   /* BACK WHERE YOU LEFT IT, if the spot is still somewhere a car can be.
    *
    * A saved position can outlive what made it valid — a build that moved the water table, or a
@@ -662,6 +678,17 @@ const TOWN_HERE_M = 70;
    * BOAT_UNLOCK_SUNS; `lootCounter` (src/ui/lootCounter.js) is fuelGauge's own pattern,
    * docked in the one HUD corner not already claimed — see that file's own comment. */
   const loot = new Loot({ seed: SEED, scene });
+
+  /* THE JUMPS, DRAWN — src/render/ramps.js. The kickers themselves are ground, added inside
+   * world/terrain.js's `surface()` (see world/ramps.js for why a ramp cannot be a collider), so this
+   * only draws them. It has to, though: a jump you cannot see is a car launching off apparently flat
+   * ground, which reads as a bug rather than a feature.
+   *
+   * `terrain` is handed over as a forward-reading shim rather than an object, for the same reason the
+   * boat's is a little further down: `car.terrain` is REASSIGNED every frame by `localFor` as the
+   * player moves between streamed patches, so capturing today's instance here would leave the ramp
+   * meshes sampling a terrain the game stopped using minutes ago. */
+  const ramps = new Ramps({ seed: SEED, scene, terrain: { height: (x, z) => (car.terrain || local).height(x, z) } });
   const lootCounter = new LootCounter(hud.root);
 
   /* Boat mode — the last unlock, src/game/boat.js. `terrain` is a zero-arg forward reference
@@ -735,6 +762,32 @@ const TOWN_HERE_M = 70;
          * has just undone. Handed an ordinary car it puts everything back, so switching AWAY from a
          * micro-car is this same line. */
         applyMicroPhysics(car, spec);
+      /* AND THE SPRINGS BACK ON TOP, because `applyMicroPhysics` just took them off.
+       *
+       * Handed an ordinary fleet car that call DETACHES the micro model, and detaching restores the
+       * stock `SUSPENSION` table — which runs AFTER the feel pass, so it silently overwrites whatever
+       * springs the car declared. Left alone, stepping out of the Tricycle and into the Warthog would
+       * hand the Warthog the coupe's 42000 N/m springs, and the one car in the fleet built around its
+       * suspension would quietly stop having any. Re-asserting here is six assignments, it is
+       * idempotent, and the micro cars rewrite their own tables afterwards, so the Tricycle is
+       * untouched. game/garage.js's applySuspFeel has the rest of the reasoning.
+       *
+       * This lives here rather than in car/microPhysics.js on purpose: that file is owned by another
+       * branch right now, and the fix does not need it. */
+      applySuspFeel(spec);
+        /* AND THE SPRINGS BACK ON TOP, because `applyMicroPhysics` just took them off.
+         *
+         * Handed an ordinary fleet car that call DETACHES the micro model, and detaching restores the
+         * stock `SUSPENSION` table — which runs AFTER the feel pass, so it silently overwrites whatever
+         * springs the car declared. Left alone, stepping out of the Tricycle and into the Warthog would
+         * hand the Warthog the coupe's 42000 N/m springs, and the one car in the fleet built around its
+         * suspension would quietly stop having any. Re-asserting here is six assignments, it is
+         * idempotent, and the micro cars rewrite their own tables afterwards, so the Tricycle is
+         * untouched. game/garage.js's applySuspFeel has the rest of the reasoning.
+         *
+         * This lives here rather than in car/microPhysics.js on purpose: that file is owned by another
+         * branch right now, and the fix does not need it. */
+        applySuspFeel(spec);
         /* Capacity is per car and does NOT transfer — swapping in the garage loads this car's
          * own can count and its own tank. See Fuel.setCar / START_CAPACITY_MUL. */
         fuel.setCar(spec.id);
@@ -2029,7 +2082,14 @@ const TOWN_HERE_M = 70;
      * src/game/boat.js exists — see docs/BOAT-PLAN.md's deviations log (workstream B entry)
      * for why that was the honest interim behaviour rather than a fake unlock. */
     loot.update(dt, car, boatMode.active);
-    const gainedSuns = loot.drainSuns();
+    ramps.update(dt, car);
+    /* SALVAGE CRATES — the off-road goodies. Operator: "there should be special off-road goodies
+     * that you can get." Worth CRATE_VALUE suns each rather than a currency of their own: a second
+     * scoreboard for the same act of picking something up is a worse game, not a richer one, and
+     * world/loot.js's own note has the sizing against the unlock rungs. Folded into the sun gain so
+     * every downstream consumer — the wallet, the counter, the achievements — needs no new path. */
+    const gainedCrates = loot.drainCrates();
+    const gainedSuns = loot.drainSuns() + gainedCrates * CRATE_VALUE;
     if (gainedSuns) {
       wallet.addSuns(gainedSuns);
       audio.sun();
@@ -2182,6 +2242,25 @@ const TOWN_HERE_M = 70;
     auto,
     trail,
     fleet: FLEET,
+    /* The kickers, for the same reason `flora` and `props` are here: "is there a jump near me, and
+     * did I actually clear it" can only be answered against the ramps the world really placed, not
+     * against a second opinion. tools/shot-car.mjs and the proof manifests park the car at one of
+     * these before filming. Telemetry only; the game never reads window.WANDEROAD. */
+    ramps,
+    rampsNear: (x, z, r = 900) => rampsInBox(x - r, z - r, x + r, z + r, SEED),
+    /* The salvage crates the WORLD placed, which is not the same question as which crates the
+     * renderer has streamed in — a proof clip has to be able to drive to one that exists rather than
+     * to one that happens to be loaded. Same read-only stance as everything else on this object. */
+    cratesNear: (x, z, r = 900) => {
+      const out = [];
+      for (let gj = Math.floor((z - r) / CRATE_TILE); gj <= Math.floor((z + r) / CRATE_TILE); gj++)
+        for (let gi = Math.floor((x - r) / CRATE_TILE); gi <= Math.floor((x + r) / CRATE_TILE); gi++) {
+          const c = cratesForTile(gi, gj, SEED);
+          if (c) out.push(c);
+        }
+      out.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z));
+      return out;
+    },
     /* The audio graph, for the same reason `flora` and `props` are here: "is the music
      * playing, and how loud" can only be answered honestly by reading the gain node that is
      * actually in the graph, not by trusting a flag. See tools/diag-radio.mjs. */

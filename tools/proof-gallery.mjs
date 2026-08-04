@@ -34,11 +34,34 @@ import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { writeFileSync, mkdirSync, readFileSync, rmSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 
 const MANIFEST = process.argv[2];
 const BASE = process.argv[3] || 'https://cozydriver.com/beta/';
 const CHROME = process.env.CHROME_PATH || String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
-const PORT = 9993;
+
+/* A FREE PORT, NOT A FIXED ONE — and this is not tidiness, it is a bug that cost a whole capture
+ * run. The port was hard-coded to 9993, while up to a dozen agents work this repo out of separate
+ * worktrees at the same time. The second one to start finds 9993 already taken, its own Chrome
+ * fails to bind it and dies quietly, and then the `fetch` below succeeds anyway — against the FIRST
+ * agent's browser. Two scripts then drive one browser through two sockets, and the symptom is not
+ * an error: it is a `Runtime.evaluate` that never resolves, i.e. a run that hangs on shot one until
+ * something kills it, having produced nothing.
+ *
+ * So: bind each candidate first, and only hand Chrome a port this process has just proved is free.
+ * `PROOF_PORT` still forces a specific one for anyone who needs to attach a debugger. */
+async function freePort(from) {
+  for (let p = from; p < from + 400; p++) {
+    const ok = await new Promise((res) => {
+      const s = createServer();
+      s.once('error', () => res(false));
+      s.listen(p, '127.0.0.1', () => s.close(() => res(true)));
+    });
+    if (ok) return p;
+  }
+  throw new Error(`no free debugging port in ${from}..${from + 400}`);
+}
+const PORT = Number(process.env.PROOF_PORT) || (await freePort(9993));
 const OUT = 'shots/proof';
 /** Minimum clip length, in seconds. The operator's floor, not a suggestion. */
 const CLIP_S = Number(process.env.PROOF_CLIP_S || 3.5);
@@ -209,6 +232,12 @@ for (const shot of shots) {
      * failed proof to anyone glancing at the page. */
     const { result: png } = await send('Page.captureScreenshot', { format: 'png' }, S);
     if (shutter) clearInterval(shutter);
+    // THE POSTER NEVER REACHED DISK. `png.data` was captured and then discarded — every prior run
+    // of this tool recorded a `file` name in the manifest and in the published page's <video
+    // poster=...> without ever having written the bytes, so the poster 404'd on every proof this
+    // tool has ever produced. Found while vision-checking the units-switch proof: the manifest
+    // claimed a PNG next to a clip and there was no PNG on disk.
+    writeFileSync(`${OUT}/${shot.id}.png`, Buffer.from(png.data, 'base64'));
     const clipBytes = readFileSync(webm).length;
     console.log(`ok  clip ${secs.toFixed(1)}s @${fps}fps ${(clipBytes / 1024).toFixed(0)} KB${reading ? '  ' + String(reading).slice(0, 36) : ''}`);
     results.push({ ...shot, file: `${shot.id}.png`, clip: `${shot.id}.webm`, seconds: +secs.toFixed(1), fps, frames: n, bytes: clipBytes, reading, ok: true });
