@@ -82,7 +82,7 @@ import { Spray } from './game/spray.js';
 import { Props } from './render/props.js';
 import { Loot } from './render/loot.js';
 import { Ramps } from './render/ramps.js';
-import { CRATE_VALUE } from './world/loot.js';
+import { CRATE_VALUE, CRATE_TILE, cratesForTile } from './world/loot.js';
 import { rampsInBox } from './world/ramps.js';
 import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
@@ -2227,6 +2227,19 @@ const TOWN_HERE_M = 70;
      * these before filming. Telemetry only; the game never reads window.WANDEROAD. */
     ramps,
     rampsNear: (x, z, r = 900) => rampsInBox(x - r, z - r, x + r, z + r, SEED),
+    /* The salvage crates the WORLD placed, which is not the same question as which crates the
+     * renderer has streamed in — a proof clip has to be able to drive to one that exists rather than
+     * to one that happens to be loaded. Same read-only stance as everything else on this object. */
+    cratesNear: (x, z, r = 900) => {
+      const out = [];
+      for (let gj = Math.floor((z - r) / CRATE_TILE); gj <= Math.floor((z + r) / CRATE_TILE); gj++)
+        for (let gi = Math.floor((x - r) / CRATE_TILE); gi <= Math.floor((x + r) / CRATE_TILE); gi++) {
+          const c = cratesForTile(gi, gj, SEED);
+          if (c) out.push(c);
+        }
+      out.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z));
+      return out;
+    },
     /* The audio graph, for the same reason `flora` and `props` are here: "is the music
      * playing, and how loud" can only be answered honestly by reading the gain node that is
      * actually in the graph, not by trusting a flag. See tools/diag-radio.mjs. */
