@@ -2744,6 +2744,30 @@ export class Props {
     this._recount();
   }
 
+  /* WHY IS THERE NO SHOWROOM HERE — telemetry only, and it exists because the answer could not be
+   * got at from outside. The pure world function is certain there is a hall at a given place while
+   * `this.halls` stays empty, and the three things that could explain that (the warm gate, the
+   * query itself, and whether the tile covering it has been baked since) are all module-private.
+   * Same stance as every other read-only hook on window.WANDEROAD: the game never calls this. */
+  hallDebug(x, z) {
+    const probe = this._warmProbe;
+    const box = [x - 300, z - 300, x + 300, z + 300];
+    let found = [];
+    try {
+      found = showroomsInBox(box[0], box[1], box[2], box[3], this.seed, probe ? { height: probe.height } : null) || [];
+    } catch (e) {
+      return { error: String(e && e.message) };
+    }
+    return {
+      warm: showroomCellsWarm(box[0], box[1], box[2], box[3], this.seed),
+      probe: !!probe,
+      foundNow: found.length,
+      first: found[0] ? { key: found[0].key, x: Math.round(found[0].x), z: Math.round(found[0].z) } : null,
+      known: this.halls.length,
+      liveTiles: this.live.size,
+    };
+  }
+
   /** Tell the tiler where to look up a town's tier. See `_townLevel` in the constructor. */
   setTownLevels(fn) {
     this._townLevel = typeof fn === 'function' ? fn : null;

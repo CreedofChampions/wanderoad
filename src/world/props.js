@@ -1560,6 +1560,10 @@ export function showroomMaybeNear(x0, z0, x1, z1, seed, reach = 0) {
 }
 
 const _hallCache = new Map();
+/* The land and water fields the placement tests read, built once per seed — see _showroomForCell. */
+let _hallLand = null;
+let _hallWater = null;
+let _hallLandSeed = null;
 export function showroomForCell(gi, gj, seed, probe = null) {
   const ck = `${gi},${gj},${seed},${probe ? 1 : 0}`;
   if (_hallCache.has(ck)) return _hallCache.get(ck);
@@ -1588,7 +1592,30 @@ function _showroomForCell(gi, gj, seed, probe = null) {
     // Facing the road: the building's local +z points back at the carriageway.
     const yaw = Math.atan2(-nx * side, -nz * side);
 
-    if (probe && typeof probe.height === 'function') {
+    /* THE FLATNESS AND DRYNESS TESTS ASK THE LAND, NOT THE CALLER'S PROBE, and that is a fix rather
+     * than a tidy-up. This function is MEMOISED on (gi, gj, seed) — so whichever caller asked FIRST
+     * decided the answer for the whole session, and the callers do not agree: render/props.js hands
+     * in the probe of the tile it happens to be baking, whose Terrain is built around THAT tile.
+     *
+     * Measured on the live beta, parked at (-2125,-3596) with the warm gate true, a probe present
+     * and 45 tiles live: `showroomsInBox` returned 0 halls at a place where the same call in node
+     * returns `hall:-1,-1,1` at (-2166,-3585). The cell had been resolved earlier by a distant
+     * tile's probe, rejected, and cached as "no showroom" permanently. That is why showrooms are
+     * rarer in the game than in the world, and it is the likeliest reason he could not find or get
+     * into one.
+     *
+     * `landFn`/`waterFn` are pure functions of position and seed with no tile behind them, so the
+     * answer no longer depends on who asked — which is what makes the memo honest. It is also the
+     * convention the rest of this file already follows: every station placement test reads the RAW
+     * land for the same reason (see the "who asked?" note above stationForEdge). `probe` is still
+     * honoured as the switch that says whether to run the tests at all, so a diagnostic can still
+     * ask "where would these be" without one. */
+    if (probe) {
+      if (!_hallLand || _hallLandSeed !== seed) {
+        _hallLand = landFn(seed);
+        _hallWater = waterFn(seed);
+        _hallLandSeed = seed;
+      }
       let lo = Infinity;
       let hi = -Infinity;
       let wet = false;
@@ -1596,11 +1623,12 @@ function _showroomForCell(gi, gj, seed, probe = null) {
         for (let sz = -1; sz <= 1; sz++) {
           const px = x + sx * SHOWROOM_HALF_W * 0.9;
           const pz = z + sz * SHOWROOM_HALF_D * 0.9;
-          const y = probe.height(px, pz);
+          const y = _hallLand(px, pz);
           if (!Number.isFinite(y)) { wet = true; break; }
           if (y < lo) lo = y;
           if (y > hi) hi = y;
-          if (typeof probe.wet === 'function' && probe.wet(px, pz)) { wet = true; break; }
+          const wl = _hallWater(px, pz);
+          if (Number.isFinite(wl) && y < wl) { wet = true; break; }
         }
         if (wet) break;
       }
