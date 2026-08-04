@@ -24,8 +24,28 @@ import { buildCar, buildGhostCar } from './model.js';
 /* The fleet lives in src/game/garage.js, because a car and the way it drives are the same
  * choice and there must be exactly one list of them. This module only turns one into meshes. */
 export const CARS = Object.fromEntries(
-  FLEET.map((c) => [c.id, { file: c.file, label: c.label, tier: c.tier, length: c.length }])
+  FLEET.map((c) => [c.id, { file: c.file, label: c.label, tier: c.tier, length: c.length, paints: c.paints }])
 );
+
+/* B46, second half. The operator on the F150, twice: "very girly, would find more mature colours
+ * for it", and then, after the repaint had already landed, "paint is still ugly blue for me".
+ *
+ * A player never picks a colour — net/identity.js derives the chip from a hash of their id and
+ * there is no picker anywhere in the game — so "the truck came out blue" is not something he can
+ * do anything about, and on the fleet's eight chips two of the eight are blue (Cobalt) or pale
+ * blue-green (Seafoam). On a saloon that is fine. On a full-size pickup those two are exactly the
+ * toy-truck reading he objected to in the first place.
+ *
+ * So a FLEET entry may name its own colourway: a list of indices into car/model.js's PAINTS. It
+ * is a filter over the one shared chip table, never a second table — the chip a player is given
+ * still decides which colour they get, and it is still stable for them, it simply lands inside
+ * that car's own range. Any vehicle can declare one; a car that does not is unaffected. */
+function chipFor(spec, paint) {
+  const list = spec && spec.paints;
+  if (!Array.isArray(list) || !list.length) return paint;
+  const n = list.length;
+  return list[(((paint | 0) % n) + n) % n];
+}
 
 export const CAR_KEYS = FLEET.map((c) => c.id);
 
@@ -308,11 +328,13 @@ export async function loadCar({ car = 'coupe', paint = 0, base = './models/cars/
   const spec = CARS[car] || CARS.coupe;
   // ?cars=<password> — see buildRealisticVariant()'s own note just above for why this exists
   // and what it is instead of a downloaded asset.
-  if (realisticCarsOn()) return buildRealisticVariant(car, spec, paint, ghost);
+  // The car's own colourway, if it has one — see chipFor() above (B46, "still ugly blue for me").
+  const chip = chipFor(spec, paint);
+  if (realisticCarsOn()) return buildRealisticVariant(car, spec, chip, ghost);
   const gltf = await loadGLB(base + spec.file);
   const src = gltf.scene.clone(true);
 
-  const paintCol = bodyPaintLinear(paint);
+  const paintCol = bodyPaintLinear(chip);
   const material = createPaintedMaterial(ghost ? { ghost: true, opacity: 0.85 } : {});
 
   /* ── re-material ────────────────────────────────────────────────────────

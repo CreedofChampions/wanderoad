@@ -377,6 +377,14 @@ export const FLEET = [
     id: 'pickup',
     file: 'synty-pickup.glb',
     label: 'Ford F150',
+    /* B46. The operator on this truck, twice: "very girly, would find more mature colours for it",
+     * and then, once it could take a colour at all, "paint is still ugly blue for me". Nobody picks
+     * their paint — net/identity.js derives the chip from a hash of the player id — so a blue chip on
+     * a full-size pickup is not something he can drive away from. This is a filter over the ONE shared
+     * chip table in car/model.js (see chipFor() in car/loadedCar.js), not a second table: indices into
+     * PAINTS, dropping 2 Cobalt and 7 Seafoam and keeping Persimmon, Barley, Chalk, Verdigris, Ink and
+     * Rust — six colours a real pickup is actually sold in, and not one of them blue. */
+    paints: [0, 1, 3, 4, 5, 6],
     blurb: 'A full-size pickup. Slow to turn, hard to stop, and happy in the dirt.',
     unlockAt: 60000,
     price: 260,
