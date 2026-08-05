@@ -37,6 +37,117 @@ every node-side check that was run against it.
 
 ---
 
+## BLOCKING — C2 "the brakes stop the car promptly" regressed on 3 Aug, cause not yet found
+
+`node tools/browser-test.mjs https://cozydriver.com/beta/` reports **"34 km/h to 0 in 0 m"** in two
+consecutive runs. A zero-metre stop is not braking — it is a car that hit something, or one whose
+position did not advance between the two samples. It PASSED on 2 August and fails on 3 August, so it
+arrived with the seven-driving-models / micro-car commit (8846e0c) or the fleet reorder after it.
+
+What is already ruled out: `src/car/drivingModels.js` does not touch `BRAKE` at all (grepped), and
+the `stock` model is identity, so the models themselves are not changing stopping power.
+
+Most likely next place to look: the fleet order changed, and showroom aprons place FLEET members on
+display — a display car spawned on or beside the test's braking straight would produce exactly this
+reading, because the car would stop against it rather than under braking. Check what is standing
+near the brake test's start point before touching any braking constant.
+
+Do NOT tune the brakes to make this pass. The number says 0 m, and no brake change produces 0 m.
+
+## B2 — attempt 8 (finer arterial sampling) FALSIFIED, 3 Aug 2026
+
+Attempt 7 found that at the worst crossing the ARTERIAL's nearest sample sits 10.7 m away while the
+lane's sits 3.6 m, so `levelAgainst` aims the lane at a height INTERPOLATED across more than ten
+metres of a road climbing out of a cutting. That looked like the answer: a sampling-resolution
+problem, which would explain why six attempts at authority, radius, clamping and window all failed.
+
+The sample count is `n = clamp(round(chord / T.step), 8, 96)`, and a long arterial hits that 96 cap,
+so its spacing grows with its length. Raising the cap to 160:
+
+| 12 km box | before | after |
+|---|---|---|
+| boxes holding a mismatch | 26 of 253 | **28 of 260** |
+| worst step | 3.94 m | **4.89 m** |
+
+WORSE on both, and reverted. (The box totals differ because finer sampling changes the geometry
+slightly, so the census is over a marginally different world — but the direction is unambiguous.)
+
+So the interpolation gap is real and is NOT what leaves the step. Seven mechanisms are now
+eliminated with numbers: the earthwork clamp, a span-derived radius, a flat 40 m radius, switching
+levelling off near nodes, tapering, correcting the exact crossing point, and finer arterial sampling.
+
+**What has actually moved this number**, for whoever picks it up: nothing aimed at the levelling
+pass. The two real improvements both came from elsewhere — the elevation feather rewritten in metres
+(12.91 m -> 7.03 m, commit bdb25d2) and the junction departure fan (7.03 m -> 3.94 m, commit
+c499928). That is worth taking seriously as evidence: the residual may not live in `levelAgainst` at
+all, and an eighth attempt aimed at it would be the eighth to fail.
+
+## B2 — attempt 6 (correct the exact crossing point) ALSO FALSIFIED, 3 Aug 2026
+
+The fix this entry itself recommended — "insert a sample at the exact crossing point findCrossings
+already computes, and correct that point at the old 18 m radius" — was implemented and measured.
+
+Implementation: after the distance search in `levelAgainst` pass 1, intersect this lane's segments
+directly with each near road's segments, and give the sample nearest each true intersection the
+other road's height at that point with full authority. No radius widened, nothing outside a crossing
+touched, node agreement untouched by construction — which is exactly what killed attempts 3, 4 and 5.
+
+| metric, after B1's fan landed | before | after |
+|---|---|---|
+| boxes holding a mismatch | 26 of 253 | **26 of 253** |
+| crossings over 1 m | 26 | **26** |
+| worst | 3.94 m | **3.96 m** (noise) |
+
+**No effect whatsoever.** So the residual is NOT "the crossing point was never corrected". Something
+downstream is either not applying the correction or undoing it — the candidates now are the long
+smoothstep release added on 3 Aug (which rebuilds the correction from runs of `weight`, and may not
+recognise a single-sample full-authority spike), or the possibility that the surface being measured
+is the ARTERIAL's rather than the lane's, in which case no amount of lane correction can close it
+because arterials never yield to lanes by design.
+
+**WHERE ATTEMPT 7 SHOULD START:** stop assuming the lane is the road that is wrong. Print, for the
+worst pair, which of the two edges each diag sample belongs to and what each one's profile says at
+that exact point. Every attempt so far has corrected the LANE; none has checked that the lane is the
+one out of place.
+
+**Context worth keeping:** B2 improved a great deal this session without any of these six attempts —
+worst step 12.91 m -> 3.94 m and 34 boxes -> 26 — from the elevation smoothing (commit bdb25d2) and
+the junction fan (commit c499928). The remaining 26 are a tail, and the bar is 19.
+
+## B2 — terrain steps at crossings: the CAUSE is found, and four fixes are falsified (3 Aug 2026)
+
+Baseline, `node tools/diag-crosslevel.mjs`, 12 km box: **34 of 266 car boxes hold a mismatched
+crossing, 34 of 2590 crossings over 1 m, worst 12.91 m at (1448,-1952)** between arterial
+`0:0,-2,1` and lane `1:2,-4,1`; 1 mismatch within 2600 m of spawn (the gate the reversed spawn
+waits on).
+
+**THE CAUSE, and it is not what the code says it is.** `levelAgainst`'s capture radius is a flat
+18 m, measured from one of THIS lane's samples to the other road's segments. At that crossing no
+sample of the lane lands within 18 m of the arterial, so the lane is never corrected AT ALL. The
+comment in `canonicalProfile` claims the correction happens and the earthwork clamp then cuts it
+back off. That is wrong.
+
+| # | Hypothesis | Change | Result |
+|---|---|---|---|
+| 1 | The earthwork clamp undoes the correction (what the code comment claims) | `CROSS_EARTHWORK` x6, 36 m -> 216 m | **exactly no change** — 12.91 m, same place, same 34 boxes. The clamp never touched it. |
+| 2 | The radius should be derived from sample spacing (half a span + half the other road's width) | implemented properly | **no change whatsoever** — this lane's span is small, so spacing does not explain the missing reach, and a formula fitted to it would be a just-so story |
+| 3 | Just make the radius 40 m | flat 40 | worst **12.91 -> 1.52 m**, arterial-vs-arterial over 1 m **9 -> 5** — but **S3 REGRESSES**, edges at a shared node go from exact to **2.72 m out** at node `1:-1,1`. Two edges meeting at a node share one tangent and must agree; a 40 m reach drags one off it. |
+| 4 | Keep 40 m but switch levelling off near nodes, via the existing `guard` | `guard: edgeNodeXZ(e, seed)` on both lane passes | S3 perfect (0.0000 m) and **the crossings collapse**: 34 boxes -> **131**, 34 crossings over 1 m -> **138**, worst -> **14.50 m**, near-spawn 1 -> 4. A great many crossings ARE near nodes and simply stopped being corrected. |
+| 5 | Taper the radius from 18 m at a node up to 40 m mid-edge | `NODE_TAPER`, swept 12/18/25/45/90 m | S3 holds (0.0000-0.0001 m) and worst falls **12.91 -> 4.57 m** (plateau below 18 m of taper) — but crossings over 1 m rise **34 -> 64** and the near-spawn gate worsens **1 -> 2**. |
+
+**NOT SHIPPED.** #5 is the closest thing to a fix and it is still a TRADE, not a win: it buys a
+2.8x smaller worst step by doubling how many crossings are mildly out, and it makes the
+reversed-spawn gate worse, which is the one the operator actually drives through. Under "do not
+weaken a check to make something pass" that is a fail, so it was reverted and the baseline
+re-measured identical.
+
+**Where a sixth attempt should start.** The radius is the wrong lever because it is one number
+serving two jobs. What the lane actually needs is a sample AT the crossing: `findCrossings` already
+computes the exact crossing point for the squaring pass, so the levelling pass could INSERT a
+sample there (or snap the nearest one onto it) and correct that point exactly, at the old 18 m
+radius, with no reach anywhere else. That leaves node agreement untouched by construction, which is
+what killed #3, #4 and #5.
+
 ## Now — the failing requirements, worst first
 
 ### Junction shape — MEASURED PROPERLY, and five approaches falsified with numbers
@@ -96,7 +207,35 @@ FIVE APPROACHES, ALL MEASURED, ALL REVERTED:
    the cost is entirely in the longitudinal profile: a short tangent makes the road hug its chord,
    and the chord does not follow the terrain.
 
-WHAT A SIXTH ATTEMPT SHOULD DO. The separation and the gradient are only in conflict because the
+THE SIXTH ATTEMPT, TRIED 4 AUG — HALF OF IT SHIPPED, THE OTHER HALF IS NOW CLOSED.
+
+The elevation half works and is live: a longer height-smoothing window either side of a node
+(`JOINT_GRADE_BOOST` 2.0 over `JOINT_WINDOW` 140 m in roads.js), applied AFTER the earthwork clamp.
+Position is a measurement, not a preference — run BEFORE the clamp it improved every median grade
+and made every WORST grade worse (meadow 26.3 -> 28.5, rolling 26.1 -> 29.0), because a flatter
+approach leaves the land further away, the clamp chops it back, and a clamp is a corner.
+
+That headroom was spent on `NODE_FAN` 0.28 -> 0.31: braiding **15.9% -> 12.8%** with nothing traded
+— all six diag-relief presets at or under baseline (meadow 26.3 -> 25.7, rolling 26.1 -> 25.5,
+alpine 28.1 -> 27.4, plains 21.8 -> 21.4, dunes 22.5 -> 22.1, marsh 19.0 -> 18.9), and
+diag-crossing-angle better too (mean 8.42 -> 5.49 deg, worst 61.5 -> 23.7). diag-smooth confirms the
+roads did not straighten: arterial facet mean 5.92 -> 5.87 deg.
+
+THE TANGENT HALF IS FALSIFIED A SECOND TIME, with the window in place — the one condition under
+which approach 5 was worth re-opening. `JOINT_TANGENT` 0.75 -> spread 14.0% but meadow 26.3 -> 36.9
+and rolling 26.1 -> 33.0; 0.60 -> spread 12.1% but alpine 28.1 -> **54.8** and meadow -> 44.7. The
+one-for-one trade below survives the longer window intact. The constant is left in the source at 1
+with these numbers beside it.
+
+Tuning fact worth more than the tuning: `passesFor` clamps at 320 passes, so BOOST 2.0 and 2.6 give
+an identical profile — the WINDOW is the only live lever. 140 m is the only value clean on all six
+presets (170 regresses meadow to 27.2, 200 to 28.7, 260 and 300 worse again).
+
+**So all six recorded approaches are now measured and closed. A seventh has to be a NEW mechanism,
+not another sweep of these.** The untried one still on the list is MERGING overlapping correction
+windows into one, from the 2 Aug severity-first note.
+
+WHAT A SIXTH ATTEMPT SHOULD DO (the original note, kept for the reasoning). The separation and the gradient are only in conflict because the
 tangent is doing both jobs. Give the node a SHORT tangent for the first few samples and let the
 profile smooth over a longer window than the geometry does — i.e. decouple the plan view from the
 elevation at a junction, rather than trading one for the other. Verify with diag-junction-spread
@@ -136,9 +275,18 @@ spread above, arrived at from the other direction.
       degree junction not like part into each other -- that way its 1 template that just works
       for all intersections."
 
-      Baseline, `node tools/diag-crossing-angle.mjs`, 12 km box: **175 crossings, mean deviation
-      16.48 degrees from square, worst 82.6.** Every measured crossing in this world is
-      arterial x lane; same-tier crossings essentially do not occur.
+      **THE BASELINE IN THIS ENTRY WAS STALE, and that is the most useful thing on this pass.**
+      The 175/16.48/82.6 figures below were true when the five hypotheses were tried; they are
+      not true now. Re-measured 2 August 2026 on current `main`, same command, same 12 km box:
+      **89 crossings, mean deviation 6.89 degrees, worst 31.5.** The junction work that landed
+      since (T-splits and 4-ways getting real geometry, and a lane that would cross an arterial
+      badly simply not being built) more than halved the crossing count and cut the mean to 42%
+      of what it was. Anyone reading the table below to pick a sixth attempt should measure
+      first: it is aimed at a world that no longer exists.
+
+      Original baseline, kept for the table: 175 crossings, mean deviation 16.48 degrees from
+      square, worst 82.6. Every measured crossing in this world is arterial x lane; same-tier
+      crossings essentially do not occur.
 
       | # | Hypothesis | Change | Result |
       |---|---|---|---|
@@ -163,6 +311,68 @@ spread above, arrived at from the other direction.
       squares both crossings at once. That is a real piece of work in the most load-bearing
       function in the file, and it needs the full road gate (seam, water, R1/R2/R5, cliffs,
       density, deadends) behind it.
+
+      **HYPOTHESIS 6 — SEVERITY-FIRST WINDOWS — BUILT, MEASURED, AND REVERTED (2 Aug 2026).**
+      The first of those two ideas was implemented in full: every crossing's ask is computed
+      up front, the crossings are sorted by |delta| descending, and the room is handed out
+      worst-first against a set of claimed index spans, so the crossing furthest from square
+      claims its window before a nearly-square neighbour can spend it on a nudge nobody would
+      see. The single monotonic `cursor` skip (`if (kc <= cursor) continue`) is gone; claims
+      cannot overlap by construction. Correction, window formula, symmetry and backoff all
+      unchanged — only the ORDER of claiming.
+
+      | metric, 12 km box | before | after |
+      |---|---|---|
+      | crossings | 89 | 89 |
+      | mean deviation | 6.89 deg | **6.99 deg** |
+      | worst | 31.5 deg | **43.6 deg** |
+
+      Reverted. A 12-degree worse worst case is a regression on the exact thing this entry
+      exists to fix, and it is the SAME trap already recorded above for the asymmetric window:
+      giving one crossing a large window bends a long stretch of edge hard, which swings a
+      nearby stretch of the same edge into near-parallel with something else. Worst-first
+      allocation makes that failure MORE likely, not less, because it hands the biggest windows
+      to the crossings whose corrections are largest — and it starves their neighbours of room
+      completely, where polyline order at least left them some.
+
+      **HYPOTHESIS 7 — MERGED WINDOWS — BUILT, MEASURED, AND SHIPPED (4 Aug 2026).** Crossings
+      whose windows overlap are now one CLUSTER, corrected by ONE chain of hermites through every
+      crossing in it (P0 -> C1 -> C2 -> ... -> P1), each crossing carrying its own target tangent,
+      the backoff applied to the whole cluster at once. `if (kc <= cursor) continue` is gone, so no
+      crossing is dropped for being in a busy area.
+
+      | metric, 12 km box | before | after |
+      |---|---|---|
+      | crossing-angle mean | 5.49 deg | **4.85** |
+      | crossing-angle worst | 23.7 deg | **23.7 — unchanged** |
+      | lane facet max (diag-smooth) | 145.86 deg | **17.47** |
+      | lane facet mean | 4.62 deg | **4.47** |
+
+      The lane facet is the number that matters: 145.86 degrees is a near-reversal — a KINK — and
+      it is exactly the artefact the dropped-crossing rule produced. Arterial facets, junction
+      spread (12.8%), all six relief presets and seam S1/S2/S3 are all unchanged.
+
+      **Where the win actually comes from, measured rather than assumed.** Instrumented cluster
+      sizes over the 12 km box: **137 clusters of one and only 3 of two**. So merging itself fires
+      rarely; most of the gain is from no longer DROPPING a crossing whose window collided with its
+      neighbour's. Worth knowing before anyone expects merging to scale further — there is very
+      little left for it to merge.
+
+      **The worst crossing did not move, and that is the honest result.** It is 23.7 deg at
+      (-1949,-4012), and it was 23.7 deg before. NOT VERIFIED: whether that particular crossing is
+      one of the three merges — the debug tag is a hashed edge key, not a lattice name, so the
+      obvious guess ("it is a singleton, so merging cannot reach it") is a hypothesis and is
+      recorded here as one. What IS measured is that the tail did not improve and did not regress.
+      Both previous hypotheses improved the mean and made the worst WORSE; this one leaves it
+      exactly where it was, which is the bar this entry set.
+
+      **What that leaves.** The severity idea is dead as stated; the merged-window half is now
+      shipped. The original note read: MERGING overlapping windows into a single correction that squares both crossings at once,
+      which does not create a large lone bend and so does not obviously walk into the same trap.
+      Also worth knowing before anyone spends a day here: at 6.89 degrees mean the metric is
+      already a quarter of what the operator's complaint was raised against, so the residual is
+      now a TAIL problem (one crossing at 31.5, the rest well under 24) rather than a systemic
+      one, and a fix that improves the mean while moving the worst is not worth taking.
 
 - [x] **THE REVERSED SPAWN IS RESTORED — crossings are levelled and the hold is lifted.**
       `+ Math.PI` is back in `findSpawn`. The gate it was waiting on, measured by the new

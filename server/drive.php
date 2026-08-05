@@ -37,7 +37,7 @@ const WR_SIGNAL_TTL = 30.0;        // seconds a WebRTC signal waits for its reci
 const WR_SIGNAL_MAX = 1400;        // bytes per signal body
 
 /* ── CORS ──────────────────────────────────────────────────────────────────
- * The game is served from crumbtown.org and from *.base44.app, and is developed against
+ * The game is served from cozydriver.com (apex and /beta), from crumbtown.org and from *.base44.app, and is developed against
  * a Vite dev server on localhost. No cookies are ever used — the secret travels in the
  * body — so credentials are never allowed and there is nothing for a third-party origin
  * to steal by embedding us.
@@ -46,7 +46,9 @@ function wr_cors(): void
 {
     $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
     $ok = $origin !== '' && (
-        $origin === 'https://crumbtown.org'
+        $origin === 'https://cozydriver.com'
+        || $origin === 'https://www.cozydriver.com'
+        || $origin === 'https://crumbtown.org'
         || $origin === 'https://www.crumbtown.org'
         || preg_match('#^https://([a-z0-9-]+\.)*base44\.app$#i', $origin) === 1
         || preg_match('#^http://(localhost|127\.0\.0\.1)(:\d+)?$#', $origin) === 1

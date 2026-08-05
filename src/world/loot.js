@@ -273,3 +273,86 @@ export function gemsForTile(gi, gj, seed) {
   const y = waterPlaneAt(x, z, seed);
   return { x, z, y: y + GEM_HOVER, id: `gm:${gi},${gj}` };
 }
+
+/* ── salvage crates: the off-road goodies ────────────────────────────────────
+ *
+ * Operator: "there should be special off-road goodies that you can get."
+ *
+ * The Warthog exists to leave the tarmac, and until now there was no reason to. Suns hug the road
+ * and diamonds are out at sea, so the entire middle of the world — the open country the off-roader
+ * is built for — paid nothing. A crate is that payment.
+ *
+ * THIS IS `gemsForTile` WITH ITS GATES TURNED INSIDE OUT, deliberately and almost line for line. A
+ * gem is deep water, far from any road, in a big open body. A crate is dry land, far enough from a
+ * road to count as off-road but near enough to be findable, and on ground shallow enough to drive
+ * onto. The gate ORDER is the same and for the same reason render/ships.js's own comment gives:
+ * cheapest and most discriminating first, so most candidates die before the expensive road query is
+ * ever paid for.
+ *
+ * WHY 25 SUNS. Not a new currency — the game already has one, and a second scoreboard for the same
+ * act of picking something up is a worse game, not a richer one. A road sun is worth 1 and the early
+ * unlock rungs are in the tens (the Coupe's `earnAt` is 70), so 25 reads as a genuine find without
+ * making the road economy pointless. Two crates and a bit is a car.
+ */
+const SALT_CRATE = 0x43525431; // 'CRT1'
+/** One candidate site per this many metres square. Sparser than the gem lattice: open country is
+ *  enormous and a crate every 260 m would be scenery rather than a find. */
+export const CRATE_TILE = 340;
+/** How far off the made surface a crate must be, and how far out it may go.
+ *  Under 60 m it is not off-road, it is a lay-by. Past 500 m nobody will ever see it. */
+export const CRATE_ROAD_MIN = 60;
+export const CRATE_ROAD_MAX = 500;
+/** Steepest local ground a crate may sit on, as a rise over 6 m. A crate up a cliff is a crate
+ *  nobody collects, which is the same as no crate at all but with the tile cost paid. */
+export const CRATE_MAX_SLOPE = 0.25;
+/** Rarity draw, paid only by a site that cleared every hard gate above. */
+export const CRATE_ACCEPT_P = 0.5;
+/** Metres above the ground the crate's origin sits — render/loot.js blits from here, the same
+ *  "hover is a fixed constant, not part of placement" rule the suns and the fuel cans use. */
+export const CRATE_HOVER = 0.55;
+/** How close you have to get. Generous against a sun's, because in open country FINDING it is the
+ *  hard part, not touching it — and the Warthog is a wide vehicle travelling quickly. */
+export const CRATE_RADIUS = 8;
+/** What one crate pays, in suns. See the note above. */
+export const CRATE_VALUE = 25;
+
+/**
+ * Evaluate one crate-lattice cell. Returns a placement spec or null.
+ * Pure in (gi, gj, seed), so a tile that leaves the streaming window and comes back hands out the
+ * SAME crate rather than inventing a new one — this file's own determinism rule.
+ *
+ * @param {number} gi,gj lattice cell indices
+ * @param {number} seed
+ * @returns {{x:number, z:number, y:number, id:string} | null}
+ */
+export function cratesForTile(gi, gj, seed) {
+  const r = rng(hash3i(gi, gj, 0x63727431, seed ^ SALT_CRATE));
+  const x = (gi + r()) * CRATE_TILE;
+  const z = (gj + r()) * CRATE_TILE;
+
+  // 1. dry land, cheapest and most discriminating — the exact inverse of the gem's depth gate.
+  const fb = freeboardAt(x, z, seed);
+  if (fb <= 1.0) return null;
+
+  /* 2. drivable ground. Two extra height samples 6 m apart in each axis: cheaper than the road
+   * query below and it throws away every cliff face and ravine wall before that is paid for.
+   *
+   * `landHeight` takes the SEED as its third argument, not a bound land function — `landFn(seed)` is
+   * the bound one and it is what `roadDistance` wants below. Passing the function where the seed
+   * belonged is a mistake that does not throw: it silently returns heights from a nonsense seed, so
+   * the slope gate passes on cliffs and the water gate rejects dry land. tools/diag-crates.mjs
+   * caught it as 18 crates sitting on lakes. */
+  const h0 = landHeight(x, z, seed);
+  const gx = (landHeight(x + 6, z, seed) - h0) / 6;
+  const gz = (landHeight(x, z + 6, seed) - h0) / 6;
+  if (Math.hypot(gx, gz) > CRATE_MAX_SLOPE) return null;
+
+  // 3. off the road but not lost — the most expensive single test, so it runs last of the hard gates.
+  const rd = roadDistance(x, z, seed, landFn(seed));
+  if (rd.d < CRATE_ROAD_MIN || rd.d > CRATE_ROAD_MAX) return null;
+
+  // 4. rarity draw, only ever paid for by a site that already cleared everything above.
+  if (r() >= CRATE_ACCEPT_P) return null;
+
+  return { x, z, y: h0 + CRATE_HOVER, id: `cr:${gi},${gj}` };
+}

@@ -164,9 +164,17 @@ void main(){
   vFwd   = normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]));
 
   float rad = pdata.x * mix(0.80, 1.06, op);
-  float ra = pdata.y*2.399963;                    // golden-angle spin per puff
-  float cr = cos(ra), sr = sin(ra);
-  vec2 rc = vec2(corner.x*cr - corner.y*sr, corner.x*sr + corner.y*cr);
+  /* NO PER-PUFF SPIN. Operator: "the original clouds dont have the odd roatations and breaks in
+   * them -- stay closer to those."
+   *
+   * Each puff used to be rotated by a golden-angle multiple of its own seed. The intent was to stop
+   * a repeated sprite reading as a repeated sprite — but a billboard rotated about the VIEW axis
+   * turns its own soft edge into a hard one against its neighbours, and a bank of puffs at different
+   * angles stops reading as one cloud and starts reading as a pile of discs. That is the "odd
+   * rotations and breaks". The puffs stay upright now, which is what the original does; the variety
+   * still comes from radius, opacity and the noise in the fragment shader, none of which chop the
+   * silhouette up. */
+  vec2 rc = corner;
   vec3 wp = wc + vRight*(rc.x*rad) + vUp*(rc.y*rad*0.86);
   vC = rc; vSeed = pdata.y; vHF = pdata.z; vW = wp;
   gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
@@ -188,7 +196,24 @@ void main(){
   float r = length(vC);
   if(!(r <= 1.02)) discard;
   vec2 tile = vec2(mod(floor(vSeed*4.0), 2.0), mod(floor(vSeed*2.0), 2.0));
-  vec4 prof = texture(uPuff, (clamp(vC,-1.0,1.0)*0.5 + 0.5)*0.5 + tile*0.5);
+  /* MIRROR EACH PUFF, RATHER THAN ROTATE IT.
+   *
+   * Operator, with a photograph: "seems like people ate bits out of the right of the cloud -- the
+   * left is how it should be though." The right edge was a hard staircase; the left was soft.
+   *
+   * That was the cost of removing the per-puff spin. There are only FOUR baked profiles in the
+   * atlas, and with the rotation gone every puff drew its profile at the SAME orientation — so the
+   * straight segments in a scalloped edge all landed at the same angle and stacked, one on top of
+   * the next, into a flight of steps. The old spin hid it, at the price of the hard rotated edges
+   * and broken-up silhouettes he complained about first. Both complaints are the same underlying
+   * shortage: not enough distinct silhouettes.
+   *
+   * Mirroring gives four orientations per profile — sixteen silhouettes in all — WITHOUT rotating
+   * anything. A mirrored axis-aligned quad is still axis-aligned, so no puff gains a hard diagonal
+   * edge against its neighbour, and no two adjacent puffs share the same flat any more. */
+  vec2 flip = vec2(mod(floor(vSeed*8.0), 2.0), mod(floor(vSeed*16.0), 2.0)) * 2.0 - 1.0;
+  vec2 pc = clamp(vC, -1.0, 1.0) * flip;
+  vec4 prof = texture(uPuff, (pc*0.5 + 0.5)*0.5 + tile*0.5);
   // An analytic radial falloff multiplies the baked profile: it softens the silhouette, and
   // it makes a hard-edged opaque quad structurally impossible even if the atlas is missing.
   float a = prof.r * smoothstep(1.02, 0.60, r);

@@ -57,11 +57,11 @@
  * the SAME say()/toast this file already had. See OFFROAD_HINT_KEY's own note for why.
  */
 
-import { fmtScore, fmtDistance } from '../game/streak.js';
+import { fmtScore } from '../game/streak.js';
 import { FLEET, FLEET_BY_ID, isUnlocked } from '../game/garage.js';
-import { STREAK_METRES_PER_SUN } from '../game/wallet.js';
 import { clamp01 } from '../core/math.js';
 import { BIOME_SHORT } from '../world/biomes.js';
+import { speedDisplay, fmtDistanceUnits } from '../game/units.js';
 
 /* How far the HUD steps back while the opening cinematic has the screen. NOT 0 — see
  * setCinematic() for why that was wrong. 0.4 is a shade above the level this game already
@@ -138,6 +138,11 @@ export const SUN_TICKS = 4;
  *  0.61 m is two feet; the streak's own half-second grace is the other half of the same idea. */
 export const OFFROAD_WARN_M = 0.61;
 
+/** Seconds the red screen-edge ring stays up after you leave the road. The red FIGURES stay red the
+ *  whole time you are off it — see the note where this is used. Operator: "stop whole screen red for
+ *  more than 1 sec offroad just the numbers should be red." */
+export const OFFROAD_EDGE_S = 1.0;
+
 export const OFFROAD_HINT_KEY = 'wanderoad.hint.offroad.v1';
 export const OFFROAD_HINT_MAX = 10;
 export const OFFROAD_HINT_TEXT = 'off the road — press R to get back on';
@@ -186,6 +191,7 @@ export class Hud {
   constructor() {
     this.root = document.getElementById('hud');
     this.kph = document.getElementById('kph');
+    this.speedUnit = document.getElementById('speedUnit');
     this.gear = document.getElementById('gear');
     this.biome = document.getElementById('biome');
     this.coords = document.getElementById('coords');
@@ -287,6 +293,7 @@ export class Hud {
     this._blip = 0;
     this._toastT = 0;
     this._lastGear = null;
+    this._lastSpeedUnit = null;
     this._lastBiome = -1;
     this._shownKm = 0;
     /* Which car the bar is currently counting towards. When this moves ON — and only when the
@@ -378,10 +385,21 @@ export class Hud {
     this.root.style.pointerEvents = on ? 'none' : '';
   }
 
-  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null, auto = null }) {
+  update(dt, { car, streak, surface, remotes, netState, myName = '', wallet = null, auto = null, flightKph = null }) {
     // ── speed ──
-    const kph = Math.round(car.kph);
-    this.kph.textContent = kph;
+    // American by default (game/units.js's own DEFAULT_IMPERIAL) — speedDisplay() does the one
+    // conversion and hands back a value and its unit word already agreeing with each other, so
+    // this file never has to know which system is in force. DOM write is guarded the same way
+    // `_lastGear` a few lines below is: only touch it when the label actually changed.
+    // While flying, flightKph is the aeroplane's own airspeed — the car underneath is parked and
+    // frozen, so car.kph would just show whatever it read the instant before take-off forever.
+    // The unit conversion applies to whichever one is carrying you.
+    const sd = speedDisplay(flightKph ?? car.kph);
+    this.kph.textContent = sd.value;
+    if (sd.label !== this._lastSpeedUnit) {
+      this.speedUnit.textContent = sd.label;
+      this._lastSpeedUnit = sd.label;
+    }
 
     const g = car.reverse ? 'R' : Math.abs(car.speed) < 0.6 ? 'N' : String(car.gear);
     if (g !== this._lastGear) {
@@ -416,7 +434,7 @@ export class Hud {
     if (live) {
       // Smooth the displayed distance so the last digit is not a blur at 300 km/h.
       this._shownKm += (s.km - this._shownKm) * Math.min(1, dt * 9);
-      this.streakKm.textContent = fmtDistance(this._shownKm * 1000);
+      this.streakKm.textContent = fmtDistanceUnits(this._shownKm * 1000);
       // The caption is what makes the big number mean anything. It says the mechanic out loud
       // once, quietly, forever — which is cheaper than a tutorial and calmer than a pop-up.
       /* `paused` comes first because it OVERRIDES the other two: while auto-drive has the wheel
@@ -486,7 +504,22 @@ export class Hud {
       if (offNow !== this._offNow) {
         this._offNow = offNow;
         this.streakEl.classList.toggle('offroad', offNow);
-        this.offroadEdge.classList.toggle('on', offNow);
+        /* THE RED RING IS A FLASH, NOT A STATE. Operator: "stop whole screen red for more than 1 sec
+         * offroad just the numbers should be red."
+         *
+         * He is right, and the reason is that the ring and the figures answer different questions.
+         * The ring answers "something just changed" — it has to be unmissable for the moment you
+         * leave the tarmac, and then it has done its job. The FIGURES answer "what is true now", and
+         * that can stay red for as long as it is true without being oppressive. Held red across a
+         * long off-road stretch the ring stops reading as a warning and starts reading as a broken
+         * screen, which is what he is describing.
+         *
+         * So: the ring shows for OFFROAD_EDGE_S from the moment you go off, then fades on its own
+         * even while you are still off the road. `#streak.offroad` below is untouched and stays red
+         * the whole time. Re-arms when you get back on, so every excursion flashes once. */
+        if (offNow) this._offEdgeFor = (this._offEdgeFor ?? 0) + dt;
+        else this._offEdgeFor = 0;
+        this.offroadEdge.classList.toggle('on', offNow && this._offEdgeFor <= OFFROAD_EDGE_S);
       }
 
       /* The R hint. Fires on the CONFIRMED off-road transition — `this._capKey` only just
@@ -531,7 +564,7 @@ export class Hud {
       // At rest the figure holds the all-time best, because that is the number the fleet
       // unlocks against — the bar underneath is measured in the same units. Never blank:
       // fmtDistance(0) is "0 m", which is a true statement and, more to the point, a box.
-      this.streakKm.textContent = fmtDistance(s.best);
+      this.streakKm.textContent = fmtDistanceUnits(s.best);
       this._setCaption(s.best > 0 ? 'best' : 'start', s.best > 0 ? 'your longest run' : 'stay on the road', dt);
       this.streakMul.textContent = '';
       this.streakPts.textContent = '';
@@ -597,9 +630,13 @@ export class Hud {
          * was handed to auto-drive, not because it left the road. Same visible effect (the bar
          * flashes, the counter goes back to zero) but a different sentence, because "streak
          * ended" reads as a mistake and this one was not — the operator's own fix for the exploit
-         * where flipping to auto-drive a frame before a crash used to cost nothing at all. */
+         * where flipping to auto-drive a frame before a crash used to cost nothing at all.
+         * fmtDistanceUnits (game/units.js), not the plain metric fmtDistance, so this respects
+         * the player's mph/km switch the same way every other distance on this HUD now does. */
         this.say(
-          ev.auto ? `auto-drive on — ${fmtDistance(ev.distance)} banked` : `${fmtDistance(ev.distance)} — streak ended`,
+          ev.auto
+            ? `auto-drive on — ${fmtDistanceUnits(ev.distance)} banked`
+            : `${fmtDistanceUnits(ev.distance)} — streak ended`,
           3.0,
         );
         // The blip: rust arrives instantly and fades out over the best part of a second. A

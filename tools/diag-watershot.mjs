@@ -15,8 +15,15 @@
  * lake is beyond the ridge the camera is behind. Finding out which is the next step, and it is worth
  * doing: if the two really do disagree, that is a bug considerably more interesting than the foam.
  *
- * Until it works, the foam change it was written to verify has NOT been confirmed by eye — only by
- * diag-watershader's static checks and the suite staying green.
+ * FOUND (B9): neither guess above was it. A live probe (`window.WANDEROAD.scene.getObjectByName
+ * ('water')`) showed the water mesh present and visible barely 75 m from the car — `isDryAt` and
+ * the renderer agree completely, same `waterLevelAt` underneath both. But the CAMERA was sitting
+ * 180 m up in the air while the car sat at y=3: this script never sends a single input event, so
+ * `Cinematic.active` (src/game/cinematic.js) never goes false and the title-card fly-around camera
+ * never hands off to the chase rig — `car.placeAt()` moves the CAR, not the thing being
+ * photographed. `tools/shoot.mjs` never hit this only because its autopilot's throttle keydowns
+ * double as the "any key" skip (`cine.js`'s own `_attach()` listens for `keydown` genuinely). Fixed
+ * by dispatching one real keydown before waiting, exactly like a player's first press.
  *
  *   node tools/diag-watershot.mjs [url] [out.png]
  */
@@ -43,7 +50,28 @@ await send('Page.enable', {}, S); await send('Runtime.enable', {}, S);
 await send('Page.navigate', { url: URL }, S);
 const ev = async e => (await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true }, S)).result?.result?.value;
 for (let i = 0; i < 90; i++) { await sleep(500); if (await ev('!!(window.WANDEROAD && window.WANDEROAD.car)')) break; }
-await sleep(4000);
+
+/* Skip the title-card cinematic (B9). Its own "any key" listener only fires on a REAL keydown
+ * dispatched at window, not on anything this script does to the car directly — without this the
+ * camera stays on the intro fly-around (measured: 180 m up, aimed at whatever the intro chose)
+ * and every screenshot below photographs THAT, not the shore this script carefully finds.
+ *
+ * A single dispatch right after `window.WANDEROAD.car` appears is not enough: measured live,
+ * `cine.active` is still FALSE at that point (`cine._onAny` unset — `_attach()` has not even run
+ * yet) because the cinematic only begins once the car's model finishes loading, a few seconds
+ * later. A keydown fired before that has nothing to catch it. So this polls for the cinematic to
+ * actually start, dispatches once it has a listener, then confirms it actually ended — the same
+ * thing `tools/shoot.mjs` gets by accident from its autopilot's own throttle keydowns. */
+for (let i = 0; i < 30; i++) {
+  await sleep(300);
+  if (await ev(`!!(window.WANDEROAD.cine && window.WANDEROAD.cine._onAny)`)) break;
+}
+await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', bubbles: true }))`);
+for (let i = 0; i < 30; i++) {
+  await sleep(300);
+  if (await ev(`!window.WANDEROAD.cine.active`)) break;
+}
+await sleep(1000);
 
 /* THE SHORE IS FOUND IN NODE. The page's surface record has no water height on it (`w` is the biome
  * blend; the height comes from `waterLevelAt`, which the built bundle does not expose), so the search

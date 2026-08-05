@@ -72,6 +72,9 @@ const OFF_ROAD_AT = 0.5;
 /** m/s below which a braked car is held still rather than allowed to creep — see the static-hold
  *  block at the end of _step. About 4 km/h: fast enough to catch the end of a stop, slow enough that
  *  it can never interfere with driving. */
+/** Under this, a car that is not being asked to move is PARKED — 3 km/h, the operator's own
+ *  number. STATIC_HOLD_SPEED below is the wider, brake-held band and is unchanged. */
+const STOP_SPEED = 0.833;
 const STATIC_HOLD_SPEED = 1.1;
 /** 1/s at full brake. 9 kills a slow creep inside a couple of tenths without snapping the car. */
 const STATIC_HOLD_RATE = 9;
@@ -156,8 +159,17 @@ export class Vehicle {
   constructor({ tier = 'sports', terrain = null, preset = 'sport' } = {}) {
     this.setTier(tier);
     this.terrain = terrain;
-    this.assist = { ...PRESETS[preset] };
-    this.presetName = preset;
+    /* AN UNKNOWN PRESET NAME MUST NOT SILENTLY DESTROY THE CAR. `PRESETS[name]` for a name that is
+     * not one of cruise/sport/off/hardcore spreads `undefined` into an empty assist table, and the
+     * solver then produces NaN for every pose from the first step — a car that never moves, never
+     * stops and never turns, with nothing in the console to say why. Found by handing this 'road',
+     * which is a word the UI uses for a different thing entirely.
+     *
+     * `setPreset` below already refuses an unknown name; the constructor did not, which is the more
+     * dangerous of the two because there is no earlier state to fall back to. */
+    const known = PRESETS[preset] ? preset : 'sport';
+    this.assist = { ...PRESETS[known] };
+    this.presetName = known;
 
     // pose
     this.x = 0;
@@ -184,6 +196,10 @@ export class Vehicle {
 
     // internal
     this._shiftTimer = 0;
+    /** +1 / -1 for one frame when the driver asks for a gear. Consumed by the gearbox. */
+    this.wantShift = 0;
+    /** True once the driver has shifted by hand; the automatic stops deciding until autoGear(). */
+    this.manual = false;
     this._shiftHold = 0;
     this._absPhase = 0;
     this._liftoff = 0;
@@ -278,6 +294,17 @@ export class Vehicle {
 
   setTier(tier) {
     this.tier = tier;
+    /* A TIER THAT DOES NOT EXIST FALLS BACK TO SPORTS, and used to do it silently.
+     *
+     * The fallback is right — a car that boots wrong is better than a car that does not boot — but
+     * a car quietly running another tier's mass, wheelbase, power and gearing is indistinguishable
+     * from a car that was tuned badly, and the whole fleet is tuned by measurement. So it says so,
+     * once per unknown tier.
+     *
+     * (Checked while adding this, and worth writing down because the opposite was assumed for an
+     * hour: `micro` and `trike` DO exist. tuning.js on its own exports five tiers, but the game's
+     * own import graph registers seven by the time any car is built, so the Bubble and the Tricycle
+     * are genuinely their own tiers and their numbers are their own.) */
     const S = TIERS[tier] || TIERS.sports;
     this.spec = S;
     this.mass = S.mass;
@@ -669,7 +696,22 @@ export class Vehicle {
      * it is not changing, so `groundV` is ~0 and the band stays at its original 0.06 m — the
      * water case gets the old behaviour by construction rather than by a flag. bench-boat's
      * barrier reads 0.25 m against its 1.0 m bar, unchanged from before this whole round. */
-    const band = 0.06 + clamp01(-groundV / 5) * (SUSPENSION.travel - 0.06);
+    /* THE BAND IS CAPPED, so a long-travel car can still be airborne.
+     *
+     * This rule widens the "not really airborne" band up to the full suspension travel exactly when
+     * the ground is receding fastest — which is precisely the moment you leave the lip of a jump. At
+     * the fleet's 0.22 m of travel that is a sensible anti-bounce guard. At the Warthog's 0.42 m it
+     * becomes a 42 cm dead zone: measured, the Warthog cleared a kicker that launched the Coupe for
+     * 0.15 s and reported `onGround` true for every single frame of it — the car was in the air and
+     * the game did not know, so no airborne assist, no wheels hanging, and no jump.
+     *
+     * `airBand` caps the widened part at whatever value a car says its anti-bounce guard is worth,
+     * independently of how far its springs actually move. It is undefined for every car in the fleet
+     * except the Warthog, and `?? SUSPENSION.travel` then reproduces the old expression character for
+     * character — so nothing that was not already broken changes. The Warthog sets it to 0.22, the
+     * travel this rule was originally tuned against. */
+    const bandTravel = Math.min(SUSPENSION.travel, SUSPENSION.airBand ?? SUSPENSION.travel);
+    const band = 0.06 + clamp01(-groundV / 5) * (bandTravel - 0.06);
     const airborne = gap > band;
     this.onGround = !airborne;
 
@@ -737,10 +779,48 @@ export class Vehicle {
        *
        * Clamped, because `groundY` is a terrain sample and a chunk seam or a teleport can step
        * it: ±6 m/s covers a 17% grade at 130 km/h and cannot inject an impulse worth having. */
-      const dampA = (SUSPENSION.damping * 4 * (groundV - this.vy)) / this.mass;
+      /* ONE DAMPER NUMBER IS NOT A SHOCK ABSORBER. Operator, on the off-road car: "Big springs.
+       * Shock absorption."
+       *
+       * A real damper is not symmetric, and no established vehicle model treats it as one. Bullet's
+       * `btRaycastVehicle` exposes `suspensionCompression` and `suspensionRelaxation` as two separate
+       * constants, and Rapier's `DynamicRayCastVehicleController` — the JS/WASM engine that inherits
+       * that model — exposes the same pair. Rebound is conventionally damped HARDER than bump, and
+       * that asymmetry is the whole trick: a soft spring can then swallow a hit without the car
+       * pogoing back up off it. Softening the spring alone, which is what "big springs" sounds like,
+       * produces a car that bounces for four cycles after every bump.
+       *
+       * `rate > 0` means the ground is rising into the body — the spring is compressing, so this is
+       * the bump stroke. Below zero the body is rising away from the ground and it is the rebound
+       * stroke.
+       *
+       * `dampingBump` and `dampingRebound` are deliberately NOT defined in the stock SUSPENSION
+       * table. Undefined means both fall through to `SUSPENSION.damping`, so every car that does not
+       * declare its own springs is bit-for-bit what it was before this existed — only the Warthog
+       * sets them (see its `feel.susp` in game/garage.js). */
+      const rate = groundV - this.vy;
+      const cDamp = rate > 0 ? (SUSPENSION.dampingBump ?? SUSPENSION.damping) : (SUSPENSION.dampingRebound ?? SUSPENSION.damping);
+      const dampA = (cDamp * 4 * rate) / this.mass;
       this.vy += (springA + dampA - g) * dt;
-      // A landing must not launch the car back up: kill upward rebound above 2 m/s.
-      if (this.vy > 2) this.vy = 2;
+      /* A landing must not launch the car back up: kill upward rebound above 2 m/s.
+       *
+       * BUT A RAMP IS NOT A REBOUND, and this cap could not tell the difference. Operator: "jumps
+       * that you can take that actually you can jump over." A 1.35 m kicker with a 19° face taken at
+       * 40 km/h should hand the car about 3.6 m/s upwards, which is 0.7 s of air; capped at 2 m/s it
+       * gets 0.4 s at the absolute best, and measured it was managing 0.09 s. Every jump in the game
+       * was being clipped by a rule written about landings.
+       *
+       * The two cases are physically distinct and `groundV` already separates them. `groundV` is the
+       * rate the terrain height under the car is changing, so driving UP a ramp face it is strongly
+       * POSITIVE — the ground itself is carrying the car upward. A spring rebounding after a landing
+       * happens on ground that is not moving at all, so `groundV` is ~0 there and the 2 m/s cap
+       * applies exactly as it always did.
+       *
+       * So: you may rise as fast as the ground beneath you is rising, or 2 m/s, whichever is more.
+       * That is not a licence to fly — it is a statement that the car cannot be held down by a rule
+       * about springs while the floor is genuinely lifting it. */
+      const riseCap = Math.max(2, groundV);
+      if (this.vy > riseCap) this.vy = riseCap;
     }
     this.y += this.vy * dt;
     if (this.y < rideYTip - SUSPENSION.travel) {
@@ -835,9 +915,41 @@ export class Vehicle {
     // deletes both drive AND engine braking — which is exactly why the first build coasted
     // for two kilometres. Two guards: never upshift on a closed throttle, and never shift
     // twice inside half a second.
-    if (A.autoGears && this._shiftTimer <= 0 && this._shiftHold <= 0 && !this.reverse) {
+    /* ── MANUAL GEARS ────────────────────────────────────────────────
+     * Operator: "Maual gear shift needs to eb added".
+     *
+     * `shiftUp` and `shiftDown` have been in the key map since the beginning and were read by
+     * NOTHING — tuning.js says so itself in its own note beside `autoGears`, which is why the
+     * hardcore assist was a debt rather than a mode: turning the automatic off left the car stuck in
+     * first with no way to change gear.
+     *
+     * `manual` latches the moment the driver asks for a gear. That is the whole switch: there is no
+     * mode to find in a menu, no state to explain. Ask for a gear and you have a manual box; the
+     * automatic stops making decisions for you. `autoGear()` (the R key's reset, and the assist
+     * preset) hands it back.
+     *
+     * The redline is still respected on the way up and the box still refuses a downshift that would
+     * over-rev — a manual gearbox lets you choose, it does not let you grenade the engine. */
+    if (this.wantShift) {
+      const next = this.gear + this.wantShift;
+      const ratio = next >= 1 && next <= S.ratios.length ? S.ratios[next - 1] * S.finalDrive : 0;
+      const rpmAfter = ratio ? Math.abs(wheelOmega) * ratio * (60 / TWO_PI) : 0;
+      if (next >= 1 && next <= S.ratios.length && rpmAfter < S.redline * 1.02) {
+        this.gear = next;
+        this.manual = true;
+        this._shiftTimer = GEARBOX.shiftTimeAuto;
+        this._shiftHold = 0.35;
+      }
+      this.wantShift = 0;
+    }
+
+    if (A.autoGears && !this.manual && this._shiftTimer <= 0 && this._shiftHold <= 0 && !this.reverse) {
       const upAt = curveAt(GEARBOX.upshiftAtThrottle, this.throttle) * S.redline;
-      if (this.throttle > 0.06 && this.rpm > upAt && this.gear < S.ratios.length) {
+      /* HOLD THE GEAR ON A CLIMB — the other half of low range. Without this the box drops a gear on
+       * the hill, the revs recover, it immediately shifts back up, and bogs again: the shuffle a real
+       * automatic avoids by locking out top gears while the load is high. */
+      const holdForClimb = slopeLong < -1.6 && this.throttle > 0.5 && this.rpm < S.redline * 0.94;
+      if (this.throttle > 0.06 && this.rpm > upAt && this.gear < S.ratios.length && !holdForClimb) {
         this.gear++;
         this._shiftTimer = GEARBOX.shiftTimeAuto;
         this._shiftHold = 0.5;
@@ -849,7 +961,33 @@ export class Vehicle {
         // downhill hairpin feel like a car instead of a sledge.
         const bogging = this.rpm < GEARBOX.idleRpm + GEARBOX.downshiftHysteresis * 0.9;
         const coasting = this.throttle < 0.05 && rpmIfDown < S.redline * 0.7;
-        if (rpmIfDown < S.redline * 0.92 && (bogging || coasting)) {
+        /* KICKDOWN, and this is what "the car cannot go up hills" actually was.
+         *
+         * Operator: "Starter car cant go up many hills" and "Slow cars like truck right now cant go
+         * up mountains -- should be the best at it."
+         *
+         * The two triggers above are BOGGING (the engine has fallen off the bottom) and COASTING
+         * (the driver lifted off). Neither fires on a hill with the throttle pinned. Traced: the
+         * Estate entering an 18-degree tarmac climb at 66 km/h HOLDS SIXTH for six full seconds
+         * while bleeding to 23 km/h, making 1697-1905 N against 4383 N of gravity, and only drops a
+         * gear at 7.5 s. It never bogs, because sixth at 23 km/h is still 2110 rpm — above the
+         * 1710 rpm floor. So the car simply grinds to a halt in the wrong gear with the pedal flat.
+         *
+         * A real automatic kicks down when you ask for everything and it is losing ground. That is
+         * exactly this test: full throttle, and either actually decelerating or on a real slope.
+         * Nothing else about the box changes. */
+        const kickdown =
+          this.throttle > 0.8 && (this.longAccel < -0.3 || slopeLong < -1.0) && rpmIfDown < S.redline * 0.95;
+        /* LOW RANGE. Operator: "low range uphill for auto gear".
+         *
+         * Kickdown gets the box DOWN a gear when the hill starts winning. Low range is the other
+         * half: on a real climb it should also stop shuffling back UP the moment the revs recover,
+         * because upshifting mid-hill just bogs the engine again two seconds later. `climbing` is
+         * used below to hold the gear, and it also lets the box drop one further than the bogging
+         * rule alone would — which is what a transfer case does. */
+        const climbing = slopeLong < -1.6 && this.throttle > 0.5;
+        const lowRange = climbing && rpmIfDown < S.redline * 0.86;
+        if (rpmIfDown < S.redline * 0.92 && (bogging || coasting || kickdown || lowRange)) {
           this.gear--;
           this._shiftTimer = GEARBOX.shiftTimeAuto;
           this._shiftHold = 0.5;
@@ -936,7 +1074,18 @@ export class Vehicle {
     }
     if (this.reverse) {
       // In reverse the brake IS the accelerator, and reverse is deliberately slow.
-      let rev = Math.max(Math.abs(driveForce), this.brake * 2600) * 0.5;
+      /* REVERSE PUSH. Operator: "Going in reverse is super slow."
+       *
+       * Measured before this change: 1300 N flat against 1520 kg is 0.86 m/s2, so 0-20 km/h took
+       * 7.6 seconds — the same car does 0-60 km/h FORWARD in 5.4 s. Reverse was 3.5x weaker off the
+       * line. The old figure had no gearing, no torque curve and no car in it at all; it was a
+       * literal, and `Math.abs(driveForce)` is always 0 here because reversing means the throttle is
+       * shut, so the Math.max never chose it.
+       *
+       * REVERSE.force/scale live in tuning.js now, so the reverse "engine" is tunable like the rest.
+       * This raises the push, NOT the top speed: the ~26.7 km/h terminal is set by the taper below,
+       * and is left exactly where it was. */
+      let rev = Math.max(Math.abs(driveForce), this.brake * REVERSE.force) * REVERSE.scale;
       /* THE BUG THIS ONCE WAS: reverse engaged (the flag went true) but the car barely
        * moved — "just go in reverse gear" rather than actually reversing. Measured with a
        * scripted hold-S trace: engine braking alone is ~1666 N at idle rpm in a low gear,
@@ -1087,14 +1236,31 @@ export class Vehicle {
      * the rule is met
      * on every site and the car can still be driven off the tarmac on purpose — which it has
      * to be, because petrol-station forecourts are off-road surfaces. */
-    let crr = lerp(0.236, 0.014, clamp01(onRoad));
+    /* THE CAR'S OWN OFF-ROAD ABILITY, which until now reached the grip model and nothing else.
+     * Operator: "Truck should do better offroad too". Rolling resistance off the tarmac is 3519 N
+     * against 4594 N of drive — it eats 77% of the engine — so a car that is "good off-road" has to
+     * be given relief HERE or the badge means nothing. 1 for every car that has no `offRoad`. */
+    const offMul = TYRE.offRoadMul || 1;
+    let crr = lerp(0.236 / offMul, 0.014, clamp01(onRoad));
     // Dunes: piled sand in front of the wheels, not just a looser surface. See SAND above.
     // Deliberately small next to vDrag below — a constant force alone cannot bleed off a fast
     // ENTRY speed within a few metres, it can only stop the car from creeping once it is
     // already slow; the SPEED-PROPORTIONAL term is what actually does the "impossible to
     // drive at speed" part.
     if (bogHere > 0) crr = lerp(crr, SAND.crrBogged, bogHere); // bogHere, not sandBog — see the note by offCap
-    let vDrag = lerp(18.7, 1.4, clamp01(onRoad));
+    /* 30.0 off-road, not 18.7 — O2, "off-road is meaningfully slower than tarmac", the last
+     * failing check in the browser suite.
+     *
+     * Measured on the live beta: 64.7 km/h on the road against 40.4 km/h at full throttle across a
+     * field, i.e. 62% — while the check wants under 55%, and the operator's own complaint was that
+     * leaving the tarmac made too little difference. crr (the constant term) was already doing its
+     * job of stopping a creep; what sets the TOP SPEED is this speed-proportional term, and at 18.7
+     * N per m/s it ran out long before the drive force did.
+     *
+     * The RELATIVE ranking is untouched: this is divided by the car's own offRoad multiplier exactly
+     * as before, so the Rally at 1.35 and the pickup keep their advantage over the saloons — the
+     * operator asked for the truck to be BETTER off-road, not for everything to be equally slow. */
+    let vDrag = lerp(30.0 / offMul, 1.4, clamp01(onRoad));
     /* The speed-proportional half of off-road resistance is what a car arriving off the
      * tarmac at speed actually decelerates against — the constant term above is too small at
      * 19 m/s to matter (a few tenths of a m/s²) and only bites once the car is already slow.
@@ -1343,7 +1509,37 @@ export class Vehicle {
      * far worse bug than the one being fixed. */
     {
       const held = Math.max(this.brake || 0, this.handbrake || 0);
-      const wantsGo = (this.throttle || 0) > 0.02;
+      /* THE REVERSE PEDAL COUNTS AS WANTING TO GO. Without this the stop below would pin the car at
+       * a standstill the instant it tried to reverse, because reversing IS holding the brake. */
+      const wantsGo = (this.throttle || 0) > 0.02 || (this.reverse && (this.brake || 0) > 0.05);
+
+      /* BELOW 3 KM/H, STOP. Operator: "Stopping means you side down hill or sideways -- below 3 km =
+       * stop moving."
+       *
+       * The hold below this only ran when the brake or handbrake was DOWN (`held > 0.3`), so a
+       * player who simply lifted off and rolled to a stop got no static friction at all — there is
+       * none anywhere else in the solver, by its own admission. What actually held a parked car was
+       * engine braking, by accident, and on a slope that is not enough: gravity along the hill keeps
+       * injecting acceleration and the car creeps or crabs away.
+       *
+       * So this is unconditional on input: if you are not asking to move and you are under 3 km/h,
+       * you are parked. Both components and the yaw rate, because a car that stops but keeps rotating
+       * is worse than one that rolls. The braked case stays STRONGER (rate scaled by `held`), so
+       * nothing about braking got weaker. */
+      const creeping = !wantsGo && Math.hypot(vLong, vLat) < STOP_SPEED;
+      if (creeping) {
+        const k = Math.exp(-STATIC_HOLD_RATE * dt);
+        /* TRANSLATION ONLY. The first version damped `yawRate` here too, on the reasoning that a car
+         * which stops but keeps rotating is worse than one that rolls — and it broke turning round:
+         * the browser suite's C3 fell to 92 degrees of a required 100, because a three-point turn
+         * happens almost entirely below 3 km/h and this was quietly eating the rotation the driver
+         * was asking for. The complaint was that a stopped car SLIDES, which is about where it is,
+         * not about which way it faces. */
+        vLong *= k;
+        vLat *= k;
+        if (Math.abs(vLong) < 0.02) vLong = 0;
+        if (Math.abs(vLat) < 0.02) vLat = 0;
+      }
       if (held > 0.3 && !wantsGo && Math.hypot(vLong, vLat) < STATIC_HOLD_SPEED) {
         const k = Math.exp(-STATIC_HOLD_RATE * held * dt);
         /* LATERAL ALWAYS, longitudinal only when not reversing — and the split is the whole point.

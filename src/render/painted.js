@@ -282,6 +282,37 @@ void main(){
   gl_Position = projectionMatrix*mv;
 }`;
 
+/* THE SAME SHADER, FOR AN InstancedMesh — AND IT HAS TO BE A SECOND ONE.
+ *
+ * three.js only rewrites a vertex shader to apply `instanceMatrix` for ITS OWN materials. A
+ * RawShaderMaterial gets no prefix and no USE_INSTANCING define, so every instance drawn with the
+ * one above collapses onto the same transform: a hundred bollards stacked in one spot, invisible
+ * wherever their matrices actually said they were.
+ *
+ * That is not hypothetical. It is B28. The operator reported "roads still end without a closure"
+ * four times; every closure WAS built (diag-terminus: 516 bollards over 106 heads, 106 boards),
+ * instanced into the scene, standing on the ground to within 0.04 m, and projecting to the middle
+ * of the screen — ndc(-0.11..0.08, 0.14..0.18) at 12 m out — while the rendered frame showed bare
+ * tarmac. Everything upstream of the draw call was right. The draw call threw the matrices away.
+ *
+ * A separate shader rather than a define, because a define on a RawShaderMaterial is not applied by
+ * three either: the caller asks for the instanced variant and gets one that always multiplies by
+ * `instanceMatrix`, so there is no configuration to get wrong. The normal is rotated by the
+ * instance too, or a bollard's shading would come from the geometry's own orientation and every
+ * one of them would be lit as if it faced the same way. */
+const PAINTED_VS_INSTANCED = /* glsl */ `
+in vec3 nrm; in vec3 vcol; in float vmat;
+in mat4 instanceMatrix;
+out vec3 vW; out vec3 vN; out vec3 vC; out vec3 vL; out float vM; out float vDist;
+void main(){
+  mat4 model = modelMatrix*instanceMatrix;
+  vec4 wp = model*vec4(position,1.0);
+  vW = wp.xyz; vN = normalize(mat3(model)*nrm); vC = vcol; vM = vmat;
+  vL = position;
+  vec4 mv = viewMatrix*wp; vDist = -mv.z;
+  gl_Position = projectionMatrix*mv;
+}`;
+
 function paintedFS(ghost) {
   // Ghosts carry their own constant alpha; everything else puts the fog amount in alpha,
   // which is the channel the post chain reads back as distance.
@@ -333,7 +364,23 @@ void main(){
     rim = 0.62;
   }
   if(vM > 2.5 && vM < 3.5){                 // glass / dark opening
-    lit = mix(base, K_SKY_MID, 0.55); mid = base*0.7; shd = base*0.42; rim = 0.75;
+    /* B49, the operator: "the windows are flat grey paint and look bad."
+     *
+     * They were: one mix towards the sky at a fixed 55%, identical at every angle, so a windscreen
+     * read as a grey panel however you looked at it. Glass does not do that — it is nearly clear
+     * face-on and a mirror at a glancing angle, and that swing is the whole reason a glasshouse
+     * reads as glass rather than as paint.
+     *
+     * So the sky mix now RUNS with the view angle, and the rim — which this shader already uses as
+     * its glancing-edge term — runs with it too. The dark end stays dark: an interior seen through
+     * glass really is darker than the body around it, and lifting that is what makes glass look
+     * like plastic. No new texture, no new uniform, no extra cost: the same two numbers this
+     * branch already had, driven by the geometry instead of pinned. */
+    float fres = pow(1.0 - clamp(dot(normalize(vN), normalize(V)), 0.0, 1.0), 3.0);
+    lit = mix(base, K_SKY_MID, mix(0.30, 0.92, fres));
+    mid = base*mix(0.62, 0.86, fres);
+    shd = base*0.42;
+    rim = mix(0.55, 1.35, fres);
   }
   if(vM > 6.5){                             // coach paint — the body of a car
     /* Two measured losses are being paid back here, both of them downstream of this
@@ -360,7 +407,22 @@ void main(){
     lit = deep*1.18;
     mid = deep*0.74;
     shd = mix(deep*0.34, K_SHADOW*0.44, 0.22);
-    rim = 0.34;
+    /* B48, the operator: "the cars still look bad — try reflective paint."
+     *
+     * Coach paint had a rim of 0.34 and nothing else angle-dependent, so a body panel was three
+     * flat bands however the car sat in the light. That is what makes it read as coloured card:
+     * real paint has a clear coat over it, and a clear coat does two things this branch was not
+     * doing — it brightens hard towards a grazing angle, and it carries a small SKY-COLOURED
+     * highlight that is not the paint's own hue.
+     *
+     * Both are added from terms this shader already has, so there is no new uniform and no second
+     * light: fres is the same Fresnel curve the glass branch now uses (B49), and K_SKY_MID is
+     * the same sky colour every other surface here reflects. The tint is deliberately weak at 0.14
+     * — a clear coat is a thin layer, and mixing more sky in is exactly how a red car turns pink
+     * in the shade, which is the failure the MATTE note above this line already records. */
+    float fres = pow(1.0 - clamp(dot(normalize(vN), normalize(V)), 0.0, 1.0), 4.0);
+    lit = mix(lit, mix(lit, K_SKY_MID, 0.14)*1.35, fres);
+    rim = mix(0.34, 0.92, fres);
   }
 
   float ndl = dot(N,uSunDir);
@@ -399,13 +461,14 @@ const CLOUD = glCloudField({ cshSpan: 9200, cloudDeck: 980 });
  * `uniforms.uLamp` is per-material (a Vector3, channels A/B/C in 0..1) so two cars can
  * have their headlights in different states while sharing every other uniform in the game.
  */
-export function createPaintedMaterial({ side = DoubleSide, ghost = false, opacity = 0.85, uniforms = {} } = {}) {
+export function createPaintedMaterial({ side = DoubleSide, ghost = false, opacity = 0.85, uniforms = {}, instanced = false } = {}) {
   const extra = { uLamp: { value: new Vector3(0, 0, 0) } };
   if (ghost) extra.uGhostAlpha = { value: opacity };
   const mat = new RawShaderMaterial({
     glslVersion: '300 es',
     uniforms: sharedUniforms(Object.assign(extra, uniforms)),
-    vertexShader: vertHead(PAINTED_VS),
+    // `instanced: true` for anything drawn as an InstancedMesh — see PAINTED_VS_INSTANCED.
+    vertexShader: vertHead(instanced ? PAINTED_VS_INSTANCED : PAINTED_VS),
     fragmentShader: fragHead(GL_HASH, GL_NOISE, CLOUD, GL_SHADOW, GL_LIGHT, paintedFS(ghost)),
     side,
   });

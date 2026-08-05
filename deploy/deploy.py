@@ -116,6 +116,16 @@ def main():
     ssh.connect(HOST, username="root", password=ROOT_PASS, timeout=30)
     sftp = ssh.open_sftp()
 
+    if "--api" in sys.argv:
+        # The PHP only. Neither the apex bundle nor /beta is touched, which is what makes this
+        # safe to run while "all changes to the beta" is in force: the api/ folder is shared
+        # infrastructure, not a build of the game.
+        m = upload_tree(sftp, ssh, SERVER, posixpath.join(REMOTE_BASE, "api"))
+        print(f"uploaded {m} api files -> {REMOTE_BASE}/api")
+        sftp.close()
+        ssh.close()
+        return
+
     if "--beta" in sys.argv:
         # Beta only. Nothing else on the box is touched — not /wanderoad, not the apex, not the
         # api. This is the mode to use for work in progress.

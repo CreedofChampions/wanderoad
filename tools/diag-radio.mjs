@@ -136,6 +136,55 @@ const nextOne = await evalJs(`(() => { const r = window.WANDEROAD.audio.radio;
 console.log(`       one press of the radio key: station ${nextOne.station} "${nextOne.label}"`);
 check(nextOne.station !== after.station, 'the radio key still cycles from wherever it woke up', `${after.station} -> ${nextOne.station}`, 'a different station');
 
+/* ── AND THE RADIO KEY IS THE YOUTUBE WINDOW ──────────────────────────────────────────────
+ *
+ * Operator: "radio does not work (changing stations seems to do nothing) but it was never suppose
+ * to -- YT video was suppose to be that." Everything above this line is about the synthesised
+ * layer, which is the game's own music and is fine. What was broken is that N used to STEP that
+ * layer's stations while the music the player could actually hear came out of a separate window on
+ * J — so changing station did nothing audible.
+ *
+ * These two checks are that sentence, measured. The first presses N the way a player presses it
+ * and asks the WINDOW whether it was told to skip; a flag on the game would not be evidence, since
+ * the whole bug was a control reaching the wrong thing. The second is a source scan of main.js,
+ * which boots a game and cannot be imported here — the claim being scanned for is that nothing
+ * steps a synth station off the radio key any more. */
+{
+  await evalJs(`(() => { const mp = window.WANDEROAD.musicPanel;
+    if (!mp) return 'no music panel on the handle';
+    window.__radio = [];
+    const orig = mp._post.bind(mp);
+    mp._post = (f, a) => { window.__radio.push(f); return orig(f, a); };
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', code: 'KeyN', keyCode: 78, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { key: 'n', code: 'KeyN', keyCode: 78, bubbles: true }));
+    return 'armed'; })()`);
+  await sleep(700);
+  const got = await evalJs(`(() => { const el = document.querySelector('#musicPanel');
+    const f = el && el.querySelector('iframe');
+    return { posted: window.__radio || [], open: !!el && !el.hidden, src: f ? f.getAttribute('src').slice(0, 40) : null }; })()`);
+  check(
+    (got.posted || []).includes('nextVideo'),
+    'pressing N tells the YOUTUBE WINDOW to skip — the control reaches the music you can hear',
+    `posted [${(got.posted || []).join(', ')}]`,
+    'nextVideo',
+  );
+  check(got.open && !!got.src, 'and the window is open with a real embed in it', `open ${got.open}, ${got.src}`, 'open, with an iframe');
+}
+{
+  const { readFileSync } = await import('node:fs');
+  /* `globalThis.URL` because this file already has a `URL` of its own — the page it drives — and
+   * shadowing the global is exactly the kind of collision that reads as "URL is not a constructor"
+   * and looks like a Node problem for a minute. */
+  const src = readFileSync(new globalThis.URL('../src/main.js', import.meta.url), 'utf8');
+  const block = /input\.tapped\('radio'\)\)\s*\{([^}]*)\}/.exec(src);
+  check(
+    !!block && /musicPanel\.next\(\)/.test(block[1]) && !/nextStation/.test(block[1]),
+    'and nothing steps a synthesised station off the radio key any more',
+    block ? block[1].replace(/\s+/g, ' ').trim().slice(0, 64) : '(radio key handler not found)',
+    'musicPanel.next(), no nextStation',
+  );
+}
+
 console.log(`\n${failures ? `${failures} RADIO CHECK(S) FAILED` : 'all radio checks passed'}\n`);
 sock.close();
 chrome.kill();

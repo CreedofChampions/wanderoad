@@ -101,7 +101,12 @@ console.log('\n── new cars = suns ──────────────
   check(w.suns === 0, 'and the money is actually gone', w.suns, '0');
   check(w.owns(second.id, first.id), 'the car is owned', w.owns(second.id, first.id), 'true');
   check(isUnlocked(second, 0, w), 'and the garage lets you drive it on 0 m of streak', isUnlocked(second, 0, w), 'true');
-  check(!isUnlocked(FLEET[2], 0, w), 'while the NEXT one up is still locked', isUnlocked(FLEET[2], 0, w), 'false');
+  /* THE NEXT DEALERSHIP CAR, not FLEET[2]. This used to index the fleet directly, and when the Ford
+   * became the starter car (so the order changed) FLEET[2] happened to be a car the 30 suns just
+   * earned had already unlocked — the check went red without anything being wrong. Ask for a car that
+   * is still locked BY RULE and the assertion stops depending on the order of a list. */
+  const stillShut = FLEET.find((c) => c.id !== second.id && unlockRule(c).how === 'buy' && !isUnlocked(c, 0, w));
+  check(!!stillShut, `while ${stillShut ? stillShut.label : 'the next one up'} is still locked`, !!stillShut, 'true');
   check(!w.buyCar(second.id, priceOf(second)), 'buying it twice is a no-op, not a second charge', 'false', 'false');
 
   // and it survives a reload
@@ -113,7 +118,10 @@ console.log('\n── new cars = suns ──────────────
 console.log('\n── first three on total collected, the rest at a dealership ───────────────');
 {
   const w = new Wallet({ storageKey: 'bench.econ.earn' });
-  const earned = FLEET.filter((c) => unlockRule(c).how === 'earn');
+  /* SORTED BY THRESHOLD, not by fleet order. The ladder is what this section is about, and fleet
+   * ORDER is a display decision — when the hatch became the starter car the two stopped agreeing and
+   * this read "the next one up" as a car with a LOWER threshold than the one just earned. */
+  const earned = FLEET.filter((c) => unlockRule(c).how === 'earn').sort((a, b) => unlockRule(a).at - unlockRule(b).at);
   const bought = FLEET.filter((c) => unlockRule(c).how === 'buy');
   check(earned.length === 3, 'exactly THREE cars open on total suns collected', earned.length, '3');
   check(bought.length === FLEET.length - 3, 'and every other car needs a dealership', bought.length, String(FLEET.length - 3));

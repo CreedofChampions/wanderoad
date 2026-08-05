@@ -15,6 +15,7 @@
  */
 
 import { clamp, clamp01, lerp } from '../core/math.js';
+import { ENGINE_VOICE } from '../game/garage.js';
 import { Radio } from './radio.js';
 import { Ambience } from './ambience.js';
 
@@ -151,6 +152,29 @@ export class EngineAudio {
   }
 
   /** @param {Vehicle} car */
+  /**
+   * Silence, for while the game is paused. Operator: "esc = pause = no sound".
+   *
+   * The Garage already stops the world — main.js gates the car, the boat, the fuel burn and the
+   * rest on `!menu.open` — but the audio graph kept running underneath it, so a paused game sat
+   * there with an engine idling and birds singing over a menu.
+   *
+   * A ramp on the MASTER gain rather than `ctx.suspend()`: suspending stops the graph's clock, so
+   * every ramp and LFO in the ambience layer resumes exactly where it froze, which is audible as a
+   * click on the way back. 80 ms is short enough to read as instant and long enough not to pop.
+   *
+   * @param {boolean} on
+   */
+  setPaused(on) {
+    this._paused = !!on;
+    if (!this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const to = on ? 0.0001 : this.volume;
+    this.master.gain.cancelScheduledValues(t);
+    this.master.gain.setValueAtTime(Math.max(this.master.gain.value, 0.0001), t);
+    this.master.gain.exponentialRampToValueAtTime(Math.max(to, 0.0001), t + 0.08);
+  }
+
   update(dt, car) {
     const ctx = this.ctx;
     if (!ctx || ctx.state === 'suspended') return;
@@ -166,7 +190,11 @@ export class EngineAudio {
      * at 6000 rpm on a four-cylinder is about 200 Hz, but you do not HEAR the fundamental —
      * you hear the low harmonics through a car body. So the range is now 26 to 74 Hz, which
      * is felt more than heard, and the sawtooth harmonics do the rest. */
-    const base = 26 + rpmFrac * 48;
+    /* PER CAR. The 26/48 pair is the shape of an engine note; `voice.pitch` is which engine it is.
+     * Read from the fleet entry the car is actually running (game/garage.js's engineVoice), so the
+     * sound and the car cannot disagree, and a car with no spec falls back to the old global note. */
+    const voice = ENGINE_VOICE;
+    const base = (26 + rpmFrac * 48) * voice.pitch;
     for (const { o, mul } of this.oscs) o.frequency.setTargetAtTime(base * mul, t, k);
 
     // Off throttle the engine gets quieter AND darker — that is most of what makes a
@@ -175,7 +203,15 @@ export class EngineAudio {
     // Quieter, and much darker. The low-pass used to open to 3.9 kHz under load, which is
     // where the bees lived.
     this.engGain.gain.setTargetAtTime(0.032 + load * 0.10, t, k);
-    this.engFilter.frequency.setTargetAtTime(260 + load * 640 + rpmFrac * 240, t, k);
+    // The propeller's chop belongs to the air, not the road. Guarded on the field existing —
+    // it is only ever built once updateFlight() has run — so a game never flown in never
+    // allocates the node, and zeroed here every frame so landing does not leave the last
+    // blade-pass rate humming under the car; back on the ground the chop must vanish or the car
+    // itself would flutter.
+    if (this.propDepth) this.propDepth.gain.setTargetAtTime(0, t, 0.06);
+    // The same voice opens the filter: a bigger engine is darker as well as lower, which is what
+    // stops a deep note simply sounding like the same note played slowly.
+    this.engFilter.frequency.setTargetAtTime((260 + load * 640 + rpmFrac * 240) * voice.timbre, t, k);
 
     // Wind starts to matter around 55 km/h and dominates by 200.
     // Wind is the one layer allowed to grow with speed, because it is broadband and calm.
@@ -207,6 +243,106 @@ export class EngineAudio {
     /* The place, as opposed to the car: surf near water, birds near trees. It is told
      * whether a station is playing so it can get out of the way of it — see duckFor() in
      * audio/ambience.js. */
+    this._ensureAmbience(car);
+    if (this.ambience) this.ambience.update(dt, car, this.radio ? this.radio.on : false);
+  }
+
+  /**
+   * The engine note while flying — the SAME oscillator bank and filters `update()` drives for the
+   * car, just fed from the plane instead. Operator: "There is no sound and the propeller doesn't
+   * move." The propeller half is render/plane.js's; this is the sound half, and the reason there
+   * was none is that main.js only ever called `update(dt, car)`, which reads car.rpm/car.spec/
+   * car.throttle — none of which move while the plane has the wheel, because the car's own solver
+   * is frozen the moment you take off (see main.js's own guard on `car.update(dt, gated)`). So the
+   * note a player heard in the air was whatever the car happened to be doing the INSTANT BEFORE
+   * take-off, held there, unchanging, for as long as the flight lasted — which is indistinguishable
+   * from silence if that instant was idle.
+   *
+   * No new nodes are built for this: it is the same graph `start()` already wired for the car, so
+   * flying costs nothing extra and the game stays the few-hundred-kilobyte, no-audio-files project
+   * its own header describes.
+   *
+   * @param {number} dt seconds
+   * @param {import('../game/plane.js').Plane} plane
+   * @param {Vehicle} car the car object — used only for its x/z, which main.js keeps pinned to the
+   *        plane's own position every frame, so the ambience layer still asks about the right place
+   */
+  updateFlight(dt, plane, car) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === 'suspended') return;
+    const t = ctx.currentTime;
+    const k = 0.06;
+
+    /* THE PROPELLER, ACTUALLY AUDIBLE. Operator: "it should sound less like a car." Until this,
+     * updateFlight() just drove the car's own oscillator bank a little higher and called it a
+     * day — same drone, same everything, only the pitch range moved. But a propeller's own
+     * signature is not its pitch, it is the CHOP: every blade going past punches a small hole in
+     * the air, so what actually reads as "aeroplane" rather than "car" is the drone rising and
+     * falling at the blade-pass rate, on top of whatever note it is playing. Amplitude-modulating
+     * the existing engine gain at roughly 2 to 17 Hz (idle to full throttle — see bladeHz below)
+     * IS that chop, and it is cheap: one oscillator and one gain node, riding on a gain that was
+     * already there. No new drone and no audio file — the same synthesis-only rule this file's
+     * header opens with. Built once, lazily, and left running for the rest of the session rather
+     * than rebuilt every flight, the same shape as `_ensureAmbience` above. */
+    if (!this.propLfo) {
+      const lfo = ctx.createOscillator();
+      lfo.type = 'sine';
+      const depth = ctx.createGain();
+      depth.gain.value = 0;
+      lfo.connect(depth);
+      depth.connect(this.engGain.gain);
+      lfo.start();
+      this.propLfo = lfo;
+      this.propDepth = depth;
+    }
+
+    /* THE PITCH. This flight model has no rpm at all (see game/plane.js — throttle, 0..1, is the
+     * only number there is, and PLANE.throttleNeutral=0.35 keeps it off zero even hands-off), so
+     * `throttle` stands in for `update()`'s own rpmFrac directly. The base is lifted a third above
+     * the car's 26-74 Hz range rather than given an entirely separate one — a light aircraft's real
+     * note IS higher than a car's, and one number to keep in step with the car's own "way too high
+     * pitched" history (see update()'s note on the 26/48 pair) is safer than tuning a second range
+     * from scratch. 0.3 rather than `k` for the time constant: a propeller has inertia a throttle
+     * body does not, so the note swings up over about a second instead of blipping the moment the
+     * stick moves. */
+    const load = clamp01(plane.throttle);
+    const base = 34 + load * 64;
+    for (const { o, mul } of this.oscs) o.frequency.setTargetAtTime(base * mul, t, 0.3);
+
+    /* BLADE-PASS RATE, tied to the propeller you can actually see turning rather than picked to
+     * sound nice on its own. main.js's frame loop spins the disc at `6 + throttle * 46` rad/s (see
+     * the comment on that propSpin line for why those two numbers), and render/plane.js's
+     * buildPropDisc() shades that disc with two lobes — so one full turn of the mesh is TWO chops
+     * of light and shadow, and should be two chops of sound. Rad/s over tau gives turns per
+     * second; doubling for the lobes gives about 1.9 Hz idling and about 16.6 Hz at full throttle.
+     * If main.js's rate ever changes, this has to change with it or the ear and the eye will
+     * disagree about how fast the propeller is turning. */
+    const bladeHz = ((6 + load * 46) / (Math.PI * 2)) * 2;
+    this.propLfo.frequency.setTargetAtTime(bladeHz, t, 0.1);
+
+    const eng = 0.036 + load * 0.11;
+    this.engGain.gain.setTargetAtTime(eng, t, k);
+    // WebAudio sums an AudioParam's own set value with whatever is connected into it, so the LFO
+    // above rides ON this rather than replacing it. 0.45 is chosen to be heard, not to hug zero:
+    // at full depth the sine's peaks swing the gain plus-or-minus 45% around `eng`, and `eng`
+    // itself never gets close enough to zero for that swing to go negative.
+    this.propDepth.gain.setTargetAtTime(eng * 0.45, t, k);
+    this.engFilter.frequency.setTargetAtTime(300 + load * 700, t, k);
+
+    // Wind, off the AIRSPEED rather than a ground speed that does not exist up here — a glide with
+    // the throttle shut is still doing 20+ m/s and should still whistle.
+    const speed = plane.speed || 0;
+    const windAmt = Math.pow(clamp01((speed - 10) / 50), 1.4);
+    this.windGain.gain.setTargetAtTime(windAmt * 0.11, t, k);
+    this.windFilter.frequency.setTargetAtTime(360 + speed * 5, t, k);
+
+    // No tyres up here, and no verge to scrub against — both silenced rather than merely
+    // untouched, so a take-off does not leave the last road noise ringing on into the sky.
+    this.roadGain.gain.setTargetAtTime(0, t, k);
+    this.scrubGain.gain.setTargetAtTime(0, t, 0.03);
+
+    if (this.radio) this.radio.update(dt, 0.6); // steady — nothing up here to duck for
+
     this._ensureAmbience(car);
     if (this.ambience) this.ambience.update(dt, car, this.radio ? this.radio.on : false);
   }

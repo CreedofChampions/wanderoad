@@ -10,14 +10,20 @@
  * time-sliced.
  */
 
-import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, SRGBColorSpace } from 'three';
+import { WebGLRenderer, Scene, PerspectiveCamera, Vector3, Box3, SRGBColorSpace } from 'three';
 import * as THREE_NS from 'three';
-import { DEG, closestHeading } from './core/math.js';
+import { DEG, TAU, closestHeading } from './core/math.js';
 import { createSky } from './render/sky.js';
 import { createTerrainMaterial } from './render/terrainMaterial.js';
 import { Post } from './render/post.js';
 import { Water } from './render/water.js';
-import { Ships, buildPlayerBoat } from './render/ships.js';
+import { Ships, buildPlayerBoat, loadPlayerBoat } from './render/ships.js';
+import { FuelHelper } from './render/helper.js';
+import { buildPlane } from './render/plane.js';
+import { Vector3 as _V3 } from 'three';
+
+/** Reused axis for the flight camera's roll — allocating a Vector3 per frame is a per-frame alloc. */
+const UP_Y = new _V3(0, 1, 0);
 import { Birds } from './render/birds.js';
 import { Clouds } from './render/clouds.js';
 import { Flora } from './render/trees.js';
@@ -26,18 +32,23 @@ import { Grass } from './render/grass.js';
 import { Wind } from './render/wind.js';
 import { U } from './render/uniforms.js';
 import { Streamer } from './world/streamer.js';
+/* `edgeDeadEnds` is roads.js's own live-degree rule for "does this edge stop here". It is imported
+ * for TELEMETRY ONLY — exposed on window.WANDEROAD below so a diagnostic can find a real turning
+ * head instead of guessing at endpoint proximity, which is exactly how a B28 proof clip came out
+ * filming an ordinary stretch of road. The game itself never calls it. */
+import { edgeDeadEnds } from './world/roads.js';
 import { findSpawn, Terrain, isDryAt } from './world/terrain.js';
+import { resumeFor, saveSession, spotIsSafe, AUTOSAVE_S } from './game/session.js';
 import {
   nearestStation as nearestStationWorld,
   showroomSpots,
   SHOWROOM_REACH,
   hallSpots,
   HALL_REACH,
-  SHOWROOM_HALF_W,
-} from './world/props.js';
+  SHOWROOM_HALF_W, AIRFIELD_HALF_LEN, nearestAirfield as worldNearestAirfield } from './world/props.js';
 import { Walker, EYE, ENTER_R, LEASH } from './game/walk.js';
 import { scatterChunk, SCATTER_MAX_LEVEL } from './world/scatter.js';
-import { BIOME_SHORT, setBiomeBias } from './world/biomes.js';
+import { BIOME_SHORT, setBiomeBias, waterLevelAt } from './world/biomes.js';
 import { buildCar, buildGhostCar, PAINTS } from './car/model.js';
 import { loadCar, loadGhostCar, CARS, CAR_KEYS } from './car/loadedCar.js';
 import { Vehicle } from './car/vehicle.js';
@@ -48,15 +59,31 @@ import { StreakTrail } from './render/trail.js';
 import { PRESETS } from './car/tuning.js';
 import { Streak, STATION_FORGIVE_R } from './game/streak.js';
 import { Wallet, BOAT_UNLOCK_SUNS, CAN_PRICE } from './game/wallet.js';
-import { Plane, PLANE_UNLOCK_GEMS } from './game/plane.js';
+import { Plane, PLANE_UNLOCK_GEMS, PLANE_PASS } from './game/plane.js';
 import { configFromUrl, applyTerrain, terrainBias } from './game/presets.js';
-import { FLEET, FLEET_BY_ID, applyCarFeel, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf } from './game/garage.js';
+import { FLEET, FLEET_BY_ID, carFromUrl, isUnlocked, bestStreak, cheatOn, setCheat, unlockRule, priceOf, applyUnlockParam, applySuspFeel } from './game/garage.js';
+/* `applyDrivingModel` REPLACES `applyCarFeel` here, and it has to be the only feel call in the file.
+ *
+ * A driving model is a modifier layered over a car — see car/drivingModels.js — and it writes fields
+ * `applyCarFeel` knows nothing about (TYRE.muLongPeak, STEER.satGain, TIERS.cgHeight and the rest).
+ * A bare `applyCarFeel` therefore does not put a model BACK; it rewrites the six fields a car
+ * declares and leaves the previous model's numbers standing in every other table. `applyDrivingModel`
+ * restores the stock tables, applies the car, then layers the model, and returns the same feel object
+ * `applyCarFeel` did — so nothing downstream of FEEL changes shape. */
+import { applyDrivingModel } from './car/drivingModels.js';
+/* The micro-cars' own solver pass — see car/microPhysics.js. Idempotent and TOTAL: handed an
+ * ordinary car it DETACHES and puts the shared tables back, so it is the one call that both applies
+ * and removes the modifier, and there is no separate detach anywhere in this file. */
+import { applyMicroPhysics } from './car/microPhysics.js';
 import { Solids, solidsFromScatter } from './game/collide.js';
 import { Rescue } from './game/rescue.js';
 import { BoatMode } from './game/boat.js';
 import { Spray } from './game/spray.js';
 import { Props } from './render/props.js';
 import { Loot } from './render/loot.js';
+import { Ramps } from './render/ramps.js';
+import { CRATE_VALUE, CRATE_TILE, cratesForTile } from './world/loot.js';
+import { rampsInBox } from './world/ramps.js';
 import { Fuel, SHARE_FLAG } from './game/fuel.js';
 import { FuelGauge } from './ui/fuelGauge.js';
 import { LootCounter } from './ui/lootCounter.js';
@@ -69,9 +96,8 @@ import { createTransport } from './net/transport.js';
 
 /* WHERE THE MULTIPLAYER API ACTUALLY LIVES.
  *
- * Ported in from the sibling branch that first found and fixed this — operator, over there:
- * "whole multiplayer seems to never sync properly". It never synced on cozydriver.com because
- * there was no server to sync with, and this branch's leaderboard has exactly the same failure
+ * Operator: "whole multiplayer seems to never sybc properly". It never synced on cozydriver.com
+ * because there was no server to sync with — and the leaderboard hit exactly the same failure
  * mode for exactly the same reason: proof-gallery, run live against /beta, submitted a real
  * streak and the panel still read "nobody has posted a run yet" — not because the PHP was wrong
  * (it answers correctly — see server/drive.php's 'board' branch and tools/diag-board.mjs) but
@@ -175,9 +201,34 @@ const OFFLINE = params.has('offline');
  * without a second build. They must be applied BEFORE anything reads the tuning tables. */
 const CFG = configFromUrl();
 if (CFG.cheat) setCheat(true);
-/* The car IS the feel. One choice, not two — see src/game/garage.js. */
-const CAR = carFromUrl();
-const FEEL = applyCarFeel(CAR);
+/* WHERE YOU WERE, AND WHAT YOU WERE IN. Operator: "we need to make it so people can continue were
+ * they left off."
+ *
+ * Read here, at module scope, because the CAR it names has to be chosen before `applyCarFeel` runs
+ * and before the Vehicle is constructed — a car swapped in after the solver exists would be driving
+ * on the previous car's tuning. Returns null for a fresh start, a different seed, or `?fresh=1`.
+ * See game/session.js for what is and is not in the record. */
+/* `?unlock=123` IS APPLIED BEFORE THE CAR IS CHOSEN.
+ *
+ * It used to run inside boot(), which is after `carFromUrl()` has already picked the car at module
+ * scope — so on a fresh profile `?unlock=123&car=pickup` silently handed you the starter car,
+ * because the cheat was not set yet when the choice was made. It only worked on the SECOND load,
+ * once the latch was in storage. Reading the URL has no side effects worth ordering around, so it
+ * happens here. */
+applyUnlockParam();
+
+const RESUME = resumeFor(SEED);
+
+/* The car IS the feel. One choice, not two — see src/game/garage.js.
+ *
+ * An explicit `?car=` in the URL still wins: someone who asked for a specific car meant it, and the
+ * diagnostics rely on that. Otherwise a resume puts you back in what you were driving. */
+const CAR =
+  (RESUME && !params.get('car') && FLEET_BY_ID[RESUME.car] ? FLEET_BY_ID[RESUME.car] : null) || carFromUrl();
+/* The car, THROUGH whichever driving model the player last chose. `?drive=kart` beats a stored
+ * choice beats `stock`, resolved inside that module at load — the same order `?car=` already beats a
+ * resumed session two lines above, so a URL always says what you get. */
+const FEEL = applyDrivingModel(CAR);
 const LAND = applyTerrain(CFG.terrain);
 setBiomeBias(terrainBias(CFG.terrain));
 
@@ -202,6 +253,16 @@ async function boot() {
     setStat('this browser has no WebGL2 — try Chrome, Edge or Firefox');
     return;
   }
+
+  /* THE CAR-SWAP FREEZE (garage swap to the Bubble and back locked the game). Two halves, this
+   * is the first: three.js ships with `debug.checkShaderErrors` ON, and its cost is not the
+   * check — reading a program's info log forces the driver to FINISH compiling right now, on
+   * the main thread. Measured on the live beta on this machine (GTX 1060, ANGLE D3D11):
+   * getProgramInfoLog blocked 978 ms swapping out of the Bubble and 949 ms swapping in, and in
+   * two runs of five the readback never returned at all — a context loss mid-compile and a
+   * permanently wedged tab. Off in production; a dev build keeps the readable shader errors.
+   * The other half lives in swapCar: `compileAsync` before the new car enters the scene. */
+  renderer.debug.checkShaderErrors = import.meta.env.DEV;
 
   /* Operator: "people without hardware acceleration lag tremendously — detect it and let
    * them know." Two checks, one gentle dismissible notice — see src/ui/perfNotice.js for both
@@ -294,6 +355,11 @@ async function boot() {
    * called from anywhere — so it was permanently wrong, on every viewport, not just on resize.
    * Grass aliasing at 100-300 m was reported; this is at minimum a real contributor. */
   grass.setAngular((camera.fov * DEG) / innerHeight);
+  /* The SAME number to the flowers. They had no angular floor at all until B37 — at the 190 m cull
+   * a flower subtended about 0.6 px and a sub-pixel white petal against green flickers rather than
+   * dims, which is the speckle that crawls over far hillsides. One source for both layers means a
+   * resize or a field-of-view change moves them together. */
+  flora.flowers?.setAngular?.((camera.fov * DEG) / innerHeight);
 
   setStat('finding a road…', 0.34);
   // LAND.spawnHigh: only the alpine preset sets it — "alpine start should be in the
@@ -320,7 +386,38 @@ async function boot() {
   setStat('unloading the car…', 0.52);
   const me = identity();
   const car = new Vehicle({ tier: CAR.tier, terrain: local, preset: FEEL.assist });
-  car.placeAt(spawn.x, spawn.z, spawn.heading);
+  /* THE MICRO-CARS' EXTRA PASS, and the order it has to run in.
+   *
+   * It wraps this one Vehicle's `_step` and writes tuning fields the feel does not own, so it must
+   * come AFTER the feel and after the tier is set — which it is, both having happened above. Handed
+   * an ordinary fleet car it detaches instead, which is why the same single call appears here and in
+   * swapCar() and nowhere else. The Tricycle is FLEET[0], so on a fresh profile this is the call that
+   * makes the very first car anyone drives behave like three wheels. */
+  applyMicroPhysics(car, CAR);
+  /* AND THE SPRINGS BACK ON TOP, because `applyMicroPhysics` just took them off.
+   *
+   * Handed an ordinary fleet car that call DETACHES the micro model, and detaching restores the
+   * stock `SUSPENSION` table — which runs AFTER the feel pass, so it silently overwrites whatever
+   * springs the car declared. Left alone, stepping out of the Tricycle and into the Warthog would
+   * hand the Warthog the coupe's 42000 N/m springs, and the one car in the fleet built around its
+   * suspension would quietly stop having any. Re-asserting here is six assignments, it is
+   * idempotent, and the micro cars rewrite their own tables afterwards, so the Tricycle is
+   * untouched. game/garage.js's applySuspFeel has the rest of the reasoning.
+   *
+   * This lives here rather than in car/microPhysics.js on purpose: that file is owned by another
+   * branch right now, and the fix does not need it. */
+  applySuspFeel(CAR);
+  /* BACK WHERE YOU LEFT IT, if the spot is still somewhere a car can be.
+   *
+   * A saved position can outlive what made it valid — a build that moved the water table, or a
+   * player who quit while their car was somewhere the terrain no longer agrees with. Dropping
+   * someone inside a hill or into the sea is a worse welcome than the spawn point, so the record is
+   * checked against the live ground and water before it is trusted, and the spawn is the fallback.
+   * `isDryAt` is the same test findSpawn uses on its own candidates. */
+  const resumeSpot =
+    RESUME && spotIsSafe(RESUME, (x, z) => local.height(x, z), (x, z) => !isDryAt(x, z, SEED)) ? RESUME : null;
+  if (resumeSpot) car.placeAt(resumeSpot.x, resumeSpot.z, resumeSpot.yaw);
+  else car.placeAt(spawn.x, spawn.z, spawn.heading);
   /* Real CC0 bodywork if it loads, the hand-built box if it does not. The fallback matters:
    * a network hiccup on a 180 KB GLB must not cost the player their car. */
   const carKey = CAR.id;
@@ -398,6 +495,11 @@ async function boot() {
    * the ones that do not (benches, flower beds, fingerposts) stay drive-through on purpose —
    * cans are never solid, by the same logic: you collect one by driving through it. */
   const props = new Props({ seed: SEED, scene, solids });
+/* HOW CLOSE COUNTS AS BEING IN THE TOWN, metres. The station apron is 11.5 m either side of the
+ * pumps and the town spreads out to about 55 m beyond that, so 70 m is standing among the buildings
+ * rather than merely on the same road as them. Deliberately tighter than the streak-forgiveness
+ * radius: that one is about not punishing you for stopping, this one is about whose town it is. */
+const TOWN_HERE_M = 70;
   /* Fuel reads the stations AND the cans the props renderer has already loaded rather than
    * re-deriving the road network — the pure lookups in world/props.js cost tens of
    * milliseconds. props.update() below is called with the car's own x/z every frame, so it
@@ -407,10 +509,18 @@ async function boot() {
    * — so the wallet has to exist before the fuel system and the garage, both of which read it.
    * See src/game/wallet.js's own header. */
   const wallet = new Wallet();
+  /* The tiler asks the wallet how big each town is. Set here rather than passed to the Props
+   * constructor because Props is built before the Wallet exists — see Props.setTownLevels. */
+  props.setTownLevels((stationKey) => wallet.townLevel(stationKey));
 
   /* The off-road dust cue. Owns one InstancedMesh and nothing else; see src/game/spray.js. */
   const spray = new Spray({ scene });
+  /* The little cloud that brings you fuel — see render/helper.js. Created before the Fuel so it can
+   * be handed in as the rescue hook; it decides nothing, it only shows up. */
+  const helper = new FuelHelper(scene, props?.material || null);
+
   const fuel = new Fuel({
+    onRescue: () => helper.visit(car, (x, z) => car.terrain.height(x, z)),
     /* WHERE IS THE NEAREST STATION, and it has to be right rather than merely available.
      *
      * This used to be `props.nearestStation` alone, which reports out of the tiles the renderer has
@@ -456,6 +566,14 @@ async function boot() {
      * game/fuel.js's capacityLevel. */
     wallet,
   });
+
+  /* THE TANK YOU PARKED WITH. Without this a resume hands back a full tank, which quietly undoes the
+   * fuel economy — park on fumes outside a petrol station, reload, and you have been given a free
+   * refill. Clamped to the tank's real capacity because that capacity is per-car and per-upgrade, and
+   * the car you resume in may not be the one the number was written for. */
+  if (RESUME && Number.isFinite(RESUME.fuel) && RESUME.fuel > 0) {
+    fuel.seconds = Math.min(RESUME.fuel, fuel.capacity);
+  }
   /* The world's own answer to "where is the nearest station", on a timer. Kept small and cached
    * because it is asked every frame by findStation above: a 900 m radius is far more than the 140 m
    * the forgiveness needs and the 26 m refuelling needs, and re-running it more than about twice a
@@ -495,6 +613,8 @@ async function boot() {
   /* Which display car the forecourt prompt last named, so nosing along the row says each car once
    * instead of every frame. Cleared the moment you are not beside one. */
   let showroomTold = null;
+  /** Seconds since the last 'ouch', so a crash cannot shout twice in the same second. */
+  let ouchClock = 99;
   /* ON FOOT. Operator: "Walk-in showrooms seperate to gas stations (walkable mode)."
    *
    * The walker owns nothing the car owns — see game/walk.js for why it is kinematic rather than a
@@ -554,6 +674,8 @@ async function boot() {
     return !!h && h.dist <= HARBOUR_RADIUS;
   };
   let harbourWas = false;
+  /** Last frame's menu state, so the pause is applied once on each transition. */
+  let pausedWas = false;
   let airfieldWas = false; // latch for the airfield line — see the frame loop
   const atDealer = () => !!fuel.nearest && fuel.nearest.deal === true && fuel.nearest.dist <= DEAL_RADIUS;
 
@@ -586,6 +708,17 @@ async function boot() {
    * BOAT_UNLOCK_SUNS; `lootCounter` (src/ui/lootCounter.js) is fuelGauge's own pattern,
    * docked in the one HUD corner not already claimed — see that file's own comment. */
   const loot = new Loot({ seed: SEED, scene });
+
+  /* THE JUMPS, DRAWN — src/render/ramps.js. The kickers themselves are ground, added inside
+   * world/terrain.js's `surface()` (see world/ramps.js for why a ramp cannot be a collider), so this
+   * only draws them. It has to, though: a jump you cannot see is a car launching off apparently flat
+   * ground, which reads as a bug rather than a feature.
+   *
+   * `terrain` is handed over as a forward-reading shim rather than an object, for the same reason the
+   * boat's is a little further down: `car.terrain` is REASSIGNED every frame by `localFor` as the
+   * player moves between streamed patches, so capturing today's instance here would leave the ramp
+   * meshes sampling a terrain the game stopped using minutes ago. */
+  const ramps = new Ramps({ seed: SEED, scene, terrain: { height: (x, z) => (car.terrain || local).height(x, z) } });
   const lootCounter = new LootCounter(hud.root);
 
   /* Boat mode — the last unlock, src/game/boat.js. `terrain` is a zero-arg forward reference
@@ -597,13 +730,46 @@ async function boot() {
    * one. Built now rather than deferred to the actual unlock: a handful of triangles is not
    * worth a lazy-init branch in the per-frame model-placement block below. */
   const boatMode = new BoatMode({ wallet, say: (t, s) => hud.say(t, s), terrain: () => car.terrain });
-  const boatMesh = buildPlayerBoat(ships.material);
+  /* The Synty hull if it loads, the hand-built one if it does not — see loadPlayerBoat. The model
+   * lives only in the private repo, so the fallback is what keeps a public checkout afloat. */
+  const boatMesh = await loadPlayerBoat(ships.material, new URL('./models/cars/', location.href).href);
   boatMesh.visible = false;
+  /* TELL THE BOAT HOW BIG ITS HULL IS. Operator: "boat is always half flooded with water".
+   *
+   * Measured from whichever hull actually loaded — the Synty one or the hand-built fallback — so
+   * the waterline lands a third of the way up either of them without a hardcoded number that would
+   * be wrong for the other. game/boat.js does the arithmetic; this is the only place that knows
+   * which mesh is on screen. */
+  {
+    const box = new Box3().setFromObject(boatMesh);
+    if (Number.isFinite(box.min.y) && box.max.y > box.min.y) {
+      boatMode.setHull({ minY: box.min.y, height: box.max.y - box.min.y });
+    }
+  }
+  /* THE AEROPLANE, which did not exist until now — see render/plane.js. Flying used to drag the
+   * CAR's mesh to the plane's x and z, ignoring its height, pitch and roll, so taking off looked
+   * like nothing happening. */
+  const planeMesh = buildPlane(ships.material);
+  scene.add(planeMesh);
   scene.add(boatMesh);
+  /* The propeller's own accumulated spin, radians — see the frame loop, `planeMesh.userData.prop`
+   * and render/plane.js's buildPropDisc(). Kept out here rather than inside the frame loop's own
+   * closure for no other reason than every other per-frame latch in this function already lives at
+   * this level (padWas, offRoadFor, harbourWas...) — one place to look for "what does the loop
+   * remember between frames", not two. */
+  let propSpin = 0;
+  /* Whether the plane was stalling last frame — same latch idea as propSpin above, so the HUD
+   * callout below fires once on the way IN rather than every frame the wing is short of speed. */
+  let planeWasStalling = false;
 
   /* Swapping the car keeps everything else: position, speed, streak, the lot. The model is
    * the only thing that changes, because the solver is tuned by the FEEL, not by the body. */
   let carKeyLive = carKey;
+  /* ONE SWAP AT A TIME. `carKeyLive` only advances after the awaits below, so two quick presses
+   * — V twice, or a garage click racing a V — used to run two loadCars over the same `model`:
+   * two disposes of one rig and an orphan group left in the scene. The flag simply drops the
+   * second press; the key works again the moment the first swap lands. */
+  let carSwapBusy = false;
   async function swapCar(key) {
     if (!CARS[key] || key === carKeyLive) return;
     const spec = FLEET_BY_ID[key];
@@ -611,8 +777,18 @@ async function boot() {
       hud.say(`${spec.label} unlocks at ${(spec.unlockAt / 1000).toFixed(1)} km`, 3);
       return;
     }
+    if (carSwapBusy) return;
+    carSwapBusy = true;
     try {
       const next = await loadCar({ car: key, paint: me.look?.paint ?? 0, base: new URL('./models/cars/', location.href).href });
+      /* The second half of the freeze fix: cook the new car's programs BEFORE it enters the
+       * scene. `compileAsync` rides KHR_parallel_shader_compile, so the driver compiles on its
+       * own threads while the OLD car keeps drawing; by the time this resolves, the first
+       * painted frame has no compile left to pay for. Without it the swap frame paid the whole
+       * bill at first draw — over a second of long tasks per swap, measured in
+       * tools/diag-carswap-freeze.mjs. Scene and camera are passed so the variant compiled is
+       * the variant rendered: lights and fog defines differ otherwise and the stall comes back. */
+      await renderer.compileAsync(next.group, camera, scene);
       scene.remove(model.group);
       model.dispose?.();
       model = next;
@@ -621,9 +797,42 @@ async function boot() {
       window.WANDEROAD.model = model;
       // The car owns its feel, so changing car changes how it drives.
       if (spec) {
-        const f = applyCarFeel(spec);
-        car.setTier(spec.tier);
-        car.setPreset(f.assist);
+        /* One call where there were three: `applyDrivingModel` does the feel, then `setTier` (which
+         * re-reads mass, inertia and the CG offsets the Vehicle caches) and then `setPreset` (which
+         * re-reads the aid rung the model may have rewritten) itself. Doing them again here would be
+         * harmless but would leave two places that have to agree about the order. */
+        applyDrivingModel(spec, car);
+        /* ...and then the micro pass, which must be last: it writes tuning fields the feel does not
+         * own and swaps the Vehicle's tier record for a private clone, both of which `setTier` above
+         * has just undone. Handed an ordinary car it puts everything back, so switching AWAY from a
+         * micro-car is this same line. */
+        applyMicroPhysics(car, spec);
+      /* AND THE SPRINGS BACK ON TOP, because `applyMicroPhysics` just took them off.
+       *
+       * Handed an ordinary fleet car that call DETACHES the micro model, and detaching restores the
+       * stock `SUSPENSION` table — which runs AFTER the feel pass, so it silently overwrites whatever
+       * springs the car declared. Left alone, stepping out of the Tricycle and into the Warthog would
+       * hand the Warthog the coupe's 42000 N/m springs, and the one car in the fleet built around its
+       * suspension would quietly stop having any. Re-asserting here is six assignments, it is
+       * idempotent, and the micro cars rewrite their own tables afterwards, so the Tricycle is
+       * untouched. game/garage.js's applySuspFeel has the rest of the reasoning.
+       *
+       * This lives here rather than in car/microPhysics.js on purpose: that file is owned by another
+       * branch right now, and the fix does not need it. */
+      applySuspFeel(spec);
+        /* AND THE SPRINGS BACK ON TOP, because `applyMicroPhysics` just took them off.
+         *
+         * Handed an ordinary fleet car that call DETACHES the micro model, and detaching restores the
+         * stock `SUSPENSION` table — which runs AFTER the feel pass, so it silently overwrites whatever
+         * springs the car declared. Left alone, stepping out of the Tricycle and into the Warthog would
+         * hand the Warthog the coupe's 42000 N/m springs, and the one car in the fleet built around its
+         * suspension would quietly stop having any. Re-asserting here is six assignments, it is
+         * idempotent, and the micro cars rewrite their own tables afterwards, so the Tricycle is
+         * untouched. game/garage.js's applySuspFeel has the rest of the reasoning.
+         *
+         * This lives here rather than in car/microPhysics.js on purpose: that file is owned by another
+         * branch right now, and the fix does not need it. */
+        applySuspFeel(spec);
         /* Capacity is per car and does NOT transfer — swapping in the garage loads this car's
          * own can count and its own tank. See Fuel.setCar / START_CAPACITY_MUL. */
         fuel.setCar(spec.id);
@@ -633,13 +842,44 @@ async function boot() {
     } catch (err) {
       console.error('[car] swap failed', err?.message ?? err);
       hud.say('that one would not load', 2.5);
+    } finally {
+      carSwapBusy = false;
     }
+  }
+
+  /* `?unlock=123` — the operator's own hack. Applied before the Garage is built so the fleet is
+   * already open the first time it draws, and it opens the PLANE and the BOAT as well as the cars:
+   * "unlock all" that leaves two things locked is not unlock all. See game/garage.js's UNLOCK_PASS. */
+  if (cheatOn()) {
+    wallet.boat = true;
+    wallet.plane = true;
+    wallet.save();
+    hud.say('everything unlocked', 3.0);
   }
 
   const menu = new Menu({
     onAuto: () => toggleAutoDrive(),
     isAuto: () => auto.on,
     onCar: swapCar,
+    /* THE DRIVING MODEL, put on the car that is being driven right now.
+     *
+     * ui/menu.js owns the button and the choosing — `setDrivingModel` has already run and has already
+     * persisted the choice by the time this is called. This is the half only main.js can do, because
+     * only main.js knows WHICH fleet entry is in the player's hands and which Vehicle is under it.
+     * car/drivingModels.js splits the two deliberately ("a choice and an application are two
+     * different events"), and this is the application.
+     *
+     * No reload, and nothing is re-created: `applyDrivingModel` rewrites the shared tuning tables and
+     * re-reads the tier and the aid rung into the live Vehicle, and the solver reads those tables on
+     * its next step. Switching mid-corner was measured as disturbing neither position, heading nor
+     * speed on any of six switches — see tools/diag-driving-models.mjs. `applyMicroPhysics` follows
+     * for the same reason it does in swapCar: the restore inside the model wiped its fields. */
+    onDrive: () => {
+      const spec = FLEET_BY_ID[carKeyLive];
+      if (!spec) return;
+      applyDrivingModel(spec, car);
+      applyMicroPhysics(car, spec);
+    },
     bestStreak: () => Math.max(bestStreak(), streak.state.best),
     /* The leaderboard panel — src/net/board.js, wired up below once `transport` exists (`board`
      * is declared with `const` further down in this same function; reading it through a closure
@@ -657,6 +897,21 @@ async function boot() {
     device: () => input.device,
     atPump: () => atPumpShop(),
     atHarbour: () => atHarbour(),
+    /* WHICH TOWN YOU ARE STANDING IN, for the Garage's town row. The same `findStation` answer the
+     * fuel gauge and the streak forgiveness use — one source for "the nearest station", so the row
+     * cannot disagree with the arrow pointing at it — gated on being close enough to call it being
+     * THERE rather than near it. `key` is the station's own world key (`st:<edgeKey>`), which is a
+     * pure function of the seed and the lattice, so the town you upgrade stays the town you
+     * upgraded across reloads. */
+    townHere: () => {
+      const st = fuel.nearest;
+      if (!st || !st.key || !(st.dist <= TOWN_HERE_M)) return null;
+      return { key: st.key, x: st.x, z: st.z, name: st.name || null, dist: st.dist };
+    },
+    /* Make the new buildings appear while you are standing in them — see Props.rebuildAround. */
+    rebuildTown: (here) => {
+      if (here) props.rebuildAround(here.x, here.z, 240);
+    },
     say: (t, secs) => hud.say(t, secs),
     onCheat: (on) => {
       setCheat(on);
@@ -676,6 +931,44 @@ async function boot() {
    * the pad's bindings somewhere: it is solved by this line naming the device in your hands.
    *
    * Retitled the moment a pad is picked up or put down (see the frame loop's `padWas` latch). */
+  /* ── SAVING WHERE YOU ARE ────────────────────────────────────────────────
+   * Operator: "we need to make it so people can continue were they left off."
+   *
+   * Only the things no other module already persists — see game/session.js. The wallet, the streak,
+   * the fuel upgrades and the achievements all keep saving themselves, and duplicating any of them
+   * here would create a second opinion about the same number.
+   *
+   * The FUEL LEVEL is saved because arriving back with a full tank quietly undoes the fuel economy:
+   * a player who parked on fumes next to a petrol station would reload with a free refill.
+   *
+   * Never saved while ON FOOT, FLYING or BOATING. All three are modes you are somewhere specific
+   * for, and restoring into one of them from a cold start is how you resume 400 m up with no engine
+   * note and no idea why. The car's own parked position is the honest thing to come back to. */
+  const snapshot = () => ({
+    seed: SEED,
+    x: car.x,
+    z: car.z,
+    yaw: car.yaw,
+    car: carKeyLive,
+    fuel: fuel?.seconds,
+    at: Date.now(),
+  });
+  const persist = () => {
+    if (walker.active || plane.active || boatMode.active) return;
+    if (!Number.isFinite(car.x) || !Number.isFinite(car.z)) return;
+    saveSession(snapshot());
+  };
+
+  /* `pagehide` and a hidden `visibilitychange` are the two that actually fire when a tab is closed,
+   * backgrounded or navigated away from, on desktop AND on mobile. `unload` is unreliable and is
+   * ignored outright on iOS, which is exactly the case — someone closing the game on a phone —
+   * this feature exists for. */
+  addEventListener('pagehide', persist);
+  addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') persist();
+  });
+  let saveClock = 0;
+
   const openHint = document.createElement('div');
   openHint.id = 'openMenu';
   openHint.textContent = 'ESC — garage';
@@ -854,6 +1147,11 @@ async function boot() {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     grass.setAngular((camera.fov * DEG) / innerHeight);
+  /* The SAME number to the flowers. They had no angular floor at all until B37 — at the 190 m cull
+   * a flower subtended about 0.6 px and a sub-pixel white petal against green flickers rather than
+   * dims, which is the speckle that crawls over far hillsides. One source for both layers means a
+   * resize or a field-of-view change moves them together. */
+  flora.flowers?.setAngular?.((camera.fov * DEG) / innerHeight);
   });
   addEventListener('pagehide', () => {
     streak.flush();
@@ -902,6 +1200,8 @@ async function boot() {
 
   let netState = 'offline';
   let nextTick = 0;
+  /** Consecutive failed ticks, for the backoff ladder — see the catch below. */
+  let netFails = 0;
   async function netTick(now) {
     if (now < nextTick) return;
     nextTick = now + 4000; // pessimistic; the server's own `rate` replaces this
@@ -912,15 +1212,31 @@ async function boot() {
         return;
       }
       netState = transport.backend === 'local' ? 'solo' : 'online';
+      netFails = 0; // a good tick resets the backoff ladder
       if (res.peers) remotes.ingest(res.peers, res.now);
       // The server sets the pace. 'rate' is in HERTZ, not seconds: 0.25 when you are alone in
       // a continent, 2 when someone is within 800 m. Reading it as seconds inverts the whole
       // scheme — a lone driver would poll four times a second and a crowded road once every
       // two.
       nextTick = performance.now() + 1000 / Math.max(0.05, Math.min(res.rate || 0.25, 10));
-    } catch {
+    } catch (err) {
       netState = 'offline';
-      nextTick = performance.now() + 8000;
+      /* A BACKOFF LONGER THAN THE EXPIRY IS A DISCONNECT.
+       *
+       * This waited 8000 ms after any failure, and the server drops a presence row after 8.0 s. So a
+       * SINGLE dropped tick — one timeout, one rate limit — guaranteed the other player lost you
+       * entirely, and the rate then collapses to its lonely 0.25 Hz so it takes seconds more to
+       * notice you came back. That is not a network problem, it is a backoff tuned past the cliff it
+       * was meant to stay behind.
+       *
+       * Jittered growth from 1.2 s, capped at 5 s, so it stays inside the expiry window and a room
+       * full of clients that all failed at once do not come back in lockstep. A 429 is not a dead
+       * server, so honour Retry-After: the transport already attaches the status and nothing has
+       * ever read it. */
+      const status = err && err.status;
+      netFails = status === 429 ? 1 : Math.min(netFails + 1, 4);
+      const wait = status === 429 ? 1200 : Math.min(1200 * Math.pow(1.7, netFails - 1), 5000);
+      nextTick = performance.now() + wait * (0.85 + Math.random() * 0.3);
     }
   }
   /* Presence must not live and die with requestAnimationFrame. Browsers pause rAF entirely for
@@ -980,6 +1296,21 @@ async function boot() {
      * below), and consuming it here as well would open the Garage over the top of the first frame
      * the player ever sees. */
     if (!cine.active && input.tapped('garage')) menu.toggle();
+    /* ESC = PAUSE = NO SOUND. Operator, verbatim: "esc = pause = no sound".
+     *
+     * Watched as a TRANSITION on `menu.open` rather than hooked onto the Escape key, because the
+     * Garage has four ways in — Escape, the pad's Start, B, and the buttons that open it from a
+     * showroom — and hanging the audio off one of them would leave the other three playing an
+     * engine over a paused world. The world was already stopped here (`!menu.open` gates the car,
+     * the boat, the fuel burn and the rest); only the sound kept going.
+     *
+     * The music window is told separately: the YouTube embed has its own audio path and the master
+     * gain cannot reach it. */
+    if (menu.open !== pausedWas) {
+      pausedWas = menu.open;
+      audio.setPaused(menu.open);
+      musicPanel.setPaused(menu.open);
+    }
     if (menu.open) menu.padNav(input.padNav());
 
     if (input.padLive !== padWas) {
@@ -1022,6 +1353,18 @@ async function boot() {
       }
     }
 
+    /* MANUAL GEARS. Operator: "Maual gear shift needs to eb added". The keys have existed since the
+     * beginning (E/Right-Shift up, Q down) and were read by nothing; on a pad they are the shoulder
+     * buttons. Asking for a gear latches the manual box — see vehicle.js. */
+    if (input.tapped('shiftUp')) {
+      car.wantShift = 1;
+      hud.say(`gear ${Math.min(car.gear + 1, 6)} — manual`, 1.2);
+    }
+    if (input.tapped('shiftDown')) {
+      car.wantShift = -1;
+      hud.say(`gear ${Math.max(car.gear - 1, 1)} — manual`, 1.2);
+    }
+
     if (input.tapped('camera')) hud.say(`camera: ${chase.cycle()}`, 1.6);
     if (input.tapped('reverse')) car.reverse = !car.reverse;
     if (input.tapped('nextCar')) {
@@ -1039,7 +1382,16 @@ async function boot() {
       }
     }
     if (input.tapped('horn')) audio.horn();
-    if (input.tapped('radio')) hud.say(audio.nextStation(), 2.4);
+    /* N IS THE RADIO, AND THE RADIO IS THE YOUTUBE WINDOW. Operator: "radio does not work (changing
+     * stations seems to do nothing) but it was never suppose to -- YT video was suppose to be that."
+     *
+     * It used to step a list of synthesised oscillator "stations" while the actual music came out of
+     * a separate YouTube panel on J, so changing station did nothing you could hear. N now skips to
+     * the next track in that window, which is what the control always meant. */
+    if (input.tapped('radio')) {
+      musicPanel.next();
+      hud.say('next track', 1.6);
+    }
     /* F: pour a spare can in. A can is a tank you carry — bought at a pump, used anywhere, which is
      * the one thing suns could not buy before and exactly what you want when the needle is on the
      * pin and the nearest station is 3 km back. */
@@ -1047,15 +1399,92 @@ async function boot() {
      * and the windsock are for — but the check is deliberately soft: the plane only needs somewhere
      * flat, so a long straight road works too, and refusing it there would be a rule with no reason
      * behind it. What IS enforced is the unlock: sea diamonds, or the pass. */
+    /* CAN THE PLANE LEAVE THE GROUND FROM HERE? Within the strip's own half-length of an
+     * airfield's centre, or with everything unlocked. AIRFIELD_HALF_LEN is the same 190 m the
+     * "an airfield — P to take off" prompt already uses, so the message and the rule agree. */
+    /* Is there a made surface under the wheels right now? `surface()` is the same query the car's
+     * own solver reads for grip, so this cannot disagree with what the driver feels — asking a
+     * second opinion about "is this tarmac" is how the road and the drivable road drifted apart
+     * once already (see roadCamber's note in world/roads.js). */
+    const onHardSurface = () => {
+      const s = car.terrain.surface(car.x, car.z);
+      if (s && s.onRoad > 0.5) return true;
+      /* AN AIRSTRIP IS TARMAC TOO, and `surface()` does not know that — it answers about the ROAD
+       * network, and a runway is not a road. Adding the tarmac rule for B56 therefore locked the
+       * aeroplane out of the one place it is supposed to leave from, which is the opposite of what
+       * that item asked for. Caught by F39's proof: ?fly=1 put the car on a strip and take-off was
+       * refused with onRoad 0.00.
+       *
+       * The world's own airfield search rather than the renderer's baked list, for the same reason
+       * ?fly=1 uses it — the baked list only knows tiles that have streamed. */
+      const strip = worldNearestAirfield(car.x, car.z, SEED);
+      return !!strip && Math.hypot(car.x - strip.x, car.z - strip.z) <= AIRFIELD_HALF_LEN;
+    };
+    const canTakeOffHere = () => {
+      if (cheatOn()) return true;
+      /* The WORLD's airfield search, not the renderer's baked-per-tile list. Same fault as the two
+       * fixed beside this one: the baked list only knows tiles that have STREAMED, so standing on a
+       * strip that has not been drawn yet — which is exactly what ?fly=1 does — read as "no airfield
+       * anywhere" and refused the take-off. `worldNearestAirfield` is a pure function of position
+       * and seed, so it answers the same way whether or not anything has been drawn. */
+      const near = worldNearestAirfield(car.x, car.z, SEED);
+      return !!near && Math.hypot(car.x - near.x, car.z - near.z) <= AIRFIELD_HALF_LEN;
+    };
     if (input.tapped('fly')) {
       if (plane.active) {
         plane.stop();
         car.placeAt(plane.x, plane.z, plane.yaw);
         hud.say('back in the car', 2.4);
+        planeWasStalling = false; // the next flight starts with a clean slate for the callout below
       } else if (!plane.unlocked) {
-        hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} from the sea`, 3.4);
+        hud.say(`the plane needs ${plane.gemsToGo} more diamond${plane.gemsToGo === 1 ? '' : 's'} away`, 3.4);
+      } else if (!onHardSurface()) {
+        /* AND THE WHEELS HAVE TO BE ON SOMETHING HARD. Operator: "You should also be required to
+         * run this on tarmac in some way to take off. Right now I'm just running away through
+         * trees in the forest and it seems to make no difference whatsoever."
+         *
+         * The airfield rule below is about WHERE you are; this is about WHAT IS UNDER YOU, and the
+         * two are not the same — an airfield's own grass is inside the strip's radius. `?unlock=123`
+         * deliberately does NOT bypass this one, unlike the airfield rule: the complaint was
+         * precisely that a roll through a forest worked, and a cheat that unlocks the aeroplane is
+         * not a cheat that makes soft ground hard. */
+        hud.say('you need tarmac under the wheels to get airborne — find the strip or a road', 3.6);
+      } else if (!canTakeOffHere()) {
+        /* AN AEROPLANE LIVES AT AN AIRFIELD. Operator: "unlock /switch should require airport
+         * (unless "all unlock" is on)".
+         *
+         * This deliberately overrides the softer rule that was here — the old comment argued the
+         * plane only needs somewhere flat, so a long straight road should do. That made the 380 m
+         * strip and its windsock decorative: there was never a reason to fly TO one. Now there is,
+         * and the airfields become destinations rather than scenery.
+         *
+         * `?unlock=123` still bypasses it, because a cheat that unlocks everything and then makes
+         * you drive to a runway anyway is not an unlock. */
+        const far = props.nearestAirfield ? props.nearestAirfield(car.x, car.z) : null;
+        hud.say(
+          far ? `planes take off from airfields — nearest is ${(far.dist / 1000).toFixed(1)} km away` : 'planes take off from airfields — find one first',
+          3.6
+        );
       } else {
         plane.start(car, false);
+        /* WHICH KEY RAISES THE NOSE. Operator: "control to point nose up unclear". Pitch is on
+         * Shift and Ctrl (K and I still work — see car/input.js's KEYMAP), which nothing anywhere
+         * said, so taking off consisted of holding the throttle and hoping. Said at the one moment
+         * it is needed and nowhere else.
+         *
+         * MADE LOUDER a second time. Operator, later: "We should mention the flight controls when
+         * you start flying" — asked as though the hint above did not exist, because in practice it
+         * did not: six seconds of a slash-packed key legend ("Shift nose up · Ctrl nose down · A/D
+         * bank") is exactly the kind of toast that is gone by the time a first-time flyer, busy
+         * lining up a runway, looks down at it. Same hint, rewritten to survive a glance — full
+         * words instead of a symbol legend, an opening clause that says WHAT is being explained
+         * before it explains it — and left up half again as long, 9 s rather than 6, because reading
+         * a sentence takes longer than skimming three key names. */
+        const bank = input.device === 'pad' ? input.label('steer') : `${input.label('steerLeft')} / ${input.label('steerRight')}`;
+        hud.say(
+          `You're flying — ${input.label('pitchUp')} climbs, ${input.label('pitchDown')} dives, ${bank} banks left and right`,
+          9.0
+        );
       }
     }
 
@@ -1071,7 +1500,10 @@ async function boot() {
       }
     }
     if (input.tapped('autodrive')) hud.say(toggleAutoDrive() ? 'auto-drive on — sit back' : 'auto-drive off', 2.4);
-    if (input.tapped('reset')) backToRoad();
+    if (input.tapped('reset')) {
+      car.manual = false; // R is the get-me-out key; it hands the automatic back too
+      backToRoad();
+    }
     // 'Give fuel' is not in car/input.js's KEYMAP (that file is out of scope this pass) — the
     // same raw, already-edge-triggered check the assist-preset keys just below use. KeyF:
     // free of every other binding, and reads naturally as favour/friend/fuel. See
@@ -1115,20 +1547,38 @@ async function boot() {
     const wasBoating = boatMode.active;
     // The car is PARKED while you are out of it. A car that rolls away while you are inside a
     // showroom is a bug wearing a feature's clothes.
-    if (!menu.open && !boatMode.active && !walker.active) car.update(dt, gated);
+    /* AND NOT WHILE FLYING. The plane sets `car.placeAt(plane.x, plane.z, ...)` every frame so the
+     * two agree about where the player is — but the car solver was still running afterwards and
+     * driving the car off on its own, so the car (and the chase camera bolted to it) stayed on the
+     * runway while the aeroplane flew away. Measured: 199 m between the camera and the plane after
+     * a seven-second climb. Same reasoning as `boatMode` and `walker` beside it — while another mode
+     * owns the player, the car is a passenger. */
+    if (!menu.open && !boatMode.active && !walker.active && !plane.active) car.update(dt, gated);
     if (!menu.open) boatMode.update(dt, car, car.terrain.surface(car.x, car.z), gated);
     if (!wasBoating && boatMode.active) audio.thump(0.4); // the splash — boat.js's own "Enter" note
 
     /* collisions — after the solver, before the camera, so the camera never chases a car
        that is momentarily inside a tree */
     const hit = solids.resolve(car, 1.05, dt);
+    /* "OUCH" IS FOR CRASHES, NOT FOR SHRUBBERY. Operator: "i keep getting ouch when offroad -- stop
+     * that happening."
+     *
+     * The bar was severity 0.35 at 9 km/h, which off the tarmac is simply DRIVING: the fields are
+     * full of bushes and saplings and you brush one every few seconds, so the toast fired
+     * continuously and the word stopped meaning anything. A real impact is both harder and faster,
+     * and it also cannot happen twice in the same second — so there is a cooldown as well as a
+     * higher bar. The streak still ends on the lighter hits; only the SHOUTING is gated. */
+    ouchClock += dt;
+    if (hit && hit.severity > 0.55 && hit.speed > 24 && ouchClock > 4) {
+      ouchClock = 0;
+      hud.say('ouch', 1.4);
+    }
     if (hit && hit.severity > 0.35 && hit.speed > 9) {
       audio.thump(Math.min(1, (hit.severity * hit.speed) / 40));
       // A real impact ends the streak immediately — unless the car is driving itself, in which
       // case the streak is frozen and there is nothing to end. Same flag, same reasoning as the
       // scoring call below; passing it here too is what stops the two disagreeing.
       streak.update(2, car, { onRoad: 0 }, { paused: auto.on, forgive: nearPump() });
-      hud.say('ouch', 1.4);
     }
 
     /* scoring */
@@ -1153,8 +1603,23 @@ async function boot() {
      * freeze auto-drive uses, and for the same reason it uses it: this is not you leaving the road, so
      * it must not read as you leaving the road. It does not accrue either, so nobody can farm a
      * streak by sitting at a pump. */
+    /* AND NOT WHILE FLYING. Operator: "You shouldn't show the red text when you are off-road with a
+     * plane, because there isn't a road, right?" — right on both counts.
+     *
+     * The plane sets car.x/car.z to wherever it is in the sky (see the handover a little further
+     * down), so the instant you take off `surf` above is sampled under the aeroplane rather than
+     * under a car on a road — and it reads off-road almost everywhere, because there is no
+     * carriageway 300 m up. Left ungated that is not merely the wrong colour on a HUD number: it is
+     * streak.js's own off-road TIMER (`_off`, GRACE = 0.55 s), so a lot more than the "red text" was
+     * about to break — every take-off would end the run 0.55 s later, the exact shape of bug the
+     * fuel-dry freeze above already exists to prevent. Ungated it stayed only because flight came
+     * after this gate was written. `hud.js`'s own red warning already reads `!s.paused` (ui/hud.js,
+     * "the RED RING is a flash, not a state"), so freezing the streak here is the one change that
+     * fixes the toast, the ring AND the streak-breaking bug in one place — this is not the player
+     * leaving the road, it is the player leaving the road network entirely, on purpose, in a
+     * vehicle that was never on one. */
     streak.update(dt, car, surf, {
-      paused: auto.on || fuel.dry || fuel.refuelling,
+      paused: auto.on || fuel.dry || fuel.refuelling || plane.active,
       forgive: nearPump(),
     });
     /* Tell the leaderboard whenever a run passes the best it already knows about. Deliberately
@@ -1209,12 +1674,24 @@ async function boot() {
      * arrangement game/boat.js already has. The car is parked underneath it and only moves again at
      * the handover above. */
     if (plane.active) {
+      /* RAW STEER/THROTTLE, NOT THE CAR'S SCALED ONES. Shift and Ctrl now fly the aeroplane as
+       * well as cruise-limiting the car (see car/input.js's KEYMAP and poll()) — cmd.steer and
+       * cmd.throttle already have `fine`'s 45%-throttle cruise cap and `attack`'s 1.25x steering
+       * baked in, which would mean holding Shift to climb also silently capped the climb. cmd's
+       * own `steerRaw`/`throttleRaw` are the same stick BEFORE that scaling, kept for exactly this
+       * handover. */
       plane.update(dt, {
-        steer: cmd.steer,
+        steer: cmd.steerRaw,
         pitch: cmd.pitchAxis ?? 0,
-        throttle: cmd.throttle,
+        throttle: cmd.throttleRaw,
         brake: cmd.brake,
       });
+      /* ONE GENTLE LINE ON THE WAY IN, not a klaxon — this is a cozy game, not a warning system.
+       * plane.state.stalling is already there for the taking; latched on planeWasStalling so it
+       * says its piece once per stall entered rather than once per frame the wing is short. */
+      const st = plane.state;
+      if (st.stalling && !planeWasStalling) hud.say('stalling — nose down for speed', 2.6);
+      planeWasStalling = st.stalling;
       car.placeAt(plane.x, plane.z, plane.yaw);
     }
 
@@ -1336,6 +1813,15 @@ async function boot() {
       }
     }
 
+    /* The autosave. Slow on purpose — this is insurance against a crash or a flat battery, not the
+     * mechanism; the real save happens on the way out. Six seconds costs nothing and bounds the
+     * worst case to a few hundred metres of driving. */
+    saveClock += dt;
+    if (saveClock >= AUTOSAVE_S) {
+      saveClock = 0;
+      persist();
+    }
+
     const dealerNow = atDealer();
     if (dealerNow !== dealerWas) {
       dealerWas = dealerNow;
@@ -1398,6 +1884,7 @@ async function boot() {
     } else if (showroomTold) {
       showroomTold = null;
     }
+    helper.update(dt); // the fuel cloud's own little arc — see render/helper.js
     trail.update(dt, car, streak.state); // no-op — see the retirement note by `new StreakTrail` above
     /* Dust off the back wheels once you are off the carriageway. After the solver so it reads
      * this frame's real speed and slip, and after the collision resolve so a car that has just
@@ -1420,7 +1907,64 @@ async function boot() {
     /* place the model — the car, or, while boat.js has the wheel, the boat. Exactly one of
      * the two is ever visible; the other's transform is simply not touched this frame, which
      * is cheaper than hiding-and-showing an idle mesh and leaves it wherever it last was. */
-    if (boatMode.active) {
+    if (plane.active) {
+      /* IN THE AIR THE PLANE IS THE BODY. All three angles, and the real height — which is the whole
+       * of what was missing. The plane's own frame is the same forward-is-+Z convention every
+       * vehicle here uses, so the yaw goes straight on. */
+      model.group.visible = false;
+      boatMesh.visible = false;
+      planeMesh.visible = true;
+      planeMesh.position.set(plane.x, plane.y, plane.z);
+      /* THE MODEL AND THE FLIGHT PATH DISAGREED. Operator: "When you push k, you look up and you go
+       * up, but the plane looks down. When you push i, the plane looks up and you go down" — and,
+       * separately, "the plane goes left, or it looks left, but goes right".
+       *
+       * Both are the same mistake, made twice. The aeroplane is modelled nose along +Z, and in a
+       * right-handed Y-up system a POSITIVE rotation about X carries +Z towards -Y: the nose goes
+       * DOWN. The flight model means the opposite by a positive pitch — `ny = sin(pitch)`, so
+       * positive pitch is climbing. Feeding one straight into the other drew an aeroplane pointing
+       * at the ground while it gained height. Bank is the same story about Z.
+       *
+       * Yaw is left alone: the pose convention here is forward = (sin yaw, cos yaw), and rotating a
+       * +Z nose about Y by that angle lands on exactly that vector, which is why the CAR — same
+       * convention, same mapping — has never had this problem.
+       *
+       * Reasoning about handedness is how this got backwards; the signs below are now measured.
+       * See the B54 note on the rotation.set line itself for the numbers that settled it. */
+      /* ROLL IS NEGATED, EXACTLY LIKE PITCH — and the comment that used to argue otherwise made
+       * the one mistake this line keeps inviting: it put the right wing on +X. Face along +Z in a
+       * right-handed Y-up frame and your right hand is on -X (rotate +Z by -90 about Y and land on
+       * (-1,0,0) — the same arithmetic that makes the car's yaw work). So a positive rotation
+       * about Z, which carries +X towards +Y, lifts the LEFT wing: that is a bank to the RIGHT on
+       * screen. The model means a bank to the LEFT by a positive roll — bench-plane's measured
+       * convention, +roll yaws the nose left — so the mesh takes the NEGATED model roll, the same
+       * way it already takes the negated pitch.
+       *
+       * The empirical anchor, so nobody re-argues this from handedness again. Operator, 4 Aug,
+       * on the live build carrying `plane.roll` unnegated: "when i go left on the stick, the
+       * plane tilts to the right instead of the left, but it goes to the left." Motion correct,
+       * picture mirrored — which is precisely this line and only this line. The earlier B54 film
+       * that seemed to show the opposite was shot while B78's bug still rolled the CAMERA with
+       * the plane, and a camera that rolls by +phi paints the world as if the plane rolled by
+       * -phi: the one instrument used to judge the sign was itself inverted. That fix landed
+       * first; this sign is judged against a level horizon. tools/diag-plane-view.mjs now asserts
+       * the SCREEN truth — wingtip pixels, not pose numbers — so the next argument is with a
+       * photograph. */
+      planeMesh.rotation.set(-plane.pitch, plane.yaw, -plane.roll, 'YXZ');
+      /* THE PROPELLER, ACTUALLY TURNING. Operator: "the propeller doesn't move." render/plane.js's
+       * buildPropDisc() explains the render half (a blurred disc, not a faster cross); this is the
+       * per-frame half. There is no rpm anywhere in this flight model — see game/plane.js, throttle
+       * is the only number there is — so the rate is a plausible one rather than a measured one:
+       * fast enough at idle (6 rad/s, just under a full turn a second) that the disc is visibly
+       * live the moment you take off, and fast enough at full throttle (52 rad/s, over eight turns
+       * a second) that the two-lobe shading (buildPropDisc's own cosine wash) blurs into an even
+       * disc rather than reading as two blades going round. `% TAU` keeps the accumulator bounded
+       * across a flight that runs on for a while, rather than letting a float creep out of the
+       * precision a rotation needs. */
+      propSpin = (propSpin + dt * (6 + plane.throttle * 46)) % TAU;
+      planeMesh.userData.prop.rotation.z = propSpin;
+    } else if (boatMode.active) {
+      planeMesh.visible = false;
       model.group.visible = false;
       boatMesh.visible = true;
       // car.y is already the water surface plus boat.js's own bob (see its _stepActive) — no
@@ -1429,6 +1973,7 @@ async function boot() {
       boatMesh.position.set(car.x, car.y, car.z);
       boatMesh.rotation.set(0, car.yaw, boatMode.roll);
     } else {
+      planeMesh.visible = false;
       boatMesh.visible = false;
       model.group.visible = true;
       /* car.roll and car.pitch are the whole body attitude now — the ground under the four
@@ -1497,6 +2042,66 @@ async function boot() {
           walker.z + Math.cos(walker.yaw) * 10
         );
         sNorm = 0;
+      } else if (plane.active) {
+        /* THE AIR CAMERA IS SET DIRECTLY, not through the chase rig.
+         *
+         * The rig was tried first and would not take an aeroplane. Instrumented: the branch ran for
+         * 436 frames while the camera sat at the spawn point 193 m behind the plane, with every
+         * field it reads supplied. It carries smoothing and terrain-clamping tuned around a car that
+         * never leaves the ground, and an aircraft climbing away at 22 m/s is simply not that.
+         *
+         * So flying gets its own three lines, the same stance walk mode takes: sit behind and above
+         * the aircraft in its OWN frame — so a bank rolls the horizon, which is most of what makes
+         * flying feel like flying — and look slightly ahead of it. */
+        const cy = Math.cos(plane.yaw);
+        const sy = Math.sin(plane.yaw);
+        /* THE CAMERA FOLLOWS THE FLIGHT PATH, NOT THE COMPASS HEADING. B67, the operator: "the
+         * camera also gets stuck above the airplane when going up... the plane should remain in
+         * frame rather than falling out of frame."
+         *
+         * Two faults, and the second is the one that empties the frame. The offset was purely
+         * HORIZONTAL — 24 m back along the heading, 7 m up — so a climbing aeroplane rose while
+         * the camera stayed level behind it. And the look-at target used `plane.pitch * 30` as if
+         * pitch were a gradient, when it is an ANGLE IN RADIANS: at the 63 degrees a held climb
+         * reaches, that is 1.1 * 30 = 33 m above the aeroplane, so the camera aimed a full 33 m
+         * over its own subject's head. Filmed three times at three pitch rates while trying to
+         * shoot B53, and every clip is empty sky.
+         *
+         * So the offset now runs back along the FORWARD VECTOR, pitch included — behind and below
+         * in a climb, behind and above in a dive — and the target is the aeroplane's own nose a
+         * short way ahead, on the same vector. It cannot aim past its subject because the subject
+         * is on the line it is aiming down. */
+        const cp = Math.cos(plane.pitch);
+        const sp = Math.sin(plane.pitch);
+        const back = 24;
+        const up = 7;
+        camera.position.set(
+          plane.x - sy * cp * back,
+          plane.y - sp * back + up,
+          plane.z - cy * cp * back,
+        );
+        /* THE CAMERA DOES NOT ROLL WITH THE AEROPLANE, and this line is why "left goes left but
+         * looks like going right" kept coming back after the mesh signs were fixed twice.
+         *
+         * It used to set the camera's up vector to the aeroplane's own banked up. Do that and the
+         * aircraft is drawn at the same angle as the frame, so the WING never appears to move —
+         * what tilts instead is the whole world, and it tilts the OPPOSITE way, because rolling
+         * the camera by +roll rotates everything in view by -roll. Filmed on the live beta holding
+         * A for 3.7 s, and every number underneath was already right:
+         *
+         *   model roll   +75.2 deg   (positive = banked left)
+         *   MESH z       +75.2 deg   (right wing up, which IS a left bank — verified against
+         *                             three.js by rotating a +X wingtip and reading its world Y)
+         *   heading      +17.1 deg   (positive = LEFT, the car's convention)
+         *
+         * — and the clip still shows an aeroplane sitting level in a sky rolled hard the other
+         * way. Three fixes had gone into the mesh signs chasing a fault that was never in them.
+         *
+         * So the horizon stays put and the AEROPLANE banks against it, which is what a chase
+         * camera in every flying game does and the only version where the wing tells the truth. */
+        camera.up.copy(UP_Y);
+        camera.lookAt(plane.x + sy * cp * 14, plane.y + sp * 14, plane.z + cy * cp * 14);
+        sNorm = Math.min(1, Math.hypot(plane.vx, plane.vz) / 90);
       } else {
         sNorm = chase.update(subject, dt, (x, z) => car.terrain.height(x, z), { drift: auto.on });
       }
@@ -1508,22 +2113,56 @@ async function boot() {
     camera.getWorldDirection(dir);
     U.uCull.value.set(dir.x, dir.z, Math.cos(1.15), 0);
 
+    /* ── INSIDE A SHOWROOM, THE WORLD STOPS BEING BUILT ──────────────────────
+     * F17, his own suggestion: a walk-in showroom is effectively an INTERIOR LEVEL, so the open
+     * world should not go on costing frame time while you are standing in one looking at cars.
+     *
+     * The condition is deliberately narrow — ON FOOT and inside the hall's own footprint, not
+     * merely near it. Walking the forecourt still streams normally, because from out there you can
+     * see the countryside and it has to keep arriving; from INSIDE, with four walls around you, the
+     * only thing the streamer and the prop tiler can do is spend milliseconds on tiles nobody can
+     * see. Everything else in the frame keeps running: the grass and flora already have their own
+     * distance culls, the car is parked, and pausing the RENDERER rather than the two BUILDERS
+     * would freeze the picture you walked in to look at.
+     *
+     * It restores on the frame you step back out, and there is nothing to undo: both are pull-based
+     * (`update(x, z)` decides what it wants from where you are), so a resumed streamer simply asks
+     * for the tiles it wants now. That is also why this is a guard on the call rather than a paused
+     * flag inside either class — no new state can get stuck on. */
+    /* THE WALKER'S OWN POSITION, not the car's. `hallNow` above is measured from the CAR, which is
+     * parked outside on the forecourt the whole time you are indoors — reading its distance here
+     * would have paused the world while you stood at the door and never while you stood inside. */
+    const insideHall = (() => {
+      if (!walker.active || !hallNow) return false;
+      const dx = walker.x - hallNow.x;
+      const dz = walker.z - hallNow.z;
+      const ca = Math.cos(hallNow.yaw || 0);
+      const sa = Math.sin(hallNow.yaw || 0);
+      return Math.abs(dx * ca + dz * sa) <= SHOWROOM_HALF_W && Math.abs(-dx * sa + dz * ca) <= SHOWROOM_HALF_D;
+    })();
     /* world */
-    streamer.update(car.x, car.z);
+    if (!insideHall) streamer.update(car.x, car.z);
     roads.update(car.x, car.z);
     wind.update(dt, camera.position);
     grass.update(car.x, car.z, car.y, dt);
     clouds.update(dt, camera.position);
     water.update(dt, camera.position);
     flora.update(dt, camera.position);
-    props.update(dt, car.x, car.z);
+    if (!insideHall) props.update(dt, car.x, car.z);
     ships.update(dt, car.x, car.z);
     /* Loot: suns along the road, gems on open water — src/render/loot.js. `boatMode.active`
      * replaces workstream B's own `const boatActive = false` placeholder now that
      * src/game/boat.js exists — see docs/BOAT-PLAN.md's deviations log (workstream B entry)
      * for why that was the honest interim behaviour rather than a fake unlock. */
     loot.update(dt, car, boatMode.active);
-    const gainedSuns = loot.drainSuns();
+    ramps.update(dt, car);
+    /* SALVAGE CRATES — the off-road goodies. Operator: "there should be special off-road goodies
+     * that you can get." Worth CRATE_VALUE suns each rather than a currency of their own: a second
+     * scoreboard for the same act of picking something up is a worse game, not a richer one, and
+     * world/loot.js's own note has the sizing against the unlock rungs. Folded into the sun gain so
+     * every downstream consumer — the wallet, the counter, the achievements — needs no new path. */
+    const gainedCrates = loot.drainCrates();
+    const gainedSuns = loot.drainSuns() + gainedCrates * CRATE_VALUE;
     if (gainedSuns) {
       wallet.addSuns(gainedSuns);
       audio.sun();
@@ -1548,14 +2187,32 @@ async function boot() {
     // above where it is registered. remotes.update() stays here: it is the visual
     // interpolation of ghosts already ingested, which is a rendering concern and belongs
     // exactly where every other per-frame visual update lives.
-    remotes.update(dt, now);
+    /* Date.now(), NOT the frame's `now`. The frame timestamp comes from requestAnimationFrame and
+     * is measured from page load; remotes needs the same wall clock the snapshots are stamped with.
+     * Passing the wrong one pinned every ghost to its oldest snapshot — see remotes.update. */
+    remotes.update(dt, Date.now());
 
     /* audio + post cues */
-    audio.update(dt, car);
+    /* THE ENGINE NOTE WHILE FLYING. Operator: "There is no sound and the propeller doesn't move."
+     * update(dt, car) reads car.rpm/car.spec/car.throttle, none of which move while the plane has
+     * the wheel — the car's own solver is frozen the instant you take off (see car.update(dt,
+     * gated)'s own guard earlier in this loop) — so the note a player heard in the air used to be
+     * whatever the car was doing the moment before take-off, held there for as long as the flight
+     * lasted. updateFlight() is the plane's own branch of the same synthesised graph; see
+     * audio/engine.js for why it costs no new nodes. */
+    if (plane.active) audio.updateFlight(dt, plane, car);
+    else audio.update(dt, car);
     post.speed = sNorm;
     post.limit = car.limit;
 
-    hud.update(dt, { car, streak, surface: surf, remotes, netState, myName: me.name, wallet, auto });
+    // THE SPEEDOMETER, WHILE FLYING. Operator: "the speedometer also is non-functioning." car.kph
+    // is a held-stale number up here — the car solver is frozen the instant the plane takes the
+    // wheel (see the plane.active guard earlier in this loop) — so the HUD gets the aeroplane's
+    // own reading instead, and only while it is the thing actually moving.
+    hud.update(dt, {
+      car, streak, surface: surf, remotes, netState, myName: me.name, wallet, auto,
+      flightKph: plane.active ? plane.kph : null,
+    });
     fuelGauge.update(dt, fuel, car);
     lootCounter.update(dt, wallet);
     post.render(scene, camera);
@@ -1604,6 +2261,45 @@ async function boot() {
 
   // for the console, and for tools/shoot.mjs
   window.THREE = THREE_NS; // debug/telemetry only — the game never reads it
+  /* ?fly=1 — ON A RUNWAY, READY TO ROLL. Operator: "for later: make it easy to test plane".
+   *
+   * Testing flight used to mean earning sea diamonds or knowing the unlock URL, then finding an
+   * airfield, which the 2 Aug gate made mandatory. That is a ten-minute errand before the thing
+   * you actually wanted to look at.
+   *
+   * This does NOT bypass the gate — it satisfies it. The plane is unlocked, the car is put on the
+   * nearest airfield's strip facing along it, and that is all: you still press P, the airfield
+   * check still runs and passes because you are genuinely standing on a runway, and the tarmac
+   * check passes because a strip is tarmac. A flag that flew you regardless would test a code path
+   * no player ever takes; this one leaves the player's own path intact and just walks you to the
+   * start of it. */
+  if (params.get('fly')) {
+    /* DEFERRED, because airfields are BAKED PER TILE and there are none at boot. The first version
+     * of this ran inline and reported "no airfield found" while standing on the spawn road: props
+     * had not streamed yet, so `nearestAirfield` had nothing to answer with. It polls instead, and
+     * gives up out loud rather than silently doing nothing. */
+    let tries = 0;
+    const toStrip = () => {
+      /* The WORLD's own airfield search, not the renderer's baked-tile one. The baked list only
+       * knows tiles that have streamed, and at spawn there are none within its reach — the poll
+       * below ran forty times against an empty list before this was noticed. world/props.js's
+       * `nearestAirfield` is a pure function of position and seed with a 12 km radius, so it can
+       * answer before anything has been drawn. */
+      const strip = worldNearestAirfield(car.x, car.z, SEED);
+      if (strip) {
+        wallet.unlockPlaneWithPass(PLANE_PASS, PLANE_PASS);
+        car.placeAt(strip.x, strip.z, strip.yaw ?? 0);
+        car.vx = car.vy = car.vz = 0;
+        car.gear = 1;
+        hud.say('on the strip — hold W, then P to fly', 5);
+        return;
+      }
+      if (++tries < 40) setTimeout(toStrip, 250);
+      else hud.say('no airfield streamed in to start from', 4);
+    };
+    setTimeout(toStrip, 250);
+  }
+
   window.WANDEROAD = {
     /* The seed this world was grown from. Exposed because several diagnostics have to ask the
      * PURE world functions about the same plane the page is showing — the renderer only knows
@@ -1622,6 +2318,25 @@ async function boot() {
     auto,
     trail,
     fleet: FLEET,
+    /* The kickers, for the same reason `flora` and `props` are here: "is there a jump near me, and
+     * did I actually clear it" can only be answered against the ramps the world really placed, not
+     * against a second opinion. tools/shot-car.mjs and the proof manifests park the car at one of
+     * these before filming. Telemetry only; the game never reads window.WANDEROAD. */
+    ramps,
+    rampsNear: (x, z, r = 900) => rampsInBox(x - r, z - r, x + r, z + r, SEED),
+    /* The salvage crates the WORLD placed, which is not the same question as which crates the
+     * renderer has streamed in — a proof clip has to be able to drive to one that exists rather than
+     * to one that happens to be loaded. Same read-only stance as everything else on this object. */
+    cratesNear: (x, z, r = 900) => {
+      const out = [];
+      for (let gj = Math.floor((z - r) / CRATE_TILE); gj <= Math.floor((z + r) / CRATE_TILE); gj++)
+        for (let gi = Math.floor((x - r) / CRATE_TILE); gi <= Math.floor((x + r) / CRATE_TILE); gi++) {
+          const c = cratesForTile(gi, gj, SEED);
+          if (c) out.push(c);
+        }
+      out.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z));
+      return out;
+    },
     /* The audio graph, for the same reason `flora` and `props` are here: "is the music
      * playing, and how loud" can only be answered honestly by reading the gain node that is
      * actually in the graph, not by trusting a flag. See tools/diag-radio.mjs. */
@@ -1635,6 +2350,8 @@ async function boot() {
     // ACTUALLY DREW rather than against a second opinion about what should be there.
     flora,
     remotes,
+    transport,
+    netInfo: () => netState,
     /* How many ghosts got their real GLB versus the procedural stand-in. Exposed because
      * "the ghost is the wrong car" can only be answered with a count of models that actually
      * loaded — see src/net/ghostCar.js. */
@@ -1657,6 +2374,44 @@ async function boot() {
      * frame, which is birds.stats.drawn — not a flag, and not the number that exist. */
     birds,
     fuel,
+    /* The GAUGE as well as the tank. "Does the distance-to-pumps flash amber as the tank passes a
+     * meter point" cannot be answered from `fuel` — the tank knows how much is left, and the
+     * warning lives in the widget that draws it (`lastMark`, `markFlashCount`, and the `mark`
+     * class on the readout). Same rule as `flora` and `spray`: ask the thing that actually did it.
+     * Telemetry only; the game never reads window.WANDEROAD. */
+    fuelGauge,
+    /* The music window, because "N is the radio and the radio is the YouTube window" is a claim
+     * about a control reaching a surface, and the only honest way to check it is to press N and
+     * ask the WINDOW whether it was told to skip. See tools/diag-radio.mjs and B25. */
+    musicPanel,
+    /* The one water-height function this game has, so a diagnostic can ask where the SEA SURFACE is
+     * at a point — `surface()` hands back the biome weights and the ground, and turning those into a
+     * water height is `waterLevelAt`'s job. Exposed for the same reason `deadEnds` is: a probe that
+     * has to re-derive this ends up inventing a helper that does not exist, which is exactly how the
+     * first B66 clip came back empty. Telemetry only. */
+    seaLevelAt: (x, z) => {
+      const s = car.terrain.surface(x, z);
+      return s && s.w ? waterLevelAt(s.w, s.y) : null;
+    },
+    /* Roads that STOP, as the world itself decides it — [{x, z, edge}], derived from the streamed
+     * edge list with roads.js's own rule rather than a re-derivation. See the import note. */
+    deadEnds: () => {
+      const out = [];
+      for (const e of car.terrain.roads.edges) {
+        const dead = edgeDeadEnds(e, SEED);
+        const n = e.pts.length;
+        if (dead[0]) out.push({ x: e.pts[0], z: e.pts[1], into: [e.pts[2], e.pts[3]], key: e.key });
+        if (dead[1]) out.push({ x: e.pts[n - 2], z: e.pts[n - 1], into: [e.pts[n - 4], e.pts[n - 3]], key: e.key });
+      }
+      return out;
+    },
+    /* The aeroplane, so a diagnostic can ask whether it is flying and how high — the same reason
+     * every other live object is on this handle. */
+    plane,
+    /* The live plane MESH, same reasoning as `boatMesh` above: a diagnostic asking whether the
+     * propeller is actually turning needs `planeMesh.userData.prop.rotation.z` off the object the
+     * frame loop is really spinning, not a re-derivation from `plane.throttle`. */
+    planeMesh,
     /* The walker, for the same reason `wallet` and `props` are here: the only honest answer to "am I
      * out of the car" is the object the frame loop is actually stepping. See tools/diag-walkin.mjs. */
     walker,

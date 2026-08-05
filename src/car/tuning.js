@@ -167,6 +167,157 @@ export const TIERS = {
     wheelRadius: 0.35,
     drive: 'awd',
   },
+  /* ── THE TRUCK ──────────────────────────────────────────────────────────────
+   * Operator: "Slow cars like truck right now cant go up mountains -- should be the best at it"
+   * and "Truck should do better offroad too".
+   *
+   * A tier, not a `feel`, because `feel` reaches the steering and the tyres and NOTHING in the
+   * drivetrain — and the drivetrain is what a gradient is decided by. Measured: the pickup and the
+   * starter Estate were byte-identical in every equation that sets a climbing limit, which is why
+   * the truck was no better on a hill than the shopping car.
+   *
+   * The numbers are chosen from the standing-start limit, which is the honest test of "can it climb
+   * a mountain": drive force at idle rpm is peakTorque x 0.573 (the torque curve at idle) x
+   * ratios[0] x finalDrive / wheelRadius x 0.88 (driveloss). Here that is
+   * 105 x 0.573 x (5.2 x 12.5) / 0.40 x 0.88 = 8607 N against m*g = 20601 N, so it restarts from a
+   * dead stop on about a 28-degree, 53% grade. The Estate's equivalent is 18 degrees / 32%.
+   *
+   * `drive: 'awd'` is the single biggest lever and the reason a real truck climbs: it puts the whole
+   * weight under the driven wheels instead of the rear share alone.
+   *
+   * NOTE wheelRadius DIVIDES the drive force, so the bigger tyre a truck should have is paid for in
+   * the ratio rather than given away. Slow on the flat, unstoppable on a hill — which is the trade
+   * the operator asked for. */
+  /* THE SCOOTER. Operator: "Get the old wobbly controls back and give them to a scooter you can
+   * unlock". A 125 cc twist-and-go, and it needs its own tier for the plain reason that it cannot
+   * borrow a car's: at 130 kg it is a twelfth of the Grand Tourer's mass, and mass is what every
+   * force in the solver is divided by.
+   *
+   * `rollPerG: 11.0` is the number that gives it its character, and it is not arbitrary — a real
+   * two-wheeler LEANS INTO a corner rather than rolling away from it, and while this solver has no
+   * lean-steer model, tripling the roll-per-g of the tallest car in the fleet is what makes a
+   * corner look like it is being thrown rather than negotiated. Combined with the restored wobble
+   * in garage.js it is unmistakable from ten metres away.
+   *
+   * `drive: 'rwd'` because that is what a scooter is: engine in the back wheel, nothing at all
+   * driving the front. Low power, low top speed, and a redline it reaches almost immediately. */
+  scooter: {
+    name: 'Scooter',
+    mass: 130,
+    izz: 42,
+    wheelbase: 1.32,
+    /* TRACK 1.0, and a scooter has no track at all — this is an honest accommodation, not a
+     * measurement. A real two-wheeler stays upright by counter-steering, a model this solver does
+     * not have and is not getting for one vehicle; give it the 0.4 m its wheels actually sit at and
+     * the four-wheel roll model tips it onto its roof at the first real corner (measured: 178.9
+     * degrees of roll, upside down, at the end of a single held turn). 1.0 m is the width the roll
+     * model needs to keep it on its wheels while still being much the narrowest thing in the fleet,
+     * so it leans hard and early without falling over. */
+    track: 1.0,
+    cgHeight: 0.45, // still the highest relative to its track, which is what makes it lean so readily
+    weightRear: 0.56,
+    power: 12,
+    peakTorque: 9,
+    redline: 8600,
+    cdA: 0.55,
+    rollPerG: 11.0,
+    topSpeed: 58,
+    zeroTo60: 11.5, // it will not quite get there on the flat, which is exactly right
+    ratios: [3.2, 1.0], // a twist-and-go has no gears; two ratios is the minimum the box accepts
+    finalDrive: 9.5,
+    wheelRadius: 0.28,
+    drive: 'rwd',
+  },
+  truck: {
+    name: 'Truck',
+    mass: 2100,
+    izz: 4200,
+    /* 3.15, not the real F-150's 3.68. A long wheelbase is most of what makes a truck turn badly, and
+     * with the Ford as the STARTER car that stopped being flavour and became a wall: the browser
+     * suite's C3 ("you can stop and turn around") fell to 92 degrees of a required 100 — a new player
+     * literally could not three-point-turn out of a dead end. Still the longest in the fleet by half a
+     * metre, so it corners like a truck; just not like one that cannot be parked. */
+    wheelbase: 3.15,
+    track: 1.72,
+    cgHeight: 0.62,
+    weightRear: 0.42,
+    power: 250,
+    /* 128, not 105. At 105 the truck restarts on a 23.8-degree (44%) slope, which beats the old
+     * starter car's 17.1 degrees but LOSES to the sports tier's 26.7 — and the operator asked for the
+     * truck to be the best climber in the game, not merely better than a shopping car. 128 puts it at
+     * 29.7 degrees / 57% grade, clear of everything a player will meet. Held under ~130 deliberately:
+     * past that it climbs anything at all up to where grip fades, and a truck that cannot be stopped
+     * by a hill is as dull as one that cannot climb. */
+    peakTorque: 128,
+    redline: 5200,
+    cdA: 1.35,
+    rollPerG: 4.6,
+    /* THE TURN-AROUND IS A SPEED PROBLEM, not a steering one. `minRadius` (7 m) is global, so the
+     * truck's turning circle is the same as everyone's — but yaw rate is v/R, so a car that is slow
+     * off the line simply sweeps less arc in the same seconds, and the browser suite's C3 measures
+     * exactly that. 9.5 s to 60 was also just wrong for the vehicle: a real F-150 does it in about
+     * 6.5. Faster off the line, still the lowest top speed in the fleet. */
+    topSpeed: 78,
+    zeroTo60: 6.8,
+    ratios: [5.2, 3.1, 2.0, 1.42, 1.05, 0.84],
+    finalDrive: 12.5,
+    wheelRadius: 0.40,
+    drive: 'awd',
+  },
+  /* ── THE RAID TIER — the Warthog ──────────────────────────────────────────────
+   *
+   * Operator: "Let's make it a Jeep with big wheels. Not like in the traditional Jeep, but more like
+   * the original Warthog. Like a big off-roading machine. Big springs. Shock absorption."
+   *
+   * The Rally used to be `tier: 'sports'` — the same tier as the Coupe — wearing the Quaternius
+   * SportsCar mesh, which is why his other sentence was "In fact, they look the same as well". It
+   * now has a tier of its own. Based on `truck` above, because a truck is the nearest thing in the
+   * fleet to a two-and-a-quarter-tonne off-roader, with four deliberate departures:
+   *
+   * 1. `track: 1.92` against the truck's 1.72 — the WIDEST in the fleet. This is the single most
+   *    important number here and it is doing a specific job. Read it against `cgHeight`:
+   *        Warthog  1.92 / 0.58 = 3.31
+   *        Truck    1.72 / 0.62 = 2.77
+   *    So the Warthog is a TALL vehicle that is nonetheless HARDER to tip than the pickup, because
+   *    the wheels are further apart than the centre of mass is high. That combination is the whole
+   *    design. Research on the Halo CE Warthog is unanimous that players remember it leaning
+   *    enormously, flying, and rolling — but CE also had no auto-recovery, and being parked on your
+   *    roof is not cozy. So: the lean is real and visible (`rollPerG` below), and the flip is not.
+   *
+   * 2. `rollPerG: 6.5`, the largest number in the fleet by 40% (the truck is 4.6, the sports car
+   *    1.7). This is the visible body lean per g of cornering. Big soft springs and a high body ARE
+   *    lean — a car on 0.42 m of travel that stayed flat would read as a bug. Paired with (1) this
+   *    is "leans like a boat, does not go over", which is the fun version of a Warthog.
+   *
+   * 3. `wheelRadius: 0.58` against the truck's 0.40 and the sports car's 0.35. The wheels are the
+   *    silhouette — the mesh (tools/make-warthog.mjs) is built at 0.60 m and scales with the body,
+   *    and this is the physics agreeing with what is drawn. It also raises the gearing at the
+   *    contact patch, which is why the ratios below are shorter than the truck's.
+   *
+   * 4. `topSpeed: 84`, a little above the truck's 78 and less than half the sports car's. It is not
+   *    a fast car and is not meant to be; it is the car that goes where the road stops. The
+   *    first-gear ratio is the longest crawler in the fleet so it out-climbs the pickup — see the
+   *    gt tier's own climb-gate note for why first gear alone is the lever that sets climbing. */
+  raid: {
+    name: 'Off-Road Raider',
+    mass: 2250,
+    izz: 3400,
+    wheelbase: 2.95,
+    track: 1.92,
+    cgHeight: 0.58,
+    weightRear: 0.48,
+    power: 240,
+    peakTorque: 150,
+    redline: 5400,
+    cdA: 1.45, // a brick with a roll cage, not a truck cab — more drag than the pickup
+    rollPerG: 6.5,
+    topSpeed: 84,
+    zeroTo60: 7.4,
+    ratios: [5.8, 3.25, 2.05, 1.45, 1.06, 0.85],
+    finalDrive: 9.6, // shorter than the truck's 12.5 because the 0.58 m wheel is doing that work
+    wheelRadius: 0.58,
+    drive: 'awd',
+  },
 };
 
 /* ── tyres ───────────────────────────────────────────────────────────────
@@ -334,6 +485,12 @@ export const BRAKE = {
  * taper over the last `taperBand` m/s, the exact technique the forward `vMax` governor in
  * vehicle.js already uses, so reverse tops out the same honest way forward top speed does. */
 export const REVERSE = {
+  /** Newtons of push per unit of brake pedal, and the scale applied after. Lifted out of a literal
+   *  in vehicle.js so reverse is tunable like every other part of the drivetrain. Raised from an
+   *  effective 1300 N because 0-20 km/h took 7.6 s against 5.4 s for 0-60 FORWARD — see the note at
+   *  the use site. The top speed is set by `maxSpeed`/`taperBand` below and is untouched. */
+  force: 5400,
+  scale: 0.5,
   maxSpeed: 8, // m/s, ~29 km/h — a real reverse gear, not a sprint
   taperBand: 3, // m/s over which the force eases out approaching maxSpeed
   // How close to a standstill the car must be, moving FORWARDS, before holding the brake
@@ -486,6 +643,38 @@ export const PRESETS = {
   cruise: { counterSteer: 0.95, stability: 0.35, tcs: 0.4, abs: 0.8, autoGears: true, lockFloor: (10 * Math.PI) / 180, brakeMul: 1.0, airborne: 1.0 },
   sport: { counterSteer: 0.7, stability: 0.2, tcs: 0.2, abs: 0.6, autoGears: true, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
   off: { counterSteer: 0.3, stability: 0.05, tcs: 0.0, abs: 0.3, autoGears: true, lockFloor: STEER.minAngle, brakeMul: 1.0, airborne: 1.0 },
+  /* ── RAID — the Warthog's own control set ─────────────────────────────────────
+   *
+   * Operator: "They need to have different control sets." The Rally and the Coupe both sat on
+   * `sport`, so a rung of its own is the literal answer to the literal complaint. Every number here
+   * is set against what is actually recorded about the original Halo Warthog, because he asked for
+   * that too: "Look up what people said about its control set."
+   *
+   * `lockFloor: 9°` — the big one. Every other car in this game tapers to `STEER.minAngle` (2.8°)
+   *     at speed, so at 130 km/h there is almost no wheel left. Halo CE did not do that: Bungie
+   *     designer Jaime Griesemer said linking turn rate to speed was something "we implemented in
+   *     Halo 2", and that it "made the Warthog easier to control at top speed". CE therefore had a
+   *     constant turn rate, which is the skittish, over-eager feel people remember. 9° is the middle
+   *     of that argument — the Warthog keeps real steering authority at speed where the road cars
+   *     have none, without going fully constant, because players who played CE afterwards also
+   *     called it janky and uncontrollable, and this is a cozy game.
+   *
+   * `tcs: 0.05`, `stability: 0.12`, `counterSteer: 0.5` — CE players describe the hog as "a giant
+   *     chunk of styrofoam, with blocks of ice for wheels", and a Bungie.net thread on the original
+   *     Xbox build describes "somewhat uncontrollable fishtailing" that "required more skill" before
+   *     later games damped it out. So the aids come down hard — but NOT to zero. This file's own
+   *     design rule is that a slide must be readable before it starts and catchable after, and
+   *     `hardcore` (everything at zero) is the rung that exists for people who want it gone.
+   *
+   * `airborne: 0.35` — vehicle.js scales its anti-air gravity assist by this, so most of the assist
+   *     comes off and a jump stays long and floaty. Same Bungie thread on CE hogs meeting an
+   *     explosion: "air born. Big air. Flip and rolls." The jumps this game is getting are meant to
+   *     feel like that, not like a car falling off a kerb.
+   *
+   * `autoGears: true` — never false. This file already carries the scar: `autoGears: false` with no
+   *     manual shift keys bound leaves the car stuck in first for ever, which is what happened to
+   *     the Drift preset on the first live build. */
+  raid: { counterSteer: 0.5, stability: 0.12, tcs: 0.05, abs: 0.35, autoGears: true, lockFloor: (9 * Math.PI) / 180, brakeMul: 0.95, airborne: 0.35 },
   hardcore: { counterSteer: 0.0, stability: 0.0, tcs: 0.0, abs: 0.0, autoGears: false, lockFloor: STEER.minAngle, brakeMul: 0.82, airborne: 0.0 },
 };
 

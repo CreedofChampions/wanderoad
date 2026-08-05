@@ -284,6 +284,7 @@ export class Fuel {
     start = 1.0,
     mercyKey = MERCY_KEY,
     carId = 'default',
+    onRescue = null,
   } = {}) {
     this.findStation = findStation;
     this.collectCans = collectCans;
@@ -291,6 +292,9 @@ export class Fuel {
     this.resetToSpawn = resetToSpawn;
     this.wallet = wallet;
     this.say = say || (() => {});
+    /* Called when a mercy can is handed over, so something can be SHOWN rather than only said.
+     * See render/helper.js. Optional by design — the fuel model must not depend on a renderer. */
+    this.onRescue = onRescue;
     /* Car identity FIRST: capacity is a getter off this car's own can count, and the starting
      * tank is a fraction OF that capacity, so both must exist before seconds is set. */
     this._carId = carId;
@@ -686,6 +690,11 @@ export class Fuel {
         const scarcity = mercyScarcityMul(Math.hypot(car.x, car.z));
         this.seconds = Math.min(this.capacity, this.capacity * RESCUE_FRACTION * scarcity);
         this.stats.rescues++;
+        /* SOMEBODY COMES AND GIVES IT TO YOU. Operator: "the cloud camera guy from mario --
+         * something cute like that should come down and give you the extra gass when you run out
+         * (same thing just visual)." Purely a hook: the refill above and the line below are
+         * unchanged, and a caller that supplies no `onRescue` simply gets no visitor. */
+        this.onRescue?.();
         this._clearDry();
         this.power = 0.35; // damps back up to 1 over the next second
         /* SPELL THE RULE OUT, every single time. Operator: "You need to explain the 3 gas can

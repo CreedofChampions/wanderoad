@@ -645,26 +645,122 @@ void main(){
 }
 `;
 
+/* ── the shader, in pieces the style chooser can reuse ─────────────────────────
+ * WATER_FS itself stays module-private and should: nothing in the game has any business
+ * assembling it, and `node tools/diag-watershader.mjs` deliberately reads it out of this
+ * FILE rather than importing it, for exactly that reason.
+ *
+ * What IS exported is the small set of things a SECOND water surface needs in order to sit
+ * in the same world as this one — the ripple axis, the vertex shader, and the chunk order a
+ * water fragment shader must be assembled in. src/render/waterStyles.js builds six
+ * alternative surfaces out of them (the operator: "make seven different water types that I
+ * can stick in-game by just clicking a button on the menu"), and the seventh of the seven is
+ * this file, unchanged, reached through defaultWaterShaders() below.
+ *
+ * Handing those three functions out rather than the shader source keeps the knowledge that
+ * actually bites — which GL chunks, in which order — in one place. Get the order wrong and
+ * you get a shader that fails to compile, which in this project means an invisible ocean and
+ * no error anyone will see.
+ */
+
+/**
+ * The world's ripple axis: a fixed heading, seeded per world, that every water surface
+ * anchors its frame to. See the long note above rippleFrame() in WATER_FS for why this is a
+ * baked constant and not an interpolated per-fragment flow direction.
+ */
+export function waterRippleAxis(seed) {
+  const a = (hash2i(0x2ca9, 0x11de, seed >>> 0) / 4294967296) * TAU;
+  return { x: Math.cos(a), z: Math.sin(a) };
+}
+
+/**
+ * The vertex shader every NON-DISPLACING water surface uses. It only moves the chunk plane
+ * into world space and hands the fragment shader the four things it measured at adopt time
+ * (depth, flow, speed, openness), so a style that just wants to paint differently needs
+ * nothing of its own here. A style that displaces geometry — waterStyles.js's swell — writes
+ * its own, and must declare the same four `out`s or the fragment shader will not link.
+ */
+export function waterVertexShader() {
+  return vertHead(WATER_VS);
+}
+
+/**
+ * fragHead() with exactly the GL chunk list a water fragment shader needs, in the order the
+ * pen assembled them. The cloud-shadow projection is built here rather than by the caller
+ * because it MUST match the terrain's (see CLOUD_SPAN/CLOUD_DECK above) — water in a lake
+ * sitting in a different cloud's shadow from the shore beside it is a bug you notice
+ * instantly and take an afternoon to find.
+ */
+export function waterFragShader(body) {
+  const cloud = glCloudField({ cshSpan: CLOUD_SPAN, cloudDeck: CLOUD_DECK });
+  return fragHead(GL_HASH, GL_NOISE, GL_SKY, cloud, GL_SHADOW, GL_LIGHT, body);
+}
+
+/**
+ * The shipped surface's two shader sources. createWaterMaterial() below builds its material
+ * from exactly this, so a style chooser that re-applies "the original" produces strings that
+ * are byte-identical to the ones already on the material — which is what lets it skip the
+ * recompile instead of pointlessly rebuilding the program at boot.
+ */
+export function defaultWaterShaders(seed) {
+  return {
+    vertexShader: waterVertexShader(),
+    fragmentShader: waterFragShader(WATER_FS(waterRippleAxis(seed))),
+  };
+}
+
+/* ── live materials, so a style switch needs no page reload ────────────────────
+ * The operator's ask was "by just clicking a button on the menu", and a button that reloads
+ * the page is not that — the Grass buttons in the Garage already reload, and they reload
+ * because rebuilding four instanced meshes mid-frame is genuinely not safe. Water is not in
+ * that position: there is one material, every plane in the world shares it, and swapping the
+ * shader source on a RawShaderMaterial and setting `needsUpdate` makes three build a new
+ * program on the next draw. So the switch is live, and the only thing missing is a way for a
+ * module that is not main.js to FIND the material.
+ *
+ * That is all this pair is. `liveWaterMaterials` is every water material currently in a
+ * scene; `onWaterMaterial` also fires for a material created LATER, which is the case that
+ * matters at boot — the player's chosen style is read from localStorage before the world
+ * exists, and without this hook their sea would come back painted every time they loaded the
+ * game until they opened the Garage again.
+ */
+export const liveWaterMaterials = new Set();
+const _materialHooks = new Set();
+
+/**
+ * Call `fn(material)` for every water material that exists now and for every one created
+ * afterwards. Returns an unsubscribe function.
+ */
+export function onWaterMaterial(fn) {
+  _materialHooks.add(fn);
+  for (const mat of liveWaterMaterials) fn(mat);
+  return () => _materialHooks.delete(fn);
+}
+
 /**
  * One material for every body of water in the world. The ripple axis is baked in as a GLSL
  * constant rather than passed as a uniform: it never changes for a given world, and a
  * constant lets the compiler fold the whole frame rotation.
  */
 function createWaterMaterial(seed) {
-  const a = (hash2i(0x2ca9, 0x11de, seed) / 4294967296) * TAU;
-  const axis = { x: Math.cos(a), z: Math.sin(a) };
-  const cloud = glCloudField({ cshSpan: CLOUD_SPAN, cloudDeck: CLOUD_DECK });
-  return new RawShaderMaterial({
+  const { vertexShader, fragmentShader } = defaultWaterShaders(seed);
+  const mat = new RawShaderMaterial({
     glslVersion: '300 es',
     uniforms: sharedUniforms(),
-    vertexShader: vertHead(WATER_VS),
-    fragmentShader: fragHead(GL_HASH, GL_NOISE, GL_SKY, cloud, GL_SHADOW, GL_LIGHT, WATER_FS(axis)),
+    vertexShader,
+    fragmentShader,
     // Opaque: alpha carries the fog amount for the post chain, exactly as the terrain does.
     transparent: false,
     // A camera that dips below the surface must still see it, and a flat grid costs nothing
     // to draw twice-sided.
     side: DoubleSide,
   });
+  /* The seed rides on the material because a style is a SHADER, and every water shader in
+   * this world has to bake the same seeded ripple axis or two styles would disagree about
+   * which way the world's waves run. waterStyles.js is handed a material, not a world, so
+   * this is where it reads the seed from. */
+  mat.userData.waterSeed = seed >>> 0;
+  return mat;
 }
 
 /* Index buffers depend only on the grid resolution, of which there are two in the whole
@@ -707,6 +803,11 @@ export class Water {
     this.seed = seed >>> 0;
     this.scene = scene;
     this.material = createWaterMaterial(this.seed);
+    /* Publish it, and tell anyone already listening. See the note above onWaterMaterial():
+     * this is what makes the Garage's water buttons work without a page reload, and what
+     * makes a style chosen in a PREVIOUS session survive into this one. */
+    liveWaterMaterials.add(this.material);
+    for (const fn of _materialHooks) fn(this.material);
 
     this.group = new Object3D();
     this.group.name = 'water';
@@ -795,6 +896,7 @@ export class Water {
     }
     this.planes.clear();
     this.scene.remove(this.group);
+    liveWaterMaterials.delete(this.material);
     this.material.dispose();
     this.stats.live = 0;
     this.stats.visible = 0;
@@ -895,11 +997,21 @@ export class Water {
     g.setAttribute('wdat', new BufferAttribute(dat, 4));
     g.setAttribute('wopen', new BufferAttribute(open, 1));
     g.setIndex(new BufferAttribute(planeIndex(n), 1));
-    // By hand: the plane is flat and chunk-sized, so walking every vertex to discover that
-    // would be pure waste.
+    /* By hand: the plane is flat and chunk-sized, so walking every vertex to discover that
+     * would be pure waste.
+     *
+     * The +2 m is for the one water style that MOVES these vertices. rec.size*0.7072 is the
+     * exact half-diagonal of a flat quad and nothing more, so a surface that displaces its
+     * geometry — waterStyles.js's swell, whose four Gerstner components sum to about 1.13 m
+     * of crest plus a little horizontal sharpening — would poke outside its own bounding
+     * sphere and could be culled a frame early at the edge of the screen. Two metres of slack
+     * costs a negligible amount of extra draw at the frustum edge and makes the sphere true
+     * for every style. It is deliberately a fixed constant rather than a per-style number:
+     * the geometry is built once at chunk-adopt time and the style can change afterwards,
+     * so the bound has to be right for all seven at once. */
     g.boundingSphere = new Sphere(
       new Vector3(rec.size * 0.5, 0, rec.size * 0.5),
-      rec.size * 0.7072
+      rec.size * 0.7072 + 2
     );
     return g;
   }

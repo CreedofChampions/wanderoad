@@ -24,7 +24,7 @@
 
 import { Mesh, Object3D } from 'three';
 import { PB, pcyl, ptri, finishPainted, createPaintedMaterial, MAT, LC, mixc } from './painted.js';
-import { sunsInBox, gemsForTile, GEM_TILE } from '../world/loot.js';
+import { sunsInBox, gemsForTile, GEM_TILE, cratesForTile, CRATE_TILE, CRATE_RADIUS } from '../world/loot.js';
 import { hash3i, rng, TAU } from '../core/math.js';
 
 /* ── sun window (props.js tile-walk idiom) ──────────────────────────────────
@@ -40,6 +40,11 @@ const SUN_TILE_BUDGET = 2;
 
 /* ── gem window (ships.js lattice idiom) ─────────────────────────────────── */
 export const GEM_RANGE = 1200;
+/** How far out crates are built. Wide, because the whole point of a crate is that you SEE one out in
+ *  open country and decide to go and get it — a pickup you only discover by driving over it is not a
+ *  reason to leave the road. */
+export const CRATE_RANGE = 1100;
+const CRATE_UNLOAD_MARGIN = CRATE_TILE * 1.5;
 const GEM_RESCAN_INTERVAL = 0.5;
 const GEM_UNLOAD_MARGIN = GEM_TILE * 1.5;
 
@@ -153,6 +158,44 @@ function buildGem(M) {
   }
 }
 
+/* A SALVAGE CRATE. Operator: "there should be special off-road goodies that you can get."
+ *
+ * A strapped supply box, and the shape is doing a job rather than decorating one. A crate is found
+ * in OPEN COUNTRY, at distance, from a moving car — so it has to read against grass and scrub from
+ * a long way off, which a sun (bright, on tarmac, always ahead of you) never has to do. Hence: a
+ * chunky solid box rather than a thin panel, a pale timber body against the greens, and two dark
+ * straps across it so it reads as a made object at the size where the whole thing is twelve pixels.
+ *
+ * MAT.EMIT on the straps for the same reason the sun uses it — unlit by the sun angle, so a crate in
+ * the shadow of a hill is still a crate rather than a grey lump. */
+const CRATE_S = 0.62;
+const CRATE_BODY = LC.tan ? LC.tan : 0xbe9a63;
+const CRATE_STRAP = 0x4a3a26;
+
+function crateFace(M, cx, cy, cz, hx, hy, hz, col, mat) {
+  const p = (sx, sy, sz) => [cx + sx * hx, cy + sy * hy, cz + sz * hz];
+  const quad = (a, b, c, d) => {
+    ptri(M, a, b, c, col, mat);
+    ptri(M, a, c, d, col, mat);
+  };
+  quad(p(1, -1, -1), p(1, 1, -1), p(1, 1, 1), p(1, -1, 1));
+  quad(p(-1, -1, 1), p(-1, 1, 1), p(-1, 1, -1), p(-1, -1, -1));
+  quad(p(-1, 1, -1), p(-1, 1, 1), p(1, 1, 1), p(1, 1, -1));
+  quad(p(-1, -1, 1), p(-1, -1, -1), p(1, -1, -1), p(1, -1, 1));
+  quad(p(-1, -1, 1), p(1, -1, 1), p(1, 1, 1), p(-1, 1, 1));
+  quad(p(1, -1, -1), p(-1, -1, -1), p(-1, 1, -1), p(1, 1, -1));
+}
+
+function buildCrate(M) {
+  const h = CRATE_S;
+  crateFace(M, 0, 0, 0, h, h * 0.82, h, CRATE_BODY, MAT.MATTE);
+  // two straps, stood a hair proud so they never z-fight the body they sit on
+  const t = h * 0.13;
+  const o = h * 1.008;
+  crateFace(M, 0, 0, 0, o, t, o * 1.002, CRATE_STRAP, MAT.EMIT);
+  crateFace(M, 0, 0, 0, t, h * 0.83 * 1.008, o * 1.004, CRATE_STRAP, MAT.EMIT);
+}
+
 /**
  * Suns along the road and gems on open water — placement (world/loot.js), rendering and
  * pickup all in one class, the same shape src/render/ships.js and src/render/props.js's own
@@ -188,8 +231,16 @@ export class Loot {
     this._pendingGems = 0;
     this._gemRescanT = 0;
 
+    /* Crates use the gem lattice's exact shape — "gi,gj" -> null (evaluated, nothing there) or a
+     * record — because they ARE the gem lattice with its gates inverted (world/loot.js). Keeping the
+     * two structures identical is what lets `_rescanCrates` be a readable copy of `_rescanGems`
+     * rather than a second, subtly different windowing scheme to keep in step. */
+    this.crateTiles = new Map();
+    this._collectedCrates = new Set();
+    this._pendingCrates = 0;
+
     this._t = 0;
-    this.stats = { suns: 0, sunTiles: 0, gems: 0, gemTiles: 0 };
+    this.stats = { suns: 0, sunTiles: 0, gems: 0, gemTiles: 0, crates: 0, crateTiles: 0 };
   }
 
   /**
@@ -209,6 +260,10 @@ export class Loot {
     if (this._gemRescanT <= 0) {
       this._gemRescanT = GEM_RESCAN_INTERVAL;
       this._rescanGems(car.x, car.z);
+      /* On the same throttled beat as the gems, for the same reason: a lattice rescan walks a few
+       * hundred cells and there is no need to do it every frame when the window moves at driving
+       * speed. Sharing the timer also keeps the two from ever landing on the same frame twice. */
+      this._rescanCrates(car.x, car.z);
     }
 
     this._animate(car, boatActive);
@@ -223,6 +278,14 @@ export class Loot {
   }
 
   /** Gems collected since the last call, as a count (0 if none). */
+  /** Crates picked up since the last call. Same contract as drainSuns/drainGems: the renderer owns
+   *  the pickup because it owns the mesh, and main.js owns what a pickup is WORTH. */
+  drainCrates() {
+    const n = this._pendingCrates;
+    this._pendingCrates = 0;
+    return n;
+  }
+
   drainGems() {
     const n = this._pendingGems;
     this._pendingGems = 0;
@@ -359,6 +422,53 @@ export class Loot {
     this._recount();
   }
 
+  /* ── crates ────────────────────────────────────────────────────────────── */
+
+  /* A readable copy of `_rescanGems` above, because the placement it windows is a readable copy of
+   * `gemsForTile`. Same lattice, same "null means evaluated and empty" convention, same unload
+   * margin so a crate at the edge of the window does not flicker as you drive along it. */
+  _rescanCrates(camX, camZ) {
+    const gi0 = Math.floor((camX - CRATE_RANGE) / CRATE_TILE);
+    const gi1 = Math.floor((camX + CRATE_RANGE) / CRATE_TILE);
+    const gj0 = Math.floor((camZ - CRATE_RANGE) / CRATE_TILE);
+    const gj1 = Math.floor((camZ + CRATE_RANGE) / CRATE_TILE);
+    const want = new Set();
+    for (let gj = gj0; gj <= gj1; gj++) {
+      for (let gi = gi0; gi <= gi1; gi++) {
+        const key = `${gi},${gj}`;
+        want.add(key);
+        if (this.crateTiles.has(key)) continue;
+        const spec = cratesForTile(gi, gj, this.seed);
+        if (!spec || this._collectedCrates.has(spec.id)) {
+          this.crateTiles.set(key, null);
+          continue;
+        }
+        const M = PB();
+        buildCrate(M);
+        const geom = finishPainted(M);
+        const mesh = new Mesh(geom, this.material);
+        mesh.matrixAutoUpdate = false;
+        mesh.frustumCulled = true;
+        this.group.add(mesh);
+        const phase = rng(hash3i(gi, gj, 0x63727432, this.seed))() * TAU;
+        this.crateTiles.set(key, { mesh, x: spec.x, y: spec.y, z: spec.z, phase, id: spec.id });
+      }
+    }
+    for (const [key, rec] of this.crateTiles) {
+      if (want.has(key)) continue;
+      const [gi, gj] = key.split(',').map(Number);
+      const cx = (gi + 0.5) * CRATE_TILE;
+      const cz = (gj + 0.5) * CRATE_TILE;
+      if (Math.abs(cx - camX) < CRATE_RANGE + CRATE_UNLOAD_MARGIN && Math.abs(cz - camZ) < CRATE_RANGE + CRATE_UNLOAD_MARGIN) continue;
+      if (rec) {
+        this.group.remove(rec.mesh);
+        rec.mesh.geometry.dispose();
+      }
+      this.crateTiles.delete(key);
+    }
+    this._recount();
+  }
+
   /* ── per-frame animation and pickup ───────────────────────────────────────
    * One pass each, no allocation: Math.hypot/Math.sin take numbers, mesh.position.set() and
    * mesh.rotation.y writes mutate the existing Object3D, and updateMatrix() is the same manual
@@ -403,6 +513,25 @@ export class Loot {
       g.mesh.scale.setScalar(pulse);
       g.mesh.updateMatrix();
     }
+
+    /* Crates. Collected by DRIVING, with no boat gate and no car gate — the Warthog is the car that
+     * makes reaching them easy, not the car that makes reaching them legal. Anything that can get
+     * out there may have what it finds. */
+    for (const [key, k] of this.crateTiles) {
+      if (!k) continue;
+      const d = Math.hypot(k.x - car.x, k.z - car.z);
+      if (d <= CRATE_RADIUS) {
+        this.group.remove(k.mesh);
+        k.mesh.geometry.dispose();
+        this.crateTiles.set(key, null);
+        this._collectedCrates.add(k.id);
+        this._pendingCrates++;
+        continue;
+      }
+      k.mesh.position.set(k.x, k.y, k.z);
+      k.mesh.rotation.y = k.phase;
+      k.mesh.updateMatrix();
+    }
   }
 
   _recount() {
@@ -412,6 +541,10 @@ export class Loot {
     for (const g of this.gemTiles.values()) if (g) gems++;
     this.stats.gems = gems;
     this.stats.gemTiles = this.gemTiles.size;
+    let crates = 0;
+    for (const k of this.crateTiles.values()) if (k) crates++;
+    this.stats.crates = crates;
+    this.stats.crateTiles = this.crateTiles.size;
   }
 
   dispose() {

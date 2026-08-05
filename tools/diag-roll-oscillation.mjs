@@ -27,6 +27,8 @@
  *   node tools/diag-roll-oscillation.mjs
  */
 import { Vehicle } from '../src/car/vehicle.js';
+import { FLEET, applyCarFeel } from '../src/game/garage.js';
+import { BODY } from '../src/car/tuning.js';
 import { Autopilot } from '../src/car/autopilot.js';
 import { Terrain, findSpawn } from '../src/world/terrain.js';
 import { PHYSICS_DT } from '../src/car/tuning.js';
@@ -37,7 +39,12 @@ const MANUAL_NEUTRAL = { steer: 0, throttle: 0, brake: 0, handbrake: 0 }; // "ha
 /** Drive a real road on the real Autopilot for `secs`, sampling roll every physics step. */
 function driveRoad(seed, spawnPoint, secs) {
   let terr = new Terrain(seed, spawnPoint.x - 420, spawnPoint.z - 420, spawnPoint.x + 420, spawnPoint.z + 420);
-  const car = new Vehicle({ tier: 'sports', terrain: terr, preset: 'sport' });
+  /* The vehicle under test, and its OWN feel applied — applyCarFeel is what writes a car's
+   * body-roll numbers into the shared BODY table, so a run that skips it measures whatever the
+   * last caller left behind rather than the car named on the command line. */
+  const entry = FLEET.find((c) => c.id === CAR) ?? FLEET[0];
+  applyCarFeel(entry);
+  const car = new Vehicle({ tier: entry.tier, terrain: terr, preset: entry.feel.assist === 'off' ? 'off' : 'sport' });
   car.placeAt(spawnPoint.x, spawnPoint.z, spawnPoint.heading);
   const auto = new Autopilot({ cruise: 16 });
   auto.toggle(car); // same call main.js's G key makes
@@ -98,8 +105,18 @@ function analyse(roll, onRoad, settleSecs) {
   return { crossingsPerSec: windowSecs > 0 ? crossings / windowSecs : 0, peakRateDegS: peakRate, peakRollDeg: peakRoll, windowSecs, onRoadFrac: counted / (n - skip) };
 }
 
-console.log('── driving a real road on the real Autopilot, no manual correction ──────');
-const SEED = 20260726;
+/* WHICH VEHICLE. Default stays the car this file was written to defend; `node tools/…mjs scooter`
+ * measures the one that is SUPPOSED to fail the calm bar. */
+const CAR = process.argv[2] || 'sports';
+/* THE SCOOTER IS NOT MEASURED HERE, and it is worth saying why rather than quietly excluding it.
+ * This file drives dead straight on the autopilot, where peak body roll is under 1.2 degrees on
+ * every seed tried — the lean spring is barely excited at all, so the damping it is unlocked for
+ * changes this number by 0.06/s and the reading would be meaningless in both directions. Its
+ * wobble is measured by what the phrase actually describes — swing it, straighten up, and count
+ * how long it keeps swinging — in tools/diag-scooter-wobble.mjs. */
+
+console.log(`── ${CAR}: driving a real road on the real Autopilot, no manual correction ──────`);
+const SEED = Number(process.argv[3]) || 20260726;
 const spawn = findSpawn(SEED);
 const SECS = 35; // this seed's route hits a dead end at ~39s; stop short of the standing tail
 const { car, roll, onRoad } = driveRoad(SEED, spawn, SECS);
@@ -108,9 +125,14 @@ const a = analyse(roll, onRoad, 3);
 console.log(
   `   ${SECS}s drive, ${a.windowSecs.toFixed(1)}s on-road sustained window (${(a.onRoadFrac * 100).toFixed(0)}% of the run stayed on the tarmac), ended at ${car.kph.toFixed(0)} km/h, rolled=${car.rolled}`
 );
+console.log(`   BODY in force: rollZeta ${BODY.rollZeta}  loadTauRoll ${BODY.loadTauRoll}  groundFollowRate ${BODY.groundFollowRate}  rollClamp ${(BODY.rollClamp * 180 / Math.PI).toFixed(1)}°`);
 console.log(`   peak |roll| ${a.peakRollDeg.toFixed(2)}°   peak |roll rate| ${a.peakRateDegS.toFixed(1)} deg/s`);
 console.log(`   ZERO CROSSINGS: ${a.crossingsPerSec.toFixed(2)} / s   (operator's own frame: >2/s sustained = a wobble)`);
 
-const ok = a.crossingsPerSec <= 2.0 && !car.rolled && a.onRoadFrac > 0.5;
-console.log(`\n${ok ? ' PASS' : ' FAIL'}  roll oscillation ${ok ? 'calm' : 'a genuine wobble (or the drive itself failed)'} — ${a.crossingsPerSec.toFixed(2)} crossings/s   want <= 2.0`);
+const drove = !car.rolled && a.onRoadFrac > 0.5;
+const ok = drove && a.crossingsPerSec <= 2.0;
+console.log(
+  `
+${ok ? ' PASS' : ' FAIL'}  ${CAR}: ${a.crossingsPerSec.toFixed(2)} crossings/s   want <= 2.0 (calm)${drove ? '' : '   — THE DRIVE ITSELF FAILED'}`
+);
 process.exitCode = ok ? 0 : 1;

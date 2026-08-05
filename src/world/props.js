@@ -663,27 +663,69 @@ export const STATION_RADIUS = 11;
  * plaque on one car and the purchase of another.
  *
  * The geometry is dictated by what is already on the apron. The canopy posts stand at local
- * z = +4.4 and x = ±5.2; the pumps are at z = +1.0; the kiosk is at z = -4.8 beside the driveway
- * mouth (measured, `node tools/probe-station-frame.mjs`). So z = +5.9 is the one clear strip that
- * keeps a display car clear of every post, and ±8.0 / ±4.0 / 0 spaces five of them 4 m apart across
- * a 19 m apron with a 0.35 m margin at the tightest post.
+ * z = +4.4 and x = ±5.2; the pumps are at z = +1.0; the kiosk is at z = -(AD - 2.2) — "beside
+ * the driveway mouth" was true of the one station `probe-station-frame.mjs` happened to sample
+ * when that was written, not of the layout in general; see the `yaw` fix's own comment above.
+ * z = +5.9 is the one clear strip that keeps a display car clear of every post.
+ *
+ * NOT centred on x = 0 any more. Operator's report, and `tools/diag-apron.mjs`'s "the way in"
+ * check, which this broke and this fixes: x = 0 is the access spur's OWN centreline — the one
+ * straight line every car that ever uses this forecourt is on at some point, on the way in and
+ * on the way out. The original five slots (±8.0, ±4.0, 0.0) put a display car EXACTLY on that
+ * line, and a display car's own collision radius (1.35 m) plus a car's (1.05 m) is 2.4 m — far
+ * more than zero. It went unnoticed for as long as it did because the spur's own doorway edge
+ * was itself wrong (the `yaw` bug), so nothing ever actually arrived at this station dead
+ * straight down its centreline to find out; once the doorway was fixed, `diag-apron.mjs`'s "the
+ * way in" check — which drives from the mouth straight at a point on the open apron, no
+ * steering correction needed if nothing is in the way — hit the centre car at 4.70 m out
+ * instead of reaching to within 3 m, on a station it had passed cleanly (0.03 m) before either
+ * fix landed. A car that curves round it can still get by (see diag-spur-drive.mjs's own
+ * REACHED rate, unaffected either way, because that controller manoeuvres) but "you must already
+ * be steering around an obstacle to leave the road" is not "the road works".
+ *
+ * So the row is FIVE, still, and neighbours are still 3.5 m apart CENTRE to centre (comfortably
+ * over the 2.7 m two display cars need, centre to centre, not to overlap each other), but shifted
+ * so no slot's own collision circle reaches x = 0: the two innermost sit at ±3.0 (a car there
+ * spans -4.35..-1.65 or 1.65..4.35 — clear of the centreline by 1.65 m, against the 2.4 m
+ * combined radius the centreline itself needs only where a car is actually driving over it,
+ * which past the throat it no longer has to). The row is not symmetric about the road's own axis
+ * any more either — four of the five keep the old mirrored pairing (±3.0, ±6.5) and the fifth
+ * sits alone at +10.0, further off-centre than a mirrored slot would put it, so the spacing never
+ * has to crowd two display cars into overlapping to fit five in. Which fleet car actually lands
+ * there is whatever SHOWROOM_CARS[4] is in render/props.js — this module only owns the SLOT, not
+ * the car shown in it. STATION_APRON_HALF_WIDTH moved from 9.5 to 11.5 to give that fifth slot a
+ * home with room to spare (see its own comment) rather than shrink the row back to where two
+ * display cars would overlap.
  *
  * FIVE, not four, because the Ford F150 joined the dealership fleet and bench-props asserts that the
  * row IS the fleet, in order. That check earned its place immediately: adding the truck turned it red
  * on the same commit rather than shipping a forecourt that silently sold a car it did not display.
  *
- * A display car's NOSE overhangs the apron's front edge onto the grass — 2.2 m for the saloons, 2.8 m
- * for the truck. That is deliberate rather than unnoticed: pulling the row back to fit would put it
- * inside the canopy posts, and a forecourt display facing the open field is what a real one looks
- * like. What must stay inside the apron is the row's WIDTH, and bench-props checks that against each
- * car's real half-width rather than against the slot centre.
+ * A display car's NOSE overhangs the apron's front edge onto the grass for the saloons. That is
+ * deliberate rather than unnoticed: pulling the row back to fit would put it inside the canopy
+ * posts, and a forecourt display facing the open field is what a real one looks like. What must
+ * stay inside the apron is the row's WIDTH, and bench-props checks that against each car's real
+ * half-width rather than against the slot centre.
  */
+/* EIGHT SLOTS, because eight cars are for sale. The row was five while the fleet had five to sell;
+ * the 3 August reorder brought the Estate, the Scooter and the Tricycle onto the forecourt and
+ * bench-props caught the shortfall immediately ("there is a slot for every car on show: 5, want 8").
+ * A car with no slot is a car you can buy and never see.
+ *
+ * The extra three go in a SECOND ROW rather than stretching the first one further along the apron:
+ * the existing row already reaches 10 m from the centre, and pushing it to 24 m would run the last
+ * car off the tarmac and out of the plaque's reach. Two rows keep every car inside SHOWROOM_REACH
+ * of somewhere a player can stand. */
 export const SHOWROOM_SLOTS = [
-  { dx: -8.0, dz: 5.9 },
-  { dx: -4.0, dz: 5.9 },
-  { dx: 0.0, dz: 5.9 },
-  { dx: 4.0, dz: 5.9 },
-  { dx: 8.0, dz: 5.9 },
+  { dx: -6.5, dz: 5.9 },
+  { dx: -3.0, dz: 5.9 },
+  { dx: 3.0, dz: 5.9 },
+  { dx: 6.5, dz: 5.9 },
+  { dx: 10.0, dz: 5.9 },
+  { dx: -6.5, dz: 11.4 },
+  { dx: -3.0, dz: 11.4 },
+  { dx: 3.0, dz: 11.4 },
+  { dx: 6.5, dz: 11.4 },
 ];
 
 /** How close you have to be to a display car for it to be the one you are looking at, in metres. */
@@ -708,8 +750,28 @@ export function showroomSpots(st) {
   }));
 }
 
-export const STATION_APRON_HALF_WIDTH = 9.5;
-export const STATION_APRON_HALF_DEPTH = 7.0;
+/* 11.5, not 9.5 — see the SHOWROOM_SLOTS comment above for why: the row had to move off the
+ * access spur's own centreline, and the fifth car — the one that could not stay in a mirrored
+ * pair without crowding two display cars into overlapping each other, sitting alone at dx +10.0
+ * — needs the extra 2.0 m of apron to sit on rather than nose off the side onto the grass
+ * sideways (checked, not assumed — bench-props.mjs's "the row stays on the tarmac across its
+ * width"). */
+export const STATION_APRON_HALF_WIDTH = 11.5;
+/* 9.0, not 7.0 — see the SHOWROOM_SLOTS comment below for the measurement that forced this.
+ * The showroom row was placed by clearing the canopy alone, because the access spur's own
+ * doorway edge was not correctly known at the time (the `yaw` bug above, fixed the same round
+ * this landed) — SHOWROOM_SLOTS' dz = 5.9 sat only 0.7 m short of the doorway once the doorway
+ * was correctly identified, which is inside a display car's own collision radius plus a car's
+ * (2.4 m combined). Deepening the apron by 2.0 m moves the doorway (which the spur reaches at
+ * AD - 0.4) two metres further from the fixed row without moving the row, and without moving
+ * the canopy or pumps either — both of those are placed at ABSOLUTE local offsets in
+ * render/props.js, not relative to AD, so this constant is the one lever that opens the gap
+ * without touching that file. MEASURED (`node tools/diag-spur-drive.mjs`, corridor-clearance
+ * pass): every one of 22 sampled dealerships had its entrance blocked by the display row at
+ * AD = 7.0; 0 of 22 do at AD = 9.0, with the row's own clearance from the canopy unchanged
+ * (still the 0.35 m tools/bench-props.mjs already measured, since neither the row nor the
+ * canopy moved). */
+export const STATION_APRON_HALF_DEPTH = 9.0;
 
 let _land = null;
 let _water = null;
@@ -901,8 +963,72 @@ function stationForEdge(e, seed, stats = null) {
     nx: rx,
     nz: rz,
     width: e.width,
-    // Faces the road across the apron.
-    yaw: Math.atan2(-rx, -rz),
+    /* ── THE ACCESS SPUR ACTUALLY REACHES THE FORECOURT'S OWN DOORWAY ─────────────
+     * Operator, twice, "the road up to the gas station still doesn't work at all" — reported,
+     * marked fixed twice (the access spur was built at all, then its VERTICAL seating against
+     * real terrain was fixed, tools/diag-spur.mjs), and still broken, because neither previous
+     * round asked whether the spur's own end lands where render/props.js's collision code
+     * (stationSolids) leaves a gap in the forecourt's kerb wall. It does not, for most
+     * stations, and this is why.
+     *
+     * `stationSpur()` computes the spur's forecourt-side end directly from the road-to-station
+     * normal (nx, nz) — pure vector arithmetic, no `yaw` involved. `stationSolids` and
+     * `buildStation` place every fixed local feature (the kiosk, the canopy, the doorway gap
+     * left open in the kerb wall at local z = +STATION_APRON_HALF_DEPTH) by ROTATING those
+     * local offsets through `yaw`. For the spur's end to land inside that doorway gap, `yaw`
+     * has to be the ONE angle for which local +z is exactly the direction FROM the station
+     * BACK to the road, i.e. -n. `Math.atan2(-rx, -rz)` is not that angle: it satisfies
+     * sin(yaw) = -nx and cos(yaw) = -nz, whereas local +z under the rotation both this and
+     * `buildStation` use — worldX = x + lx*cos(yaw) - lz*sin(yaw), worldZ = z + lx*sin(yaw) +
+     * lz*cos(yaw) — points in world direction (-sin(yaw), cos(yaw)), which equals -n only when
+     * nx = -sin(yaw) AND nz = cos(yaw) — the SECOND condition the old formula gets backwards
+     * (it has cos(yaw) = -nz, not +nz).
+     *
+     * MEASURED (`node tools/probe-station-frame.mjs` run across every station in a 9 km box,
+     * seed 20260726, 130 stations): the spur's own end, converted into the station's local
+     * frame, should sit at a FIXED point near (0, +STATION_APRON_HALF_DEPTH) — the doorway —
+     * for every station, since the geometry (an 8.9 m drive straight off the road's own normal)
+     * never changes. With the old formula it does not: local z ranged over the entire interval
+     * [-6.6, +6.6] depending on which way the host road happened to be heading at that
+     * station — only 32 of 130 (25%) landed near the doorway edge (+AD) the kerb wall actually
+     * leaves open; 37 (28%) landed near the OPPOSITE edge, which is walled solid with no gap at
+     * all; the remaining 61 (47%) landed on a SIDE edge, which has no doorway concept at all.
+     * `Math.atan2(rx, -rz)` is the formula that satisfies both conditions above; re-run with it,
+     * every one of the 130 stations lands within 1e-12 m of local (0, +6.6) — a fixed point,
+     * 0.4 m inside the doorway gap's own edge, for every station regardless of road heading.
+     *
+     * `tools/diag-spur-drive.mjs` (new) drives a real Vehicle in from a real approach along the
+     * road, through real Solids collision, for every station in a real sample rather than the
+     * first lucky one — see that file's own header for why bench-props.mjs's existing
+     * "hitbox stops the car" check could not have caught this (a kerb wall dead across the
+     * entrance carries the same `kind: 'station'` tag the check accepts as success). Its own
+     * pure-pursuit controller re-aims every frame, which turns out to make it a WEAKER witness
+     * to this specific bug than the geometry above: a controller that keeps re-steering at the
+     * pumps will often work its way round a wall that happens to be nearby rather than dead
+     * across the path, so its reach rate moves less than the geometry does (90% before this fix,
+     * 97% after, across four seeds — see that tool's own run). The number that isolates the bug
+     * cleanly is a static one: does anything solid stand within a car's width of the exact point
+     * the spur's own tarmac ends? Measured across every station within 9 km of the origin on four
+     * seeds, real tiles baked, real Solids registered: 70 of 81 (86%) had something — the
+     * misaligned kerb wall itself, or a forecourt hitbox that happened to fall near wherever the
+     * scrambled entrance landed — inside that band before this round of fixes; 0 of 81 do after
+     * (this fix, plus the two below it that this fix exposed a further layer of).
+     *
+     * (Both figures are reproducible from a clean checkout — the drive numbers from
+     * `node tools/diag-spur-drive.mjs`, the corridor figures were measured with a one-off script
+     * built on the same `stationsInBox`/`Props`/`Solids` calls diag-spur-drive.mjs already makes,
+     * sampling a car-width band across the spur's own arrival point and asking Solids whether
+     * anything registered there is solid and within collide.js's own height gate.)
+     *
+     * This changes where every dealership's kiosk (built at local z = -(AD - 2.2), "beside the
+     * driveway mouth" per the SHOWROOM_SLOTS note above — that note was true only for whichever
+     * one station `probe-station-frame.mjs` happened to sample first, not in general) ends up
+     * relative to the road: it is now consistently at the BACK of the forecourt rather than
+     * "sometimes at the front, sometimes off to one side, sometimes behind a wall the driveway
+     * cannot reach". A kiosk at the back of a forecourt, reached by driving past the canopy and
+     * pumps first, is a real petrol station layout. A forecourt you cannot drive into is not a
+     * station at all, which is the bug this fixes. */
+    yaw: Math.atan2(rx, -rz),
     along: Math.atan2(best.tx, best.tz),
     side: sideSign,
     grade: best.grade,
@@ -975,6 +1101,19 @@ export { stationForEdge };
  * can still call this directly to PROVE the spur reaches both ends geometrically, which is
  * the reason this is its own exported function rather than inlined into the renderer.
  */
+/* THE SHOWROOM'S OWN DRIVEWAY, in the same two-point form the station's spur uses so the renderer
+ * can build both with one function. The mouth sits at the edge of the host road's tarmac; the far
+ * end tucks just inside the hall's frontage so the paving runs under the doorway rather than
+ * stopping short of it and leaving a step. */
+export function showroomSpur(h) {
+  const halfW = (h.width ?? 7) * 0.5;
+  const mouthX = h.roadX + h.nx * halfW;
+  const mouthZ = h.roadZ + h.nz * halfW;
+  const doorX = h.x - h.nx * (SHOWROOM_HALF_D - 0.6);
+  const doorZ = h.z - h.nz * (SHOWROOM_HALF_D - 0.6);
+  return { mouthX, mouthZ, apronX: doorX, apronZ: doorZ };
+}
+
 export function stationSpur(st) {
   const halfW = (st.width ?? 0) * 0.5;
   const mouthX = st.roadX + st.nx * halfW;
@@ -1389,7 +1528,42 @@ const SALT_SHOWROOM = 0x5b0a;
  *
  * The result is pure in (gi, gj, seed) once a probe has been applied, so it caches exactly. Keyed
  * with the probe's presence because a probe-less answer is the unchecked candidate. */
+/* COULD A HALL BE NEAR THIS BOX — answered in arithmetic, with nothing resolved.
+ *
+ * A showroom's candidate point is a pure hash of its cell (see `_showroomForCell` just below); the
+ * road snap can then move it by at most nearestRoadPoint's own search radius, and the setback by
+ * SHOWROOM_SETBACK. So two hashes per candidate are enough to rule a region out entirely, and only
+ * a region that survives this ever pays for `showroomsInBox`.
+ *
+ * It lives HERE rather than in the caller because every constant it needs is here, and a copy of
+ * these hashes anywhere else is a copy that will drift the first time a cell size changes. Used by
+ * world/scatter.js, where calling the real query from every terrain node put the worst props frame
+ * at 13.89 ms against a bar of 12. */
+export function showroomMaybeNear(x0, z0, x1, z1, seed, reach = 0) {
+  const R = 800 + SHOWROOM_SETBACK + reach; // nearestRoadPoint's radius, the setback, the caller's own
+  const g0 = Math.floor((x0 - R) / SHOWROOM_CELL);
+  const g1 = Math.floor((x1 + R) / SHOWROOM_CELL);
+  const h0 = Math.floor((z0 - R) / SHOWROOM_CELL);
+  const h1 = Math.floor((z1 + R) / SHOWROOM_CELL);
+  for (let gj = h0; gj <= h1; gj++)
+    for (let gi = g0; gi <= g1; gi++)
+      for (let k = 0; k < SHOWROOM_TRIES; k++) {
+        const h = hash3i(gi * 7919 + k, gj * 104729, SALT_SHOWROOM, seed);
+        const h2 = hash3i(gj * 7919 - k, gi * 104729, SALT_SHOWROOM ^ 0x2b, seed);
+        const cx = (gi + 0.12 + 0.76 * (h * F32)) * SHOWROOM_CELL;
+        const cz = (gj + 0.12 + 0.76 * (h2 * F32)) * SHOWROOM_CELL;
+        const dx = cx < x0 ? x0 - cx : cx > x1 ? cx - x1 : 0;
+        const dz = cz < z0 ? z0 - cz : cz > z1 ? cz - z1 : 0;
+        if (dx * dx + dz * dz <= R * R) return true;
+      }
+  return false;
+}
+
 const _hallCache = new Map();
+/* The land and water fields the placement tests read, built once per seed — see _showroomForCell. */
+let _hallLand = null;
+let _hallWater = null;
+let _hallLandSeed = null;
 export function showroomForCell(gi, gj, seed, probe = null) {
   const ck = `${gi},${gj},${seed},${probe ? 1 : 0}`;
   if (_hallCache.has(ck)) return _hallCache.get(ck);
@@ -1418,7 +1592,30 @@ function _showroomForCell(gi, gj, seed, probe = null) {
     // Facing the road: the building's local +z points back at the carriageway.
     const yaw = Math.atan2(-nx * side, -nz * side);
 
-    if (probe && typeof probe.height === 'function') {
+    /* THE FLATNESS AND DRYNESS TESTS ASK THE LAND, NOT THE CALLER'S PROBE, and that is a fix rather
+     * than a tidy-up. This function is MEMOISED on (gi, gj, seed) — so whichever caller asked FIRST
+     * decided the answer for the whole session, and the callers do not agree: render/props.js hands
+     * in the probe of the tile it happens to be baking, whose Terrain is built around THAT tile.
+     *
+     * Measured on the live beta, parked at (-2125,-3596) with the warm gate true, a probe present
+     * and 45 tiles live: `showroomsInBox` returned 0 halls at a place where the same call in node
+     * returns `hall:-1,-1,1` at (-2166,-3585). The cell had been resolved earlier by a distant
+     * tile's probe, rejected, and cached as "no showroom" permanently. That is why showrooms are
+     * rarer in the game than in the world, and it is the likeliest reason he could not find or get
+     * into one.
+     *
+     * `landFn`/`waterFn` are pure functions of position and seed with no tile behind them, so the
+     * answer no longer depends on who asked — which is what makes the memo honest. It is also the
+     * convention the rest of this file already follows: every station placement test reads the RAW
+     * land for the same reason (see the "who asked?" note above stationForEdge). `probe` is still
+     * honoured as the switch that says whether to run the tests at all, so a diagnostic can still
+     * ask "where would these be" without one. */
+    if (probe) {
+      if (!_hallLand || _hallLandSeed !== seed) {
+        _hallLand = landFn(seed);
+        _hallWater = waterFn(seed);
+        _hallLandSeed = seed;
+      }
       let lo = Infinity;
       let hi = -Infinity;
       let wet = false;
@@ -1426,11 +1623,12 @@ function _showroomForCell(gi, gj, seed, probe = null) {
         for (let sz = -1; sz <= 1; sz++) {
           const px = x + sx * SHOWROOM_HALF_W * 0.9;
           const pz = z + sz * SHOWROOM_HALF_D * 0.9;
-          const y = probe.height(px, pz);
+          const y = _hallLand(px, pz);
           if (!Number.isFinite(y)) { wet = true; break; }
           if (y < lo) lo = y;
           if (y > hi) hi = y;
-          if (typeof probe.wet === 'function' && probe.wet(px, pz)) { wet = true; break; }
+          const wl = _hallWater(px, pz);
+          if (Number.isFinite(wl) && y < wl) { wet = true; break; }
         }
         if (wet) break;
       }
@@ -1439,7 +1637,21 @@ function _showroomForCell(gi, gj, seed, probe = null) {
     // and not beside a forecourt dealership, which would defeat the whole point
     const st = nearestStation(x, z, seed, SHOWROOM_MIN_STATION);
     if (st && st.dist < SHOWROOM_MIN_STATION) continue;
-    return { x, z, yaw, key: `hall:${gi},${gj},${k}`, roadX: rp.x, roadZ: rp.z };
+    /* THE NORMAL AND THE ROAD WIDTH TRAVEL WITH THE HALL, so a driveway can be built to it later
+     * without re-deriving where its road is. Operator, with a screenshot: "no way in or road
+     * connection" — a showroom 46 m off a road with nothing joining the two is a building in a
+     * field. Same three numbers a station carries for exactly the same reason (see stationSpur). */
+    return {
+      x,
+      z,
+      yaw,
+      key: `hall:${gi},${gj},${k}`,
+      roadX: rp.x,
+      roadZ: rp.z,
+      nx: nx * side,
+      nz: nz * side,
+      width: rp.width ?? 7,
+    };
   }
   return null;
 }
@@ -1447,10 +1659,23 @@ function _showroomForCell(gi, gj, seed, probe = null) {
 /** Every walk-in showroom whose centre lies in the box. */
 export function showroomsInBox(x0, z0, x1, z1, seed, probe = null) {
   const out = [];
-  const gi0 = Math.floor((x0 - SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gi1 = Math.floor((x1 + SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gj0 = Math.floor((z0 - SHOWROOM_CELL) / SHOWROOM_CELL);
-  const gj1 = Math.floor((z1 + SHOWROOM_CELL) / SHOWROOM_CELL);
+  /* THE CELLS THAT OVERLAP THE BOX, and no more — this is B11's 1126 ms frame.
+   *
+   * This padded by a whole SHOWROOM_CELL on every side while `showroomCellsWarm`, the gate that
+   * exists to keep cold cells off the tile-bake path, does NOT pad. So the gate would confirm the
+   * overlapping cells were resolved, say yes, and this function would then resolve a RING OF CELLS
+   * THE GATE NEVER CHECKED — cold, at 20-360 ms each for their nearestRoadPoint calls. Measured per
+   * phase, that is where the 1126 ms worst frame lived, and why it was paid on every new region
+   * (1331 ms on first touch, 0.1 ms once the cells were cached, 989 ms nine kilometres away).
+   *
+   * The padding was never needed, and showroomCellsWarm's own comment already says why: only halls
+   * whose CENTRE lands inside the box are kept, four lines below, so a cell that does not overlap
+   * the box cannot contribute one. Resolving it is paying full price for an answer that is thrown
+   * away. The two functions now agree on which cells matter, which is the actual fix. */
+  const gi0 = Math.floor(x0 / SHOWROOM_CELL);
+  const gi1 = Math.floor(x1 / SHOWROOM_CELL);
+  const gj0 = Math.floor(z0 / SHOWROOM_CELL);
+  const gj1 = Math.floor(z1 / SHOWROOM_CELL);
   for (let gj = gj0; gj <= gj1; gj++) {
     for (let gi = gi0; gi <= gi1; gi++) {
       const r = showroomForCell(gi, gj, seed, probe);
@@ -1763,15 +1988,63 @@ export function airfieldCellsWarm(x0, z0, x1, z1, seed) {
   return true;
 }
 
+/* B11: showroom halls paid the exact same cold-cell cost as harbours/airfields did before THIS
+ * warm-gate existed for them — measured live with tools/bench-props.mjs: `_showroomForCell`'s
+ * up-to-6 `nearestRoadPoint` calls (each an ~800 m-radius `edgesInBox`, 20-360 ms cold) landing
+ * synchronously inside render/props.js's phase 6 pushed one tile bake to 2295.9 ms, another to
+ * 1427.0 ms, in a budget that assumes 12 ms worst case. Same fix, same shape: warm one cell a
+ * frame off the critical path (`warmOne` below), and phase 6 only builds halls for a box every
+ * cell of which is already resolved — see this section's own header comment just above. */
+export function showroomCellsWarm(x0, z0, x1, z1, seed) {
+  /* ONLY THE CELLS THAT CAN HOLD A CENTRE IN THIS BOX.
+   *
+   * This padded by a whole SHOWROOM_CELL on every side, which meant a tile could not place a
+   * showroom until a 21 km block of 7 km cells was ALL resolved — and `warmOne` resolves one cell
+   * per frame, only on frames with no tile job in flight. Measured: parked 20 m from a showroom the
+   * pure world function says is there, `props.halls` stayed empty for 40 seconds while stations
+   * built normally, and diag-walkin fell from 10/10 to 3/10.
+   *
+   * The padding was never needed. `showroomsInBox` keeps only halls whose CENTRE lands inside the
+   * box, so a cell that does not overlap the box cannot contribute one — waiting on it is waiting on
+   * a cell whose answer is discarded. */
+  const gi0 = Math.floor(x0 / SHOWROOM_CELL);
+  const gi1 = Math.floor(x1 / SHOWROOM_CELL);
+  const gj0 = Math.floor(z0 / SHOWROOM_CELL);
+  const gj1 = Math.floor(z1 / SHOWROOM_CELL);
+  for (let gj = gj0; gj <= gj1; gj++) {
+    for (let gi = gi0; gi <= gi1; gi++) if (!_hallCache.has(`${gi},${gj},${seed},1`)) return false;
+  }
+  return true;
+}
+
 /**
  * Resolve at most ONE unresolved cell near (x,z), nearest first. Returns true if it did any work, so
- * a caller can stop after one per frame. Harbours before airfields: the boat is the earlier unlock.
+ * a caller can stop after one per frame. Harbours before airfields before showrooms: the boat and the
+ * plane are both game unlocks, a showroom is not.
  */
+let _warmTurn = 0;
+
 export function warmOne(x, z, seed, probe, radiusCells = 1) {
-  for (const [cell, cache, fn] of [
+  /* ROUND-ROBIN, NOT A FIXED ORDER, and this is a bug fix rather than a tidy-up.
+   *
+   * This walked harbours, then airfields, then showrooms, and RETURNED as soon as it warmed one
+   * cell. So showrooms only ever got a turn when there was no uncached harbour or airfield cell
+   * anywhere within reach — and as the camera moves there almost always is one. Measured: halls
+   * never appeared at all in 40 seconds parked 20 m from a showroom that the pure world function
+   * says is there, while stations built normally. `tools/diag-walkin.mjs` went from 10/10 to 3/10
+   * with "the tiler actually built a showroom: 0".
+   *
+   * Starting the sweep at a rotating offset gives each system its turn regardless of what the others
+   * still owe. Still exactly one cell warmed per call, so the frame budget this gate exists to
+   * protect is unchanged. */
+  const systems = [
     [HARBOUR_CELL, _hbCache, harbourForCell],
     [AIRFIELD_CELL, _afCache, airfieldForCell],
-  ]) {
+    [SHOWROOM_CELL, _hallCache, showroomForCell],
+  ];
+  const start = _warmTurn++ % systems.length;
+  for (let k = 0; k < systems.length; k++) {
+    const [cell, cache, fn] = systems[(start + k) % systems.length];
     const ci = Math.floor(x / cell);
     const cj = Math.floor(z / cell);
     for (let ring = 0; ring <= radiusCells; ring++) {
@@ -2111,10 +2384,71 @@ const TOWN_KIT = [
   ['shed', STATION_APRON_HALF_WIDTH + 9, -12],
   ['drystone_wall', -(STATION_APRON_HALF_WIDTH + 13), -13],
 ];
+
+/* ── WHAT AN UPGRADED TOWN IS ────────────────────────────────────────────────
+ * Operator: "Towns can be upgraded". TOWN_KIT above is the town every station starts with — the
+ * tier-0 town, and it is not repeated here. These two lists are what gets ADDED at tier 1 and at
+ * tier 2, so a town only ever grows and a save that predates the feature keeps exactly the town it
+ * had.
+ *
+ * TIER 1 IS A STREET. The tier-0 cluster is landmarks with gaps between them: a pole, a phone box,
+ * a shed, a clock tower. What it is missing is the ordinary stuff that makes a place look lived in
+ * at ground level, so this tier is dwellings and the boundary between them — two cottages facing
+ * the road, a wall and a fence line to give them plots, a gate, a village sign, and the two things
+ * every real village green has, a bench and a post box.
+ *
+ * TIER 2 IS A SKYLINE. The silhouette audit that shaped TOWN_KIT measured the problem exactly: at
+ * 200 m a 7.5 m telegraph pole subtends 2.1 degrees, under the tree line it stands behind, and no
+ * amount of placement fixes an object shorter than its backdrop. A 14 m clock tower is 4.0 degrees
+ * and that is what made tier 0 findable at all. Tier 2 buys three more of that class — a windmill,
+ * a water tower and a chapel — so an upgraded town is a place you can steer towards from much
+ * further out than an unimproved one, which is the entire reason to buy it.
+ *
+ * SAME DISCIPLINE AS THE ORIGINAL KIT, deliberately: every id is already in the catalogue (no new
+ * geometry family), every |dx| clears STATION_APRON_HALF_WIDTH so nothing can land on the forecourt
+ * or the access spur, the tall pieces sit furthest out where the ground is real rather than the
+ * apron's own batter, and several entries are near-duplicates on opposite sides with an `alt` tag
+ * so that whichever side of a given station is flat and dry gets the piece. The audit measured the
+ * old kit delivering 2 of 4 at a real station; a kit that needs every piece to land is a kit that
+ * usually looks half-built. */
+const TOWN_TIER_1 = [
+  ['cottage', -(STATION_APRON_HALF_WIDTH + 16), 9, 'home_a'],
+  ['cottage', STATION_APRON_HALF_WIDTH + 17, 8, 'home_a'],
+  ['cottage', STATION_APRON_HALF_WIDTH + 15, -17, 'home_b'],
+  ['log_cabin', -(STATION_APRON_HALF_WIDTH + 18), -16, 'home_b'],
+  ['drystone_wall', STATION_APRON_HALF_WIDTH + 11, 17],
+  ['pasture_fence', -(STATION_APRON_HALF_WIDTH + 10), 19],
+  ['wooden_gate', STATION_APRON_HALF_WIDTH + 8, 21],
+  ['village_sign', -(STATION_APRON_HALF_WIDTH + 7), -9],
+  ['bench', STATION_APRON_HALF_WIDTH + 6, -7],
+  ['post_box', -(STATION_APRON_HALF_WIDTH + 6), 7],
+];
+const TOWN_TIER_2 = [
+  ['windmill', -(STATION_APRON_HALF_WIDTH + 30), 22, 'mill'],
+  ['windmill', STATION_APRON_HALF_WIDTH + 31, 20, 'mill'],
+  ['water_tower', STATION_APRON_HALF_WIDTH + 26, -24, 'tall2'],
+  ['water_tower', -(STATION_APRON_HALF_WIDTH + 27), -22, 'tall2'],
+  ['chapel', -(STATION_APRON_HALF_WIDTH + 24), 27, 'chapel'],
+  ['chapel', STATION_APRON_HALF_WIDTH + 25, 26, 'chapel'],
+  ['market_stall', STATION_APRON_HALF_WIDTH + 13, 12],
+  ['tea_house', -(STATION_APRON_HALF_WIDTH + 14), 14],
+  ['dovecote', STATION_APRON_HALF_WIDTH + 19, 4],
+  ['lantern_pair', -(STATION_APRON_HALF_WIDTH + 9), -19],
+];
+/** The pieces a town of this tier is built from — tier 0's kit plus everything bought since. */
+export const TOWN_TIERS = [TOWN_KIT, TOWN_TIER_1, TOWN_TIER_2];
+export function townKitFor(tier) {
+  const t = Math.max(0, Math.min(TOWN_TIERS.length - 1, tier | 0));
+  const out = [];
+  for (let i = 0; i <= t; i++) out.push(...TOWN_TIERS[i]);
+  return out;
+}
+
 /** Furthest a town candidate can sit from the forecourt centre, and the query-box expansion —
- *  the widest TOWN_KIT offset above (STATION_APRON_HALF_WIDTH + 22 + a 14 m dz ~= 34) plus a
- *  margin for the piece's own footprint. */
-const TOWN_MAX_OFFSET = 60;
+ *  the widest offset in any tier (STATION_APRON_HALF_WIDTH + 31 + a 27 m dz ~= 55) plus a
+ *  margin for the piece's own footprint. Raised from 60 with the upgrade tiers, which put the
+ *  windmills and water towers further out than anything tier 0 has. */
+const TOWN_MAX_OFFSET = 92;
 
 /**
  * A station's own small landmark cluster, whose footprint lands inside the box. Same call
@@ -2127,7 +2461,7 @@ const TOWN_MAX_OFFSET = 60;
  * @param {object} probe same shape propsInBox takes: `.site(x,z)` and `.height(x,z)`.
  * @param {object} [stats] optional rejection tally, same convention as propsInBox.
  */
-export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
+export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null, townLevel = null) {
   const site = probe.site;
   const height = probe.height || ((x, z) => probe.site(x, z).y);
   const out = [];
@@ -2150,8 +2484,13 @@ export function stationTownInBox(x0, z0, x1, z1, seed, probe, stats = null) {
      * REDUNDANCY note on TOWN_KIT. One clock tower per station, not one per side. Deterministic
      * because the kit order is fixed and every test below is a pure function of position. */
     const filled = new Set();
-    for (let i = 0; i < TOWN_KIT.length; i++) {
-      const [id, ldx, ldz, alt] = TOWN_KIT[i];
+    /* THE KIT THIS TOWN HAS BOUGHT. `townLevel` is handed in by the caller (render/props.js reads
+     * it off the wallet) rather than looked up here, because this file is pure world: it knows
+     * where a town is, not what a player owns. Absent — every tool that calls this without a
+     * wallet — it is tier 0, which is the town that has always been here. */
+    const kit = townKitFor(townLevel ? townLevel(st.key) : 0);
+    for (let i = 0; i < kit.length; i++) {
+      const [id, ldx, ldz, alt] = kit[i];
       if (alt !== undefined && filled.has(alt)) continue;
       const kind = PROP_BY_ID[id];
       if (!kind) continue;

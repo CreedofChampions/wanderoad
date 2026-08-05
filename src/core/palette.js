@@ -37,8 +37,19 @@ export const P = {
   gTip: '#C6D46B',
   gUpper: '#93B84E',
   gMid: '#6C9A47',
-  gLow: '#436E4F',
-  gBase: '#2B564F',
+  gLow: '#446E43',   // was #436E4F — see gBase
+  gBase: '#2C563E',  /* was #2B564F, and this is the grass half of B24.
+                     *
+                     * The blade's SHADOW colours are what a dense sward shows you at distance — `shd`
+                     * is mix(gBase*0.82, gLow) and `mid` starts at gBase — and both were TEAL, not
+                     * dark green: gBase #2B564F is r43 g86 b79, blue 36 ABOVE red, and gLow #436E4F
+                     * is 12 above. Every lit colour in the ramp is strongly green (gMid -37, gUpper
+                     * -69, gTip -91), so the field reads green close up, where the lit faces show,
+                     * and turns blue-grey at range, where the shaded interior takes over. That is
+                     * exactly the complaint: "more blue than green for human eye".
+                     *
+                     * Both are brought to a dark GREEN of the same value — the shadows stay as deep
+                     * as they were, they simply stop being teal. */
   gTrans: '#E9EE7C',
   gSheen: '#EDF0C8',
   gDry: '#D9C079',
@@ -127,13 +138,39 @@ export const P = {
   paintE: '#4E7F79',
   paintF: '#2E3440',
   chrome: '#D7DCE0',
+  /* B46, the operator: "there's some gray parts still, leaving it somewhat uncoloured."
+   *
+   * A Synty body arrives as TWO tones baked into its vertex colours — a paint and a pale
+   * grey-green cladding (#ABB2AC on screen) that reads as bare primer rather than as a
+   * decision. Bumpers, rockers, arches and the bed rail are cladding on a real pickup and
+   * should stay a different material from the paint, so they are not simply painted over:
+   * they become dark iron. Chosen against the cosy palette's own tarmacShade/roofSlate
+   * family so a truck parked on a road does not look like it was cut out of a different
+   * game, and dark enough that painted.js's BODY branch — which lifts a colour hard — still
+   * lands it as graphite (~#5A6066 on screen) rather than as another pale grey. */
+  carTrim: '#43474C',
   glass: '#7FA2B8',
   tyre: '#2A2A2E',
   tail: '#E4573F',
   head: '#FFF3D0',
   // light
   sun: '#FFD79C',
-  ambSky: '#9EC6E6',
+  ambSky: '#BCCFDD',  /* was #9EC6E6, and this is the answer to B24 after five investigations.
+                       *
+                       * Operator, for weeks: "the land is a dark blue/green ... more blue than green
+                       * for human eye". Measured, the land is GREEN (grass alone reads b-r -22.6).
+                       * The ROAD is blue (+22.2 before today, +13.6 after the post grade was warmed).
+                       *
+                       * core/glsl.js builds its hemispheric ambient as
+                       *     hemi = mix(K_AMB_GND, K_AMB_SKY, N.y*0.5 + 0.5)
+                       * so a surface facing STRAIGHT UP takes the full sky colour — and #9EC6E6 is
+                       * r158 g198 b230, blue 72 above red. Tarmac is flat, faces straight up, and is
+                       * a near-neutral grey (#8E8B86) with no colour of its own to hide the tint.
+                       * Grass blades face every which way and are saturated green, which swamps it.
+                       * Same lighting, opposite readings — which is exactly what was measured.
+                       *
+                       * Paled rather than neutralised: a blue sky bounce is real and is what keeps
+                       * shadows from going flat grey. It just should not be dyeing the carriageway. */
   ambGround: '#AA9C64',
   shadowTint: '#5C6E9E',
 };
@@ -215,7 +252,8 @@ const float SUN_I = 1.38;
  */
 export const BIOME_TINT = [
   {
-    // 0 — Hoshi Meadow: the pen's own valley, unmodified. The reference mood.
+    // 0 — Clover Meadow: the pen's own valley, unmodified in COLOUR. Renamed for B26 — see
+    // world/biomes.js's BIOME_NAMES note; the mood is the reference, the name is ours.
     ground: [1.0, 1.0, 1.0],
     rock: [1.0, 1.0, 1.0],
     foliage: [1.0, 1.0, 1.0],
@@ -335,14 +373,25 @@ export const BIOME_TINT = [
  *             (air), the snow blend above 120 m (terrainMaterial.js), and the snowline grass
  *             suppression that shares that ramp (render/grass.js).
  *   DUNES     the existing sand stops, promoted out of their special case.
- *   WETLAND   silver-teal peat, desaturated the way standing water and mist desaturate.
+ *   WETLAND   SEDGE GREEN. It was '#8BBCC2'/'#5A939D'/'#3B6A7A'/'#254550' — "silver-teal peat" —
+ *             and the operator caught it exactly as he caught the highlands: "wetland at -3000
+ *             +10,000 is blue land/grass (should be green)". Those four stops run +55 to +67 blue
+ *             over red; ground in daylight is never bluer than it is red, and a marsh is not an
+ *             exception — a marsh is GREEN, and greener than dry land, because it never dries out.
+ *
+ *             This is the SECOND biome to make the same mistake (highlands was the first, fixed the
+ *             same way with the same tool), and both came from the same good intention: separating
+ *             the biomes by hue. The lesson is that the hue budget only runs from warm to cool
+ *             through green and gold — it does not extend to blue, because blue is water. Wetland now
+ *             separates from the meadow by being LESS YELLOW and darker (b-r -24 against the meadow's
+ *             -58) rather than by being cool, which keeps them apart without either going blue.
  */
 export const BIOME_GROUND = [
   [P.tLit, P.tMid, P.tShade, P.tHollow], // 0 MEADOW — the pen's own valley, untouched
   ['#D7D278', '#A9B84A', '#7F8438', '#57592B'], // 1 STEPPE   — sun-bleached gold
   ['#BCBCAE', '#8F9280', '#64685A', '#464A3F'], // 2 HIGHLAND — lichen-grey stone (see note below)
   [P.sandLit, P.sandMid, P.sandShade, P.sandHollow], // 3 DUNES — rose-and-ochre sand
-  ['#8BBCC2', '#5A939D', '#3B6A7A', '#254550'], // 4 WETLAND  — silver-teal peat
+  ['#9CBB84', '#6C9163', '#456A4F', '#2E4838'], // 4 WETLAND  — sedge green (see the note below)
 ];
 
 /* How hard the ground palette snaps to the dominant biome, as one exponent.

@@ -32,10 +32,11 @@ import {
   harboursInBox,
   harbourCellsWarm,
   airfieldCellsWarm,
+  showroomCellsWarm,
   warmOne,
   CAN_HOVER, CAN_RADIUS, CAN_FRACTION, STATION_APRON_HALF_WIDTH, STATION_APRON_HALF_DEPTH,
   SHOWROOM_SLOTS,
-  showroomsInBox, hallSpots, HALL_BAYS, HALL_DOOR, SHOWROOM_HALF_W, SHOWROOM_HALF_D,
+  showroomsInBox, showroomSpur, hallSpots, HALL_BAYS, HALL_DOOR, SHOWROOM_HALF_W, SHOWROOM_HALF_D,
 } from '../world/props.js';
 import { TAU, rng, hash3i, clamp, lerp, smoothstep } from '../core/math.js';
 // The same freeboard the drawn road ribbon floats at, imported rather than copied: the access
@@ -1343,16 +1344,27 @@ export function buildAirfield(M, r, f, skirt) {
  * The colours are pulled apart deliberately — four cars in four shades of the same paint is the
  * "similar 3 biomes" mistake again, on a smaller stage. */
 export const SHOWROOM_CARS = [
-  /* FOUR COLOURS THAT ARE ACTUALLY FOUR COLOURS. The first version put paintA on the Sedan and
+  /* THIS LIST MIRRORS THE FLEET'S FOR-SALE CARS, and it is hand-maintained on purpose: this module
+   * is loaded by the tile worker and must not pull the game's modules in behind it. That makes it
+   * the one thing in the project that can drift silently — the plaque you read and the car you buy
+   * would be different cars, and nothing else would notice. tools/bench-props.mjs compares it
+   * against `FLEET.filter(c => unlockRule(c).how === 'buy')` for exactly that reason, and it caught
+   * this drift the moment the fleet was reordered on 3 August: the row still showed five cars while
+   * eight were for sale, so the Estate, the Scooter and the Tricycle were buyable and undisplayed.
+   *
+   * FOUR COLOURS THAT ARE ACTUALLY FOUR COLOURS. The first version put paintA on the Sedan and
    * VERMILION on the Rally — and VERMILION is paintA mixed 18% towards amber, so photographed on the
-   * apron they were two reds side by side and the row read as three cars, not four. Blue, red,
-   * amber, teal: the four most separated hues the painted palette has. */
+   * apron they were two reds side by side and the row read as three cars, not four. The hues below
+   * stay as separated as the painted palette allows now that the row is longer. */
+  { id: 'estate', length: 4.6, colour: LC('paintB') }, // green
+  { id: 'scooter', length: 1.95, colour: AMBER },
+  // The pickup is the only one on the row you can pick out by its OUTLINE — 5.91 m against the
+  // saloons' 4.5, which is the whole reason a truck is worth adding to a fleet of cars.
+  { id: 'pickup', length: 5.91, colour: CREAM },
+  { id: 'threewheeler', length: 2.95, colour: LC('paintE') },
   { id: 'sedan', length: 4.5, colour: LC('paintC') }, // slate blue
   { id: 'rally', length: 4.2, colour: VERMILION }, // rally red
   { id: 'taxi', length: 4.5, colour: AMBER }, // and a taxi is amber, obviously
-  // The pickup, and it is the only one on the row you can pick out by its OUTLINE — 5.91 m against
-  // the saloons' 4.5, which is the whole reason a truck is worth adding to a fleet of cars.
-  { id: 'pickup', length: 5.91, colour: CREAM },
   { id: 'patrol', length: 4.6, colour: TEAL },
 ];
 
@@ -2060,6 +2072,12 @@ function haloTexture() {
  */
 export class Props {
   constructor({ seed, scene, solids = null, range = RANGE, tile = TILE }) {
+    /* HOW BIG THE TOWN AT A GIVEN STATION IS, asked as a function rather than held as a value.
+     * Props is built at src/main.js before the Wallet that owns the answer is, so a reference
+     * taken here would be to nothing; and the answer changes mid-session the moment a town is
+     * bought. Null until setTownLevels() is called, and null means tier 0 — the town every
+     * station has always had — so any tool that builds a Props without a wallet still works. */
+    this._townLevel = null;
     this.seed = seed >>> 0;
     this.scene = scene;
     this.solids = solids;
@@ -2325,8 +2343,16 @@ export class Props {
       this._job.phase = 0;
     }
     const t0 = performance.now();
+    /* PER-PHASE TIMING, because "the worst props frame is 807 ms" says nothing about WHICH of the
+     * phases below spends it, and B11 has been carried as one number for weeks. `_drain` already
+     * runs one tile job per frame and skips on a long frame, so the cost is not a greedy backlog —
+     * it is one phase of one job. This records where it actually goes so the split is aimed. */
+    const phase = this._job.phase;
     this._step(this._job);
-    this.stats.buildMs = performance.now() - t0;
+    const ms = performance.now() - t0;
+    this.stats.buildMs = ms;
+    (this.stats.phaseMs ||= {});
+    if (ms > (this.stats.phaseMs[phase] || 0)) this.stats.phaseMs[phase] = ms;
     this.stats.backlog = this.pending.length + (this._job ? 1 : 0);
   }
 
@@ -2386,7 +2412,7 @@ export class Props {
         // BUILDERS[id] dispatch and picks up a collision hitbox for free wherever the
         // catalogue entry already declares one.
         job.props = propsInBox(ox, oz, ox + size, oz + size, this.seed, job.probe)
-          .concat(stationTownInBox(ox, oz, ox + size, oz + size, this.seed, job.probe));
+          .concat(stationTownInBox(ox, oz, ox + size, oz + size, this.seed, job.probe, null, this._townLevel));
         job.phase = 2;
         return;
       case 2:
@@ -2446,8 +2472,16 @@ export class Props {
          * and has no ox/oz at all, so it referenced undefined names and every tile silently baked
          * zero showrooms. Caught by tools/diag-walkin.mjs's first check ("the tiler actually built a
          * showroom": 0), which is precisely why that check asks the RENDERER's list and not the
-         * seed's. */
-        job.halls = showroomsInBox(ox, oz, ox + size, oz + size, this.seed, { height: job.probe.height });
+         * seed's.
+         *
+         * B11: gated on `showroomCellsWarm` for exactly the reason phases 4 and 5 are — a cold
+         * cell's `nearestRoadPoint` calls measured 20-360 ms EACH, up to 6 of them per candidate
+         * cell, and paying that synchronously here put one tile bake at 2295.9 ms against a 12 ms
+         * budget (tools/bench-props.mjs). An unwarmed tile simply gets no showroom and picks one up
+         * once `update()`'s own `warmOne` has resolved it, same as an airfield or harbour. */
+        job.halls = showroomCellsWarm(ox, oz, ox + size, oz + size, this.seed)
+          ? showroomsInBox(ox, oz, ox + size, oz + size, this.seed, { height: job.probe.height })
+          : [];
         job.phase = 7;
         return;
       default:
@@ -2533,6 +2567,25 @@ export class Props {
       buildShowroomHall(L3, rng(hash3i(Math.round(hall.x), Math.round(hall.z), 0x5b0a, this.seed)), Math.max(0.5, hi - lo + 0.6));
       blit(M, L3, hall.x, hi, hall.z, hall.yaw, 1);
       hall.padY = hi;
+
+      /* THE DRIVEWAY. Operator, with a screenshot: "no way in or road connection". A showroom sits
+       * SHOWROOM_SETBACK (46 m) off its host road by construction, and nothing joined the two — so
+       * the building read as dropped in a field, and getting to the door meant driving over the
+       * verge. This is the SAME `buildAccessSpur` every petrol station already uses, given the
+       * hall's own mouth-and-door pair (world/props.js's `showroomSpur`), so the two structures get
+       * one driveway implementation rather than a second one that can drift.
+       *
+       * The ground probe goes with it for the reason the station's does: the paving FOLLOWS the
+       * ground the car drives on rather than spanning its two ends in a straight line over whatever
+       * is in between, which is what stops a driveway hanging in the air on sloping ground. */
+      if (Number.isFinite(hall.roadX) && Number.isFinite(hall.nx)) {
+        const sp = showroomSpur(hall);
+        const mouthY = height ? height(sp.mouthX, sp.mouthZ) : hi;
+        if (Number.isFinite(mouthY)) {
+          buildAccessSpur(M, sp.mouthX, sp.mouthZ, mouthY, sp.apronX, sp.apronZ, hi, hall.width ?? 7, height);
+        }
+      }
+
       tileHalls.push(hall);
       this.halls.push(hall);
     }
@@ -2689,6 +2742,73 @@ export class Props {
 
     this.live.set(key, { mesh, props, stations, cans: canKeys, verts: M.n, tris: M.idx.length / 3 });
     this._recount();
+  }
+
+  /* WHY IS THERE NO SHOWROOM HERE — telemetry only, and it exists because the answer could not be
+   * got at from outside. The pure world function is certain there is a hall at a given place while
+   * `this.halls` stays empty, and the three things that could explain that (the warm gate, the
+   * query itself, and whether the tile covering it has been baked since) are all module-private.
+   * Same stance as every other read-only hook on window.WANDEROAD: the game never calls this. */
+  hallDebug(x, z) {
+    const probe = this._warmProbe;
+    const box = [x - 300, z - 300, x + 300, z + 300];
+    let found = [];
+    try {
+      found = showroomsInBox(box[0], box[1], box[2], box[3], this.seed, probe ? { height: probe.height } : null) || [];
+    } catch (e) {
+      return { error: String(e && e.message) };
+    }
+    return {
+      warm: showroomCellsWarm(box[0], box[1], box[2], box[3], this.seed),
+      probe: !!probe,
+      foundNow: found.length,
+      first: found[0] ? { key: found[0].key, x: Math.round(found[0].x), z: Math.round(found[0].z) } : null,
+      known: this.halls.length,
+      liveTiles: this.live.size,
+    };
+  }
+
+  /** Tell the tiler where to look up a town's tier. See `_townLevel` in the constructor. */
+  setTownLevels(fn) {
+    this._townLevel = typeof fn === 'function' ? fn : null;
+  }
+
+  /* ── REBUILDING A TOWN THAT JUST GREW ────────────────────────────────────
+   * A tile is baked once and then left alone: `_reshape` only releases tiles that have left the
+   * want-set, so a town you upgrade while standing in it would not appear until you drove far
+   * enough away to unload it and came back. Forcing `_lastCx = Infinity` does NOT help — that
+   * only re-runs `_reshape`, which skips every tile still in range, which is precisely the tile
+   * you are standing on.
+   *
+   * So this releases them explicitly, by world position, and lets the ordinary streaming path
+   * re-bake them nearest-first on the following frames. Radius rather than a single tile because
+   * a town spans up to TOWN_MAX_OFFSET from its station and can therefore straddle a tile edge.
+   * Returns how many were dropped, so a caller can say whether anything actually happened. */
+  rebuildAround(x, z, radius = 200) {
+    let n = 0;
+    for (const [key, rec] of [...this.live]) {
+      const [tx, tz] = key.split(',').map(Number);
+      const cx = tx * this.tile + this.tile / 2;
+      const cz = tz * this.tile + this.tile / 2;
+      if (Math.hypot(cx - x, cz - z) > radius + this.tile) continue;
+      this._release(key, rec);
+      n++;
+    }
+    /* The pending queue can hold a job for one of those tiles that was baked from the OLD tier —
+     * dropping it too means the rebuild is not racing a stale job. */
+    this.pending = this.pending.filter((pj) => {
+      const cx = pj.tx * this.tile + this.tile / 2;
+      const cz = pj.tz * this.tile + this.tile / 2;
+      return Math.hypot(cx - x, cz - z) > radius + this.tile;
+    });
+    if (this._job) {
+      const cx = this._job.tx * this.tile + this.tile / 2;
+      const cz = this._job.tz * this.tile + this.tile / 2;
+      if (Math.hypot(cx - x, cz - z) <= radius + this.tile) this._job = null;
+    }
+    /* Force the next update() to re-run _reshape, which is what queues the tiles just dropped. */
+    this._lastCx = Infinity;
+    return n;
   }
 
   _release(key, rec) {

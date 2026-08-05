@@ -20,6 +20,7 @@ node -e "const fs=require('fs');const bad=[];(function w(d){if(!fs.existsSync(d)
 
 | What | Licence | Notes |
 |---|---|---|
+| `PauliusOS/pallet-town-3d` (**MIT**) | Suggested by the operator on 2 Aug 2026 as a better-looking water treatment (B36). **Licence checked and recorded before anything was taken — and in the end nothing was.** The water question was settled instead by building seven treatments in-house and letting him choose: "Water tropical is final good" (F30/F56). Listed here because the licence check is the kind of work that gets repeated if it is not written down, and because MIT would permit reuse if we ever do. **Caveat if we ever do:** that repo is a reimagining of a Pokémon opening — the author's own Three.js code is theirs to license, anything Pokémon-derived is not. |
 | [three.js](https://threejs.org) | MIT | The renderer. |
 | [@base44/sdk](https://www.npmjs.com/package/@base44/sdk) | MIT | Backend client, used only when the Base44 backend is selected. |
 | [Vite](https://vitejs.dev) | MIT | Build tool, dev only. |

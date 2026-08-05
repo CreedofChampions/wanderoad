@@ -49,6 +49,9 @@ export const BOAT_MAX_KPH = 34;
 export const BOAT_MAX_SPEED = BOAT_MAX_KPH / 3.6;
 /** 1/s. At this rate a pinned throttle reaches 1 - e^(-DRAG*4) = 96% of BOAT_MAX_SPEED in the
  *  4 s the brief asks for. */
+/** Seconds for the hull's course to catch up with its heading at full speed — the crab in a turn. */
+export const BOAT_COURSE_LAG = 0.85;
+
 export const BOAT_DRAG = 0.8;
 /** m/s² — the ONE free tuning number (the brief gives a settle speed and a settle time, which
  *  together fix DRAG; ACCEL is whatever reaches that settle point AT full throttle). */
@@ -76,6 +79,9 @@ const BOAT_ROLL_RATE = 4;
  *  they are module-private consts over there and this is the only other place in the game
  *  that draws a boat riding water. Kept identical on purpose: one boat at anchor, one boat
  *  under way, the same sea underneath both. */
+/** How much of the hull's own height sits UNDER the water. A third reads as afloat and loaded;
+ * much less looks like a bath toy resting on glass, much more looks like it is going down. */
+const BOAT_DRAFT = 0.33;
 const BOAT_BOB_AMP = 0.14;
 const BOAT_BOB_HZ = 0.11;
 /** Fraction of the boat's own speed carried onto the beach on a normal exit — "keep heading +
@@ -205,6 +211,18 @@ export class BoatMode {
    *        terrain sampler — see the file header for why this is a callback and not a
    *        captured reference.
    */
+  /**
+   * Tell the boat how big its hull is, so it can work out where the waterline should cut it.
+   * Called whenever the boat model changes; safe to call with nothing, which restores the old
+   * origin-on-the-water behaviour rather than inventing a size.
+   *
+   * @param {{minY:number, height:number}|null} box the loaded hull's bounds, relative to its origin
+   */
+  setHull(box) {
+    this._hullMinY = box && Number.isFinite(box.minY) ? box.minY : 0;
+    this._hullH = box && Number.isFinite(box.height) && box.height > 0 ? box.height : 0;
+  }
+
   constructor({ wallet, say = null, terrain = null } = {}) {
     this.wallet = wallet;
     this.say = say || (() => {});
@@ -225,6 +243,9 @@ export class BoatMode {
     this._t = 0;
     /** seconds since the locked-barrier toast last said its line. */
     this._sinceSay = Infinity;
+    /** The hull's own box, in metres, measured from the model that is actually loaded. */
+    this._hullMinY = 0;
+    this._hullH = 0;
     /** seconds remaining on the post-bounce exit-test suspension — see EXIT_BOUNCE_COOLDOWN's
      *  own comment. Zero means the exit test runs normally. */
     this._bounceCooldown = 0;
@@ -481,12 +502,84 @@ export class BoatMode {
 
     // forward is (sin yaw, cos yaw) — car/vehicle.js's own convention, kept so the two never
     // disagree about which way the world's +X/+Z axes point.
-    car.x += Math.sin(this.yaw) * this.speed * dt;
-    car.z += Math.cos(this.yaw) * this.speed * dt;
+    /* THE HULL CARRIES ON WHERE IT WAS GOING — F6's "Zelda-style controls".
+     *
+     * The boat moved exactly where its nose pointed: turn the wheel and the whole craft changed
+     * direction the same frame, which is a car on ice, not a boat. What makes a small boat feel like
+     * one is that the WATER does not care where you are pointing — the hull keeps its old course for
+     * a moment and slides wide, and the bow comes round before the boat does.
+     *
+     * So a COURSE is tracked separately from the heading and eased towards it. Turn hard and the two
+     * disagree for a second: the boat crabs, the wake stays behind where it WAS going, and you have
+     * to think a bend ahead. It converges quickly enough that going straight is unaffected.
+     *
+     * The lag shortens with speed. Standing still a boat pivots on the spot — there is no water
+     * flowing past the hull to resist it — while at speed there is real momentum to overcome, which
+     * is exactly backwards from a car and the reason boats feel the way they do. */
+    if (this._course === undefined) this._course = this.yaw;
+    const lag = BOAT_COURSE_LAG * (0.35 + 0.65 * Math.min(Math.abs(this.speed) / BOAT_MAX_SPEED, 1));
+    let dHead = this.yaw - this._course;
+    while (dHead > Math.PI) dHead -= Math.PI * 2;
+    while (dHead < -Math.PI) dHead += Math.PI * 2;
+    this._course += dHead * Math.min(1, dt / Math.max(lag, 1e-3));
+    car.x += Math.sin(this._course) * this.speed * dt;
+    car.z += Math.cos(this._course) * this.speed * dt;
+    /** How far the hull is crabbing, radians — read by the renderer and by the wake. */
+    this.slip = dHead;
 
     const wl = waterLevelAt(surf.w, surf.y);
     const waterY = wl === null ? surf.y : wl; // guard only: `active` implies wet by construction
-    car.y = waterY + Math.sin(this._t * BOAT_BOB_HZ * TAU) * BOAT_BOB_AMP;
+    /* WHERE THE WATERLINE CUTS THE HULL. Operator: "boat is always half flooded with water".
+     *
+     * The old line put the model's ORIGIN on the water plane, which is only right if the origin
+     * happens to be the waterline — and for a boat mesh it never is. Whatever the origin is,
+     * the hull's own box says where the keel is, and the boat is placed so that a fixed fraction
+     * of the hull sits below the surface:
+     *
+     *   keel_world = car.y + hullMinY   must equal   waterY - DRAFT * hullHeight
+     *
+     * which rearranges to the line below. A model with its origin at the keel (hullMinY = 0) gets
+     * sunk; one with its origin amidships (hullMinY = -h/2) gets lifted; either way the water
+     * ends up a third of the way up the hull, which is what a small boat looks like afloat.
+     * Without a measured hull it falls back to the old behaviour rather than guessing a size. */
+    const draft = this._hullH > 0 ? BOAT_DRAFT * this._hullH + this._hullMinY : 0;
+
+    /* WAVES, AND THEY GROW WITH THE DEPTH UNDER YOU. Operator, F6: "waves when deeper".
+     *
+     * The bob was one fixed sine at 0.14 m, the same in a harbour as it was a mile out — which is
+     * why open water has never felt different from the shallows. It is now built from the DEPTH the
+     * boat is actually floating over (the water plane less the sea bed), so a harbour stays glassy
+     * and the open sea moves, and from TWO components at different rates and headings rather than
+     * one, because a single sine reads as a machine lifting the boat on a piston.
+     *
+     * Sampled from POSITION as well as time, so the wave is a field the boat travels through rather
+     * than a wobble attached to it: crossing a swell at speed now meets crests, and sitting still in
+     * one still rises and falls. That also gives the slope for free — the surface is evaluated a few
+     * metres fore/aft and to port/starboard, and the difference IS the pitch and roll, so the hull
+     * leans into a wave face instead of staying spirit-level while the sea moves under it.
+     *
+     * All of it is CPU-side and deterministic: it deliberately does not try to match whatever the
+     * water shader is displacing, because that lives on the GPU and the boat cannot read it. What it
+     * matches is the FEEL — bigger water further out. */
+    const depth = Math.max(0, waterY - (surf.y ?? waterY));
+    const swell = clamp01(depth / 12) * (this._hullH > 0 ? 1 : 0.6);
+    const amp = BOAT_BOB_AMP + swell * 0.85;
+    const waveAt = (wx, wz) =>
+      Math.sin(this._t * BOAT_BOB_HZ * TAU + wx * 0.045) * 0.62 +
+      Math.sin(this._t * BOAT_BOB_HZ * TAU * 1.63 + wz * 0.031 + 1.9) * 0.38;
+
+    car.y = waterY - draft + waveAt(car.x, car.z) * amp;
+
+    /* The slope, from the same field. 4 m either way is about a hull length, which is the span a
+     * boat actually straddles — sampling at a point would give the derivative of the wave rather
+     * than the attitude of a hull sitting across it. */
+    const L = 4;
+    const fore = waveAt(car.x + Math.sin(this.yaw) * L, car.z + Math.cos(this.yaw) * L) * amp;
+    const aft = waveAt(car.x - Math.sin(this.yaw) * L, car.z - Math.cos(this.yaw) * L) * amp;
+    const port = waveAt(car.x + Math.cos(this.yaw) * L, car.z - Math.sin(this.yaw) * L) * amp;
+    const stbd = waveAt(car.x - Math.cos(this.yaw) * L, car.z + Math.sin(this.yaw) * L) * amp;
+    car.pitch = Math.atan2(fore - aft, L * 2);
+    car.roll = this.roll + Math.atan2(port - stbd, L * 2);
 
     car.yaw = this.yaw;
     car.vx = Math.sin(this.yaw) * this.speed;

@@ -17,9 +17,15 @@
  */
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
+import { pathToFileURL } from 'node:url';
 
-/** Minimal PNG reader: 8-bit, non-interlaced, colour type 2 (RGB) or 6 (RGBA) — what Chrome emits. */
-function decodePng(buf) {
+/** Minimal PNG reader: 8-bit, non-interlaced, colour type 2 (RGB) or 6 (RGBA) — what Chrome emits.
+ *
+ *  EXPORTED, and the script below is guarded, so tools/diag-waterlive.mjs can measure the
+ *  difference between two screenshots without a second copy of this decoder living in the
+ *  repo. One source of truth for "how do we read a Chrome PNG"; nothing else about this tool
+ *  changes, and running it from the command line behaves exactly as it always has. */
+export function decodePng(buf) {
   if (buf.readUInt32BE(0) !== 0x89504e47) throw new Error('not a png');
   let p = 8, w = 0, h = 0, ct = 0, bd = 0;
   const idat = [];
@@ -61,24 +67,27 @@ function decodePng(buf) {
   return { w, h, ch, px: out };
 }
 
-const file = process.argv[2];
-const [fx0, fy0, fx1, fy1] = [3, 4, 5, 6].map((i, k) => Number(process.argv[i] ?? [0.02, 0.55, 0.34, 0.95][k]));
-const { w, h, ch, px } = decodePng(readFileSync(file));
-const [x0, y0, x1, y1] = [Math.floor(fx0 * w), Math.floor(fy0 * h), Math.floor(fx1 * w), Math.floor(fy1 * h)];
-let r = 0, g = 0, b = 0, n = 0, sat = 0;
-for (let y = y0; y < y1; y++)
-  for (let x = x0; x < x1; x++) {
-    const i = y * w * ch + x * ch;
-    const R = px[i], G = px[i + 1], B = px[i + 2];
-    r += R; g += G; b += B;
-    const mx = Math.max(R, G, B), mn = Math.min(R, G, B);
-    sat += mx ? (mx - mn) / mx : 0;
-    n++;
-  }
-const mean = [r / n, g / n, b / n].map((v) => +v.toFixed(1));
-console.log(JSON.stringify({
-  file: file.split(/[\/]/).pop(), region: [x0, y0, x1, y1], px: n,
-  mean: { r: mean[0], g: mean[1], b: mean[2] },
-  bMinusR: +(mean[2] - mean[0]).toFixed(1),
-  saturation: +(sat / n).toFixed(3),
-}));
+/* Only when RUN, never when imported — see the note on decodePng above. */
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  const file = process.argv[2];
+  const [fx0, fy0, fx1, fy1] = [3, 4, 5, 6].map((i, k) => Number(process.argv[i] ?? [0.02, 0.55, 0.34, 0.95][k]));
+  const { w, h, ch, px } = decodePng(readFileSync(file));
+  const [x0, y0, x1, y1] = [Math.floor(fx0 * w), Math.floor(fy0 * h), Math.floor(fx1 * w), Math.floor(fy1 * h)];
+  let r = 0, g = 0, b = 0, n = 0, sat = 0;
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
+      const i = y * w * ch + x * ch;
+      const R = px[i], G = px[i + 1], B = px[i + 2];
+      r += R; g += G; b += B;
+      const mx = Math.max(R, G, B), mn = Math.min(R, G, B);
+      sat += mx ? (mx - mn) / mx : 0;
+      n++;
+    }
+  const mean = [r / n, g / n, b / n].map((v) => +v.toFixed(1));
+  console.log(JSON.stringify({
+    file: file.split(/[\/]/).pop(), region: [x0, y0, x1, y1], px: n,
+    mean: { r: mean[0], g: mean[1], b: mean[2] },
+    bMinusR: +(mean[2] - mean[0]).toFixed(1),
+    saturation: +(sat / n).toFixed(3),
+  }));
+}

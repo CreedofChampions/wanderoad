@@ -40,6 +40,7 @@ import { BIOME, BIOME_SCATTER, BIOME_COUNT, blendScalar, waterLevelAt } from './
 import { nodeSize } from './chunk.js';
 import { TAU, DEG, hash3i, rng, smoothstep, clamp01 } from '../core/math.js';
 import { fbm2, warpedFbm2, noise2 } from '../core/noise.js';
+import { showroomsInBox, showroomMaybeNear, SHOWROOM_HALF_W, SHOWROOM_HALF_D } from './props.js';
 
 /**
  * Beyond this LOD level a node is at least 1024 m across and its props are a couple of
@@ -439,6 +440,10 @@ function pickBiome(w, u) {
  * returns nothing; it pushes whatever record it wants.
  */
 function eachSite(key, terr, seed, ox, oz, size, w, s, emit) {
+  /* Carried on the scratch site record rather than as a tenth positional argument: six call sites
+   * would each have to remember to pass it, and the one that forgot would silently grow a tree
+   * through a showroom wall again. See scatterChunk, which sets it. */
+  const hallReject = s._hall || (() => false);
   const cell = CELL[key];
   const area = CELL_AREA[key];
   const boost = BOOST[key];
@@ -532,6 +537,16 @@ function eachSite(key, terr, seed, ox, oz, size, w, s, emit) {
       s.roadW = c.width;
       s.roadTx = c.tx;
       s.roadTz = c.tz;
+      /* NOTHING GROWS INSIDE A SHOWROOM. Operator, with a screenshot: "no proper building trees in
+       * building". Measured before touching anything — 12 pieces of flora standing inside 5 hall
+       * footprints across four seeds, including a tree through the floor of the hall on seed 1.
+       *
+       * render/grass.js already excludes the hall (B12, "grass grows through a showroom's floor
+       * slab") and this is the same hole one layer down: the hall is prop geometry laid over the
+       * terrain, and scatter knows only about ground, roads and water. The test goes HERE, in
+       * eachSite, rather than in each of the six emit callbacks — every kind passes through this
+       * line, so a seventh kind added later is covered without anyone remembering to. */
+      if (hallReject(x, z)) continue;
       emit(s, rnd);
     }
   }
@@ -560,10 +575,57 @@ export function scatterChunk({ cx, cz, level, seed }) {
   // its own for the climate grid, and every extra metre is climate samples nobody reads.
   const terr = new Terrain(seed, ox, oz, ox + size, oz + size, Math.max(POST_REACH + 16, size * 0.25));
 
+  /* THE HALLS THIS NODE OVERLAPS, resolved once. `showroomsInBox` keeps only halls whose CENTRE
+   * lands in the box, so the query is padded by the footprint's own half-diagonal — otherwise a
+   * hall just outside the node would be missed while its far wall still covered ground inside it.
+   * Halls are rare (one candidate per SHOWROOM_CELL) and this runs once per node rather than once
+   * per site, so the cost is a single query against cells the tile is already touching. */
+  const HALL_PAD = Math.hypot(SHOWROOM_HALF_W, SHOWROOM_HALF_D) + 4;
+  /* COULD A HALL EVEN BE HERE — asked in arithmetic, before anything expensive.
+   *
+   * `showroomsInBox` is memoised but its COLD path resolves candidates through nearestRoadPoint,
+   * which builds a road network over a 1.6 km box each time. Calling it from every terrain node put
+   * bench-props' worst single props frame at 13.89 ms against a bar of 12, and that bar exists
+   * because render/road.js already spends 15.8 ms in one frame every 180 m — two spikes landing
+   * together is a stutter the operator has already reported once.
+   *
+   * A showroom's candidate point is a pure hash of its cell (see `_showroomForCell`), so it costs
+   * two hashes to know where a hall COULD be; the road snap can move it by at most the search
+   * radius, and the setback by SHOWROOM_SETBACK. If no candidate of any overlapping cell is within
+   * that reach of this node, no hall can touch it and the expensive query is never made. Nodes are
+   * 256 m and cells are 7 km, so this skips almost every node in the world outright — and it is
+   * pure arithmetic on the same hashes, so the answer is identical to asking properly. */
+  let _halls = showroomMaybeNear(ox, oz, ox + size, oz + size, seed, HALL_PAD) ? null : [];
+  const hallReject = (x, z) => {
+    if (_halls === null) {
+      _halls = showroomsInBox(ox - HALL_PAD, oz - HALL_PAD, ox + size + HALL_PAD, oz + size + HALL_PAD, seed, {
+        height: (hx, hz) => terr.height(hx, hz),
+      }) || [];
+      for (const h of _halls) {
+        h._ca = Math.cos(h.yaw || 0);
+        h._sa = Math.sin(h.yaw || 0);
+      }
+    }
+    for (let i = 0; i < _halls.length; i++) {
+      const h = _halls[i];
+      const dx = x - h.x;
+      const dz = z - h.z;
+      /* Into the hall's OWN frame, so the test is the rectangle the building actually occupies
+       * rather than a circle around it — a circle at the half-diagonal would strip a 17 m radius
+       * of countryside around every showroom, which is a bigger artefact than the one being fixed.
+       * The 1.2 m margin covers the wall thickness and the roof overhang. */
+      const lx = dx * h._ca + dz * h._sa;
+      const lz = -dx * h._sa + dz * h._ca;
+      if (Math.abs(lx) <= SHOWROOM_HALF_W + 1.2 && Math.abs(lz) <= SHOWROOM_HALF_D + 1.2) return true;
+    }
+    return false;
+  };
+
   const w = new Float32Array(BIOME_COUNT);
   const s = {
     x: 0, z: 0, y: 0, ny: 1, wy: null, dominant: 0,
     onRoad: 0, roadD: Infinity, roadW: 0, roadTx: 1, roadTz: 0,
+    _hall: hallReject,
   };
 
   // ── trees ──────────────────────────────────────────────────────────────────

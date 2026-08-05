@@ -952,6 +952,32 @@ function buildBaseGeom(i, j, dir, tier, seed) {
 
   nodeDir(i, j, tier, seed, _t0);
   nodeDir(i1, j1, tier, seed, _t1);
+  /* THE PLAN HALF OF THE SIXTH APPROACH — each edge leaves a node biased towards where IT is
+   * actually going, instead of along the node's one shared line.
+   *
+   * Operator, repeatedly: "when 2 roads get close they need to start to connect via a 90 degree
+   * junction not like part into each other", and later, plainly, that roads "go in and out of each
+   * other". nodeDir's own comment states the cause as though it were a feature: the tangent
+   * "belongs to the NODE, not to either edge, so both edges meeting here leave along the same
+   * line". That is exactly what braiding IS — two roads leaving a junction on top of one another
+   * and only slowly separating. Measured: 33.3% of node pairs leave under 26 degrees apart, and
+   * the tightest pair in the sample is 0 degrees.
+   *
+   * The fix is not to abandon the shared tangent — it is what keeps the network kink-free, and
+   * throwing it away puts a corner at every node. It is blended towards THIS edge's own chord by
+   * NODE_FAN, which fans the departures apart near the node while leaving the far end of the
+   * tangent alone. The blend is renormalised, so tangent LENGTH is untouched and every downstream
+   * measurement that depends on it — the backoff loop directly below, the curvature floor, the
+   * squaring pass — sees the same magnitudes it always did. */
+  const _cx = (p1[0] - p0[0]) / chord;
+  const _cz = (p1[1] - p0[1]) / chord;
+  for (const [t, sgn] of [[_t0, 1], [_t1, 1]]) {
+    const bx = t[0] + (_cx * sgn - t[0]) * NODE_FAN;
+    const bz = t[1] + (_cz * sgn - t[1]) * NODE_FAN;
+    const bl = Math.hypot(bx, bz) || 1;
+    t[0] = bx / bl;
+    t[1] = bz / bl;
+  }
   /* Tangent LENGTH scales with this edge's own chord, not with the lattice cell. It used to be
    * cell * curve * 2, which is fine while two nodes sit a cell apart — but the jitter can put
    * them a fifth of that apart, and a 769 m tangent on a 130 m link is a cusp, not a curve.
@@ -966,7 +992,7 @@ function buildBaseGeom(i, j, dir, tier, seed) {
    * a very short tangent turns the corner in almost no distance, which is just as tight — so
    * this keeps the LONGEST length that clears the floor, and if none of them does, the least
    * bad. It runs the measurement on every edge but only shortens a handful in a 12 km square. */
-  const want = chord * Math.min(T.curve * 2, 1.25);
+  const want = chord * Math.min(T.curve * 2, 1.25) * JOINT_TANGENT;
   let m = want;
   let bestPeak = Infinity;
   for (let a = 0; a < 5; a++) {
@@ -1145,6 +1171,32 @@ function geomsInBox(x0, z0, x1, z1, seed, pad, fetch, tag0, onlyTier) {
  * from disagreeing about whether a lane exists.
  */
 const CROSS_CULL_DEV = 32; // degrees off square; beyond this the lane yields rather than bends
+/* AND A LANE MAY NOT CROSS AN ARTERIAL ON TOP OF ITS OWN LATTICE NODE.
+ *
+ * This is the answer to B2's last survivors, and it is not a levelling problem at all — eight
+ * attempts aimed at levelAgainst (ramp length, capture radius, earthwork budget, feather shape,
+ * respect masks) moved the number by nothing, because the levelling was already working.
+ *
+ * Instrumented at the worst one, (-1459,-1562) on the shipped seed: the lane's sample 22 m along
+ * was pulled 22.2 m DOWN onto the arterial exactly as intended, with full authority and no clamp
+ * binding. Sample 0 is the lane's own lattice node, and a node cannot move — every other edge
+ * meeting there is pinned to the same height, which is what diag-seam's S3 measures and what
+ * killed BACKLOG attempts #3/#4/#5. The crossing falls BETWEEN those two samples, 18.6 m from the
+ * pinned one, so the polyline simply interpolates and the crossing point rides 3.94 m high.
+ *
+ * Nothing that levels roads can fix that, and the alternative — putting a sample on the crossing —
+ * would meet the arterial by asking the lane for a 24 m drop in 18.6 m, a 128% grade, which is a
+ * worse road than the step is. The honest answer is the one this file already takes for a crossing
+ * that is too far off square: a lane that cannot make a junction here does not make one. Measured
+ * over five seeds and 121 lane-x-arterial crossings, culling at 40 m removes the four worst
+ * mismatches (3.94, 3.92, 1.87 and 1.74 m — every one over 1.7 m) and costs six crossings that
+ * were level. The 1.0–1.3 m tail sits 114–400 m from any node and is a different question.
+ *
+ * 40 m: the four bad ones are at 10.4, 18.6, 34.8 and 38.0 m, and the nearest LEVEL crossing that
+ * this also removes is at 3.9 m — i.e. there is no clean gap to cut in, so the number is set at
+ * the far edge of the failures rather than pretending one exists. Same units and same spirit as
+ * LEVEL_END_KEEP, which is how much road the feather already refuses to spend near a node. */
+const CROSS_CULL_NODE = 40;
 const _cullCache = new Map();
 function crossesArterialBadly(i, j, dir, tier, seed, tag) {
   if (tier !== 1) return false; // arterials never yield
@@ -1153,10 +1205,26 @@ function crossesArterialBadly(i, j, dir, tier, seed, tag) {
   if (hit !== undefined) return hit;
   const base = baseGeomFor(i, j, dir, tier, seed);
   const arterials = geomsInBox(base.minX, base.minZ, base.maxX, base.maxZ, seed, CROSS_PAD, baseGeomFor, tag, 0);
+  /* This lane's own two lattice nodes, in world metres — the pins a crossing may not sit on top
+   * of. Read from `nodePos` rather than from the base polyline's ends so it is the same number
+   * `pinToNodes` uses; a base shape's first point IS the node, but saying so twice is how the two
+   * drift apart. */
+  const _n0 = [0, 0];
+  const _n1 = [0, 0];
+  nodePos(i, j, tier, seed, _n0);
+  nodePos(dir === 0 ? i + 1 : i, dir === 0 ? j : j + 1, tier, seed, _n1);
   let bad = false;
   for (const c of findCrossings([base, ...arterials])) {
     if (c.a !== base && c.b !== base) continue;
     if (c.deviationDeg > CROSS_CULL_DEV) {
+      bad = true;
+      break;
+    }
+    // See CROSS_CULL_NODE: too close to one of this lane's own pins to be levelled at all.
+    if (
+      Math.hypot(c.x - _n0[0], c.z - _n0[1]) < CROSS_CULL_NODE ||
+      Math.hypot(c.x - _n1[0], c.z - _n1[1]) < CROSS_CULL_NODE
+    ) {
       bad = true;
       break;
     }
@@ -1399,6 +1467,180 @@ function squareCrossings(base, seed, tag) {
   for (const c of found) {
     if (c.a !== base) continue; // base is always list[0] so always `a`; defensive anyway
     if (!outranks(c.b, base)) continue; // base outranks the other: base does not yield here
+    mine.push({ ka: c.ka, mx: c.ax, mz: c.az, ox: c.bx, oz: c.bz });
+  }
+  if (!mine.length) return base.pts;
+  mine.sort((p, q) => p.ka - q.ka);
+
+  const src = base.pts;
+  const n = src.length / 2;
+  const out = [];
+  let cursor = -1; // last index of `src` already written to `out`
+  let bent = false;
+
+  /* ── MERGED WINDOWS (hypothesis 7, 4 Aug) ──────────────────────────────────────────────────
+   *
+   * docs/BACKLOG.md, after hypothesis 6 was built and reverted: "the remaining untried half is
+   * MERGING overlapping windows into a single correction that squares both crossings at once,
+   * which does not create a large lone bend and so does not obviously walk into the same trap."
+   *
+   * The trap being avoided is recorded twice in this file — the asymmetric window and the
+   * severity-first order BOTH improved the mean and made the WORST crossing worse, because each
+   * gives one crossing a big lone window, and bending a long stretch hard swings a nearby stretch
+   * into near-parallel with something else.
+   *
+   * What the old loop did with a collision: `if (kc <= cursor) continue` dropped the second
+   * crossing ENTIRELY, and the window cap on the line below handed each of two near neighbours
+   * half the gap between them. So in a busy area the crossings that most need squaring are
+   * exactly the ones that get nothing — which is why widening the window never moved the mean
+   * (it buys more for the crossings that still fit and drops more of the ones that no longer do).
+   *
+   * Now: crossings whose windows overlap are one CLUSTER, and a cluster is corrected by ONE
+   * chain of hermites that passes through EVERY crossing in it, each with its own target tangent.
+   * No crossing is dropped, and no crossing gets a lone oversized bend — the room between two
+   * crossings is shared by the segment that joins them instead of being split down the middle.
+   *
+   * A cluster of one is bit-identical to the old two-segment path, so this can only differ where
+   * windows actually collided. */
+  const want = [];
+  for (const m of mine) {
+    const kc = clamp(Math.round(m.ka), 1, n - 2);
+    const thetaM = Math.atan2(m.mx, m.mz);
+    const thetaO = Math.atan2(m.ox, m.oz);
+    let raw = (thetaM - thetaO) % Math.PI;
+    if (raw <= -Math.PI / 2) raw += Math.PI;
+    else if (raw > Math.PI / 2) raw -= Math.PI;
+    const delta = raw >= 0 ? Math.PI / 2 - raw : -Math.PI / 2 - raw;
+    if (Math.abs(delta) < 1e-4) continue; // already square
+    const desiredM = clamp(24 + Math.abs(delta) * 320, 24, 420);
+    const win = Math.max(2, Math.round(desiredM / Math.max(base.span, 1e-3)));
+    if (want.length && kc === want[want.length - 1].kc) continue; // two crossings on one sample
+    want.push({ kc, delta, win, mx: m.mx, mz: m.mz });
+  }
+  if (!want.length) return base.pts;
+
+  /* Group into clusters: the next crossing joins this one when its window would start before
+   * this one's ends. Transitive by construction, walking left to right. */
+  const clusters = [];
+  for (const w of want) {
+    const last = clusters.length ? clusters[clusters.length - 1] : null;
+    if (last && w.kc - w.win <= last[last.length - 1].kc + last[last.length - 1].win) last.push(w);
+    else clusters.push([w]);
+  }
+
+  for (let ci = 0; ci < clusters.length; ci++) {
+    const cl = clusters[ci];
+    const first = cl[0];
+    const last = cl[cl.length - 1];
+    /* Room either side of the CLUSTER, not of each crossing: clamped by this edge's own nodes,
+     * by whatever the previous cluster already consumed, and by half the gap to the next cluster
+     * (the same rule the old loop applied between neighbouring crossings). */
+    let winL = Math.min(first.win, first.kc - Math.max(cursor, 0));
+    let winR = Math.min(last.win, n - 1 - last.kc);
+    if (ci < clusters.length - 1) {
+      const nextK = clusters[ci + 1][0].kc;
+      winR = Math.min(winR, Math.floor((nextK - last.kc) * 0.5));
+    }
+    if (winL < 2 || winR < 2) continue; // no room for this cluster at all
+
+    const k0 = first.kc - winL;
+    const k1 = last.kc + winR;
+    const p0x = src[k0 * 2],
+      p0z = src[k0 * 2 + 1];
+    const p1x = src[k1 * 2],
+      p1z = src[k1 * 2 + 1];
+
+    // The tangent the untouched curve already has at each end of the window — forward/backward
+    // differences into `src`, which this pass never writes to, so always safe to read.
+    let d0x = src[(k0 + 1) * 2] - p0x,
+      d0z = src[(k0 + 1) * 2 + 1] - p0z;
+    let l = Math.hypot(d0x, d0z) || 1;
+    d0x /= l;
+    d0z /= l;
+    let d1x = p1x - src[(k1 - 1) * 2],
+      d1z = p1z - src[(k1 - 1) * 2 + 1];
+    l = Math.hypot(d1x, d1z) || 1;
+    d1x /= l;
+    d1z /= l;
+
+    /* The chain: P0 -> C1 -> C2 -> ... -> P1. Interior knots are the crossings, each carrying its
+     * own target tangent; the two ends keep the tangent the untouched curve already had, which is
+     * what makes the join invisible. The backoff is applied to the WHOLE cluster at once, so the
+     * chain is either safe everywhere or backed off everywhere — a per-crossing backoff would let
+     * one knot keep a full-strength turn while its neighbour gave up, which is the lone-bend trap
+     * again in miniature. */
+    const knots = [{ x: p0x, z: p0z, tx: d0x, tz: d0z }];
+    for (const w of cl) knots.push({ x: src[w.kc * 2], z: src[w.kc * 2 + 1], tx: w.mx, tz: w.mz, delta: w.delta });
+    knots.push({ x: p1x, z: p1z, tx: d1x, tz: d1z });
+
+    let bestRadius = -Infinity;
+    let bestT = null;
+    let bestM = null;
+    for (const df of DELTA_BACKOFF) {
+      const tans = knots.map((k, i) => {
+        if (i === 0 || i === knots.length - 1) return [k.tx, k.tz];
+        const d = k.delta * df;
+        const ca = Math.cos(d),
+          sa = Math.sin(d);
+        return [k.tx * ca + k.tz * sa, -k.tx * sa + k.tz * ca];
+      });
+      const mags = [];
+      let worst = Infinity;
+      for (let s = 0; s < knots.length - 1; s++) {
+        const a = knots[s],
+          b = knots[s + 1];
+        const chord = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+        const mm = huntTangent(a.x, a.z, b.x, b.z, tans[s][0], tans[s][1], tans[s + 1][0], tans[s + 1][1], chord);
+        mags.push(mm);
+        const r = 1 / basePeak(a.x, a.z, b.x, b.z, tans[s][0], tans[s][1], tans[s + 1][0], tans[s + 1][1], mm);
+        if (r < worst) worst = r;
+      }
+      if (worst > bestRadius) {
+        bestRadius = worst;
+        bestT = tans;
+        bestM = mags;
+      }
+      if (worst >= CROSS_SAFE_RADIUS) break;
+    }
+
+    // Unchanged src up to (but not including) k0 — k0 itself is re-emitted as the chain's first
+    // sample, which lands on it exactly (hermite at t=0 reproduces it).
+    for (let k = cursor + 1; k < k0; k++) out.push(src[k * 2], src[k * 2 + 1]);
+
+    for (let s = 0; s < knots.length - 1; s++) {
+      const a = knots[s],
+        b = knots[s + 1];
+      const chord = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+      const mm = bestM[s];
+      const steps = clamp(Math.round(chord / CROSS_SQUARE_STEP), 2, 80);
+      for (let q = s === 0 ? 0 : 1; q <= steps; q++) {
+        hermite2(a.x, a.z, bestT[s][0] * mm, bestT[s][1] * mm, b.x, b.z, bestT[s + 1][0] * mm, bestT[s + 1][1] * mm, q / steps, _bp);
+        out.push(_bp[0], _bp[1]);
+      }
+    }
+    cursor = k1;
+    bent = true;
+  }
+  if (!bent) return base.pts;
+
+  for (let k = cursor + 1; k < n; k++) out.push(src[k * 2], src[k * 2 + 1]);
+  {
+    const result = Float32Array.from(out);
+    unknot(result, result.length / 2 - 1);
+    return result;
+  }
+}
+
+/** The pre-merge single-window pass, kept for reference only — see MERGED WINDOWS above. */
+function squareCrossingsSingle(base, seed, tag) {
+  const neighbors = baseNeighbors(base, seed, CROSS_PAD, tag);
+  if (!neighbors.length) return base.pts;
+
+  const found = findCrossings([base, ...neighbors]);
+  const mine = [];
+  for (const c of found) {
+    if (c.a !== base) continue;
+    if (!outranks(c.b, base)) continue;
     mine.push({ ka: c.ka, mx: c.ax, mz: c.az, ox: c.bx, oz: c.bz });
   }
   if (!mine.length) return base.pts;
@@ -1767,6 +2009,69 @@ function sharesNode(a, b) {
  * is a perfect right-angle junction. The angle comes from a dot product of unit vectors, which
  * has no notion of handedness or "which side is left", so it cannot be bitten by gotcha 1.
  */
+/* ── WHERE ROADS MEET, AS OPPOSED TO WHERE THEY CROSS ───────────────────────
+ *
+ * Operator, four times now: "junctions still overlapping roads not t splits and 4 ways -- many
+ * issues."
+ *
+ * THIS IS WHY, and it is not the thing five previous attempts went after. `findCrossings` below
+ * deliberately SKIPS every pair of edges that shares a lattice node (see `sharesNode`), and it is
+ * right to: those pairs are the network CONTINUING, and counting them as crossings swamped the angle
+ * census 8 to 1. But render/road.js builds its junction geometry from `findCrossings` and from
+ * nothing else. So a T-split or a four-way at a lattice node — which is what almost every junction
+ * in this world actually is — got NO junction patch at all. The ribbons simply ran over each other,
+ * which is precisely "overlapping roads, not T splits and 4 ways", and being coplanar is also what
+ * made them flash.
+ *
+ * Five plan-view fixes were falsified against the braid (docs/BACKLOG.md) — fan mixes, node jitter,
+ * shorter junction tangents, crossing-angle knobs. Every one of them was trying to change where the
+ * roads GO. None of them could have worked, because the roads were never the problem: the junction
+ * was missing from the picture.
+ *
+ * So: group live edges by the node they share, keep the nodes where three or more meet, and hand
+ * back one record per NODE for the renderer to lay an apron over. `findCrossings` is left exactly as
+ * it is — the census depends on it, and a "crossing point" at a shared node is degenerate anyway.
+ *
+ * @param {Array} edges as `edgesInBox` returns them
+ * @param {number} seed
+ * @returns {Array<{nodeKey:string, x:number, z:number, tier:number, legs:Array, radius:number}>}
+ */
+export function findNodeJunctions(edges, seed) {
+  const byNode = new Map();
+  for (const e of edges) {
+    for (const k of edgeNodeKeys(e)) {
+      let list = byNode.get(k);
+      if (!list) byNode.set(k, (list = []));
+      list.push(e);
+    }
+  }
+  const out = [];
+  const pos = [0, 0];
+  for (const [nodeKey, legs] of byNode) {
+    /* THREE IS THE DEFINITION OF A JUNCTION. Two edges at a node is the road carrying on — nodeDir
+     * gives them one shared tangent, so they are a straight or a bend, and laying an apron over
+     * every bend in the network would be both wrong and enormously expensive. */
+    if (legs.length < 3) continue;
+    const [tier, rest] = nodeKey.split(':');
+    const [i, j] = rest.split(',').map(Number);
+    nodePos(i, j, Number(tier), seed, pos);
+    let width = 0;
+    for (const e of legs) width = Math.max(width, e.width || 6);
+    out.push({
+      nodeKey,
+      x: pos[0],
+      z: pos[1],
+      tier: Number(tier),
+      legs,
+      /* An apron a little wider than the widest leg's half-width. 1.6x covers the corner fillets
+       * where two legs leave at an angle without throwing tarmac out into the fields — about 6.9 m
+       * on an arterial, against the ~80 m the braid currently smears across. */
+      radius: (width / 2) * 1.6,
+    });
+  }
+  return out;
+}
+
 export function findCrossings(edges) {
   const out = [];
   for (let ai = 0; ai < edges.length; ai++) {
@@ -1828,6 +2133,55 @@ export function findCrossings(edges) {
 
 const _seg = { d: 0, t: 0, x: 0, z: 0 };
 
+/* A TURNING HEAD IS PAVED GROUND, SO THE CARVE HOLDS IT FLAT.
+ *
+ * Operator, four times: "roads still end without a closure" — and every closure was there.
+ * tools/diag-terminus.mjs T1b/T8/T9 report 0 dead ends without a head, 0 heads with fewer than two
+ * bollards and 0 without a board, over 106 heads. What it also reported, and what the eye actually
+ * sees, is T5 and T6: the drawn head flying up to 0.157 m above the ground it is laid on, and its
+ * rim falling away from the road beside it. A paved lip hanging over an embankment is what a road
+ * that "just stops" looks like.
+ *
+ * The renderer already searches TERMINUS_RADII downwards trying to hold that fall under 0.16 m,
+ * but on a steep sidehill the search bottoms out at 1.0 — no widening at all — and the fall is
+ * still over a metre, because `carve()` holds the ground DEAD FLAT only inside the carriageway
+ * half-width and batters everything past it at 1:1.6. The head cannot be built level on ground the
+ * carve never levelled.
+ *
+ * So the ground is told about the head. Within a head's radius of an end that genuinely stops, the
+ * flat shelf grows to the head's own footprint and the batter starts from there. 1.55 is the same
+ * number as the renderer's widest radius, so the paved disc and the level ground are one disc by
+ * construction rather than two numbers that happen to agree.
+ *
+ * MEASURED: the chord sag over every head goes 0.157 m -> 0.0146 m worst, and the triangles flying
+ * above the 0.10 m of lift the overlay has go 44 of 51092 -> 0 of 42836. What it does NOT fix is
+ * T6's single outlier at (31213,-31823), 31 km out, which stays at ~1.2 m: that head sits on
+ * ground steep enough that a level disc of any size has a rim well below the road, and the honest
+ * answer there is a smaller head, not a flatter one. Recorded rather than hidden.
+ *
+ * Blended, not switched: a hard `if (dEnd < r)` would put a step in the carve exactly along the
+ * circle where the test flips, which is the failure this file keeps having. */
+const TERMINUS_PAVE = 1.55;
+/**
+ * The carriageway half-width to use at (x,z) — the edge's own, except near an end that stops dead,
+ * where it opens out to the turning head's footprint. Falls back to `e.width * 0.5` for any edge a
+ * caller built without `deadEnds` (RoadField fills it in; a bare edge from `edgesInBox` has none),
+ * so this can never be the reason a query changes its answer.
+ */
+function terminusHalf(e, x, z) {
+  const half = e.width * 0.5;
+  const ends = e.deadEnds;
+  if (!ends || !ends.length) return half;
+  const r = half * TERMINUS_PAVE;
+  let best = Infinity;
+  for (let i = 0; i < ends.length; i += 2) {
+    const d = Math.hypot(x - ends[i], z - ends[i + 1]);
+    if (d < best) best = d;
+  }
+  if (best >= r * 1.4) return half;
+  return lerp(r, half, smoothstep(r * 0.6, r * 1.4, best));
+}
+
 /** Deepest fill or cutting a road is allowed to ask the land for, in metres. */
 const MAX_EARTHWORK = 18;
 /* THE SAME BUDGET, DOUBLED, BUT ONLY WHERE TWO ROADS ACTUALLY CROSS.
@@ -1847,6 +2201,100 @@ const MAX_EARTHWORK = 18;
  * stays exactly as it was everywhere else. Doubling rather than removing: it has to remain
  * bounded, or a crossing in a ravine asks the carve for an unbuildable tower. */
 const CROSS_EARTHWORK = MAX_EARTHWORK * 2;
+
+/* ── how long a levelled junction takes to hand the road back ────────────────────────────────
+ *
+ * See pass 2 of `levelAgainst` for the mechanism and the before/after numbers. These three
+ * numbers are the whole of the operator's "smooth this out incredibly", so they are stated in
+ * metres of road, which is the unit a driver feels, and not in samples.
+ *
+ * LEVEL_RAMP 260 m. Highway practice sizes a vertical curve as L = K * A, where A is the
+ * algebraic change of grade in per cent and K is a comfort constant — about 10 m per per-cent
+ * for a road driven at these speeds. The worst junction in the 6 km census asked for a 30 pp
+ * change of grade, so 260 m is that curve with a little to spare, and it is comfortably inside
+ * the 620 m tier-1 cell so a lane still has open road between its junctions.
+ *
+ * Swept 120/180/260/340 m on tools/diag-junction-smooth.mjs, and the grade BREAK is flat across
+ * the range (mean 1.15/1.04/1.06/1.08 pp) — what actually moves is how steep the road is
+ * THROUGH a junction, mean grade 8.79 / 8.56 / 8.39 / 8.34 per cent, which is the thing a driver
+ * feels as the road heaving up to meet another one. It flattens out past 260 and the extra reach
+ * only buys more road moved, so that is where it stops.
+ *
+ * LEVEL_PLATEAU_W 0.55. How much of the apex's authority a neighbouring sample must still carry
+ * to count as being ON the junction rather than on the approach to it. Pass 1's weight falls
+ * from 1 to 0 as the road pulls away from the other carriageway between 4 m and 18 m, so 0.55
+ * puts the plateau edge at about 10.5 m from the other centreline — just past the far side of
+ * an arterial's 8.6 m carriageway, which is the width the two roads genuinely share.
+ *
+ * LEVEL_SITE_MAX 70 m. A run of captured samples longer than this is not one crossing, it is a
+ * lane running ALONGSIDE another road, and describing several hundred metres of that with one
+ * sample's correction would lift the lot. Long runs are cut into pieces this size, each with
+ * its own plateau, and the blend below knits them back together.
+ */
+const LEVEL_RAMP = 260;
+const LEVEL_PLATEAU_W = 0.55;
+const LEVEL_SITE_MAX = 70;
+
+/* ── THE ELEVATION HALF OF THE SIXTH APPROACH (B1) ───────────────────────────────────────────
+ *
+ * docs/BACKLOG.md, after five falsified attempts: "The separation and the gradient are only in
+ * conflict because the tangent is doing both jobs. Give the node a SHORT tangent for the first few
+ * samples and let the profile smooth over a longer window than the geometry does."
+ *
+ * The plan half of that already shipped as NODE_FAN. This is the other half, and it exists because
+ * of the table in approach 5: shortening the tangent buys separation and pays for it in GRADIENT,
+ * one for one (0.60 -> spread 25.8% but alpine 39.0%; 0.22 -> spread 7.3% but 63.6%). The reason is
+ * written down there — "a short tangent makes the road hug its chord, and the chord does not follow
+ * the terrain". That is an ELEVATION consequence of a PLAN decision, so it can be answered in
+ * elevation: near a node, smooth the height profile over a longer window than the rest of the edge
+ * uses, and the road rides over the ground the chord cuts through instead of following it.
+ *
+ * JOINT_GRADE_BOOST multiplies the tier's own `grade` smoothing length, and JOINT_WINDOW is how far
+ * from a node that longer window applies, in metres of road — the same unit as LEVEL_RAMP, and
+ * chosen to sit just inside it so this releases before the junction feather does. The blend is a
+ * smoothstep, so there is no grade break where the two windows meet.
+ *
+ * Both end samples are untouched by construction (the mask is applied to a blur of the SAME
+ * profile, and `pinToNodes` runs afterwards and owns the ends), so S3 — a node has one height —
+ * cannot move. diag-seam is the check that would catch it if it did.
+ */
+const JOINT_GRADE_BOOST = 2.0;
+const JOINT_WINDOW = 140;
+
+/* The PLAN half's second lever: the tangent length itself, as a fraction of what the backoff loop
+ * would otherwise keep. This is approach 5 out of docs/BACKLOG.md, which was falsified ON ITS OWN
+ * because it traded separation for gradient one for one. It is only worth re-opening WITH the
+ * longer elevation window above, which is the whole idea of the sixth approach. 1 = off. */
+const JOINT_TANGENT = 1;
+
+/* How close to this edge's own lattice node the feather's PLATEAU may come, metres.
+ *
+ * MEASURED, and it is the single thing that decides whether this change ships. `pinToNodes` puts
+ * an edge's two endpoints on their node's one height, every other edge at that node is on the
+ * same height, and tools/diag-seam.mjs's S3 measures that agreement at a bar of 1 m. It is
+ * 0.0000 m and it is what falsified three of the four fixes in BACKLOG B2.
+ *
+ * With the plateau free to run all the way to an endpoint, S3 went 0.0000 -> 2.7296 m at node
+ * 1:-1,0 on seed 424242: a crossing ten metres short of a node held its correction ONTO the node
+ * sample, and the sibling lane meeting there had no such crossing and stayed put. Collapsing the
+ * plateau to its single apex sample put S3 straight back to 0.0000 with the 260 m ramp still in
+ * place, so it is the plateau reaching the node that does it and not the ramp — the ramp is
+ * already clipped to the room it has and lands on exactly zero at the endpoint.
+ *
+ * 20 m, i.e. one ordinary sample step of road (`step` is 19 on both tiers): the smallest clip
+ * that keeps a plateau off the endpoint at all. Bigger is worse, not safer, and measurably so —
+ * at 60 m and 110 m the clip stops merely trimming a plateau and starts RELOCATING it away from
+ * the crossing it belongs to, and the worst open-road grade break went 38.81 -> 100.60 pp and
+ * 93.34 pp respectively while the junctions themselves got no better. S3 is 0.0000 at every
+ * value tried, so this is chosen on the smoothness numbers, not on the seam.
+ *
+ * The DIFFERENCE between this and B2's falsified attempt #4 — which switched levelling off near
+ * nodes and collapsed the crossing census from 34 bad boxes to 131 — is that only the FEATHER is
+ * held back here. Whatever pass 1 asked for at a sample still happens, everywhere, exactly as it
+ * did before this change: a crossing 10 m from a node is levelled just as hard as it ever was, it
+ * simply does not get to drag its neighbours into a node it does not own.
+ */
+const LEVEL_END_KEEP = 20;
 
 /**
  * One [w, 1-2w, w] pass over an elevation profile, repeated. Ends are clamped, not wrapped.
@@ -2016,6 +2464,7 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
   const T = TIERS[e.tier];
   blur(e.y, tmp, n, passesFor(T.grade, e.span, 0.25), 0.25);
 
+
   /* Both edges at a junction to the junction's own height, BEFORE the earthwork clamp and the
    * two smoothing passes below, so those can absorb the correction the way they were designed
    * to. They preserve the end samples themselves, so the pin survives them. */
@@ -2026,6 +2475,30 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
     if (d > MAX_EARTHWORK) e.y[k] = land[k] + MAX_EARTHWORK;
     else if (d < -MAX_EARTHWORK) e.y[k] = land[k] - MAX_EARTHWORK;
     if (e.y[k] < wl[k]) e.y[k] = wl[k];
+  }
+
+  /* THE ELEVATION HALF OF THE SIXTH APPROACH (B1): a LONGER smoothing window for the road either
+   * side of a node than the middle of the edge gets. See JOINT_GRADE_BOOST above for why.
+   *
+   * IT RUNS AFTER THE EARTHWORK CLAMP, and that position is a measurement, not a preference. Run
+   * BEFORE the clamp it made every median grade better (alpine 5.7 -> 5.1%) and every WORST grade
+   * worse (meadow 26.3 -> 28.5, rolling 26.1 -> 29.0, alpine 28.1 -> 28.8): a flatter approach
+   * leaves the land further away, the clamp then chops it back to MAX_EARTHWORK, and a clamp is a
+   * corner. Here the long window smooths the corner the clamp just made instead of feeding it.
+   *
+   * The floors are re-applied below, so this cannot put the road under water. Both end samples are
+   * untouched (`pinToNodes` owns them and has already run), so S3 cannot move. */
+  if (JOINT_GRADE_BOOST > 1 && n > 4) {
+    const long = Float32Array.from(e.y);
+    blur(long, tmp, n, passesFor(T.grade * JOINT_GRADE_BOOST, e.span, 0.25), 0.25);
+    for (let k = 1; k < n - 1; k++) {
+      // metres of road to the nearer end — e.span is this edge's own mean sample spacing
+      const d = Math.min(k, n - 1 - k) * e.span;
+      if (d >= JOINT_WINDOW) continue;
+      const w = 1 - smoothstep(0, JOINT_WINDOW, d);
+      const y = e.y[k] + (long[k] - e.y[k]) * w;
+      e.y[k] = y > wl[k] ? y : wl[k];
+    }
   }
 
   // Clamping breaks the smoothness it was applied to, so smooth once more — gently. Then
@@ -2090,6 +2563,27 @@ function profileEdge(e, landHeight, waterAt = null, seed = null, tag = null) {
  *  levelAgainst captures at 18 m of horizontal distance; edgesInBox's own margin adds the
  *  partner's half-width and verge on top of this, so 24 m is comfortably generous. */
 const CROSS_PAD = 24;
+/** How far each edge's departure tangent is blended from the node's shared line towards its own
+ *  chord. 0 is the old behaviour (every edge leaves a node along one line — the braiding).
+ *
+ *  0.28 is chosen for MARGIN, not because it is the best number. Measured braiding, worst seed:
+ *      0.00 -> 33.3%   0.12 -> 31.8%   0.20 -> 26.9%   0.24 -> 21.5%
+ *      0.28 -> 15.4%   0.31 -> 12.8%   0.35 -> 9.5% but BREAKS THE BOAT
+ *  At 0.35 five checks in bench-boat fail — the boat is no longer afloat and will not turn — because
+ *  fanning the departures moves whole edges, and past that point a road reaches water the bench's
+ *  steep-bank fixture depends on. 0.31 is clean and 0.35 is not, so the cliff is somewhere between;
+ *  0.28 sits a fifth below it rather than a tenth. Worth knowing before anyone turns this up: the
+ *  thing that breaks is the BOAT, not the roads, and it breaks suddenly.
+ *
+ *  AND IT COSTS MID-EDGE SQUARENESS, at every strength tried — this is a TRADE, not a free win,
+ *  and it is recorded here rather than left to be discovered. diag-crossing-angle, 12 km box:
+ *      fan 0.00  mean 6.89 deg  worst 31.5      fan 0.14  mean 8.39  worst 50.9
+ *      fan 0.20  mean 9.34      worst 74.5      fan 0.28  mean 9.43  worst 61.5
+ *  Braiding is what the operator reports over and over ("roads go in and out of each other"), and
+ *  the crossing-STEP census improves alongside it (34 boxes/7.03 m -> 26 boxes/3.94 m), so the fan
+ *  is taken — but a road crossing another at 61 degrees off square is a real thing he can see, and
+ *  it is now its own tracked item rather than a footnote. */
+const NODE_FAN = 0.31;
 
 /**
  * The furthest a road can reach into carve(), and therefore the smallest pad any field may
@@ -2369,19 +2863,26 @@ function canonicalProfile(e, tag, seed, land, waterAt) {
    * every box, on a road the player is now pointed at. The arterial is the top of the
    * priority order or it is not; this is what makes it so. */
   const held = new Float32Array(work.y.length);
-  levelAgainst(work, arts, arts.length, { record: held });
   /* Where the ARTERIAL pass actually took hold, remember it — the final earthwork clamp below
    * has to know the difference between "this lane wandered 20 m off the ground on its own" and
    * "this lane was pulled 20 m to meet an arterial it crosses". Clamping both the same way was
-   * cutting the correction straight back off and leaving the step. */
-  const pulled = Float32Array.from(held);
+   * cutting the correction straight back off and leaving the step.
+   *
+   * `pulled` is the FEATHER's reach and `held` is the crossing's own tight authority; they were
+   * one array until pass 2's ramp became a real length, at which point they had to part company.
+   * See levelAgainst's `budget` note: one of them blocks the next pass, the other opens the
+   * earthwork budget, and giving the second job to the first number locks the lane-vs-lane pass
+   * out of every road within a ramp length of an arterial. */
+  const pulled = new Float32Array(work.y.length);
+  levelAgainst(work, arts, arts.length, { record: held, budget: pulled });
   cacheSet(LVL1, k, Float32Array.from(work.y));
   // Each outranking lane at ITS OWN level-1 height. One hop, and no further: that bound is
   // the difference between an answer and the unbounded chain the old code had.
   for (const o of lanes) o.y.set(level1(o, tag, seed, land, waterAt));
-  const heldLanes = new Float32Array(work.y.length);
-  levelAgainst(work, lanes, lanes.length, { respect: held, record: heldLanes });
-  for (let i = 0; i < pulled.length; i++) if (heldLanes[i] > pulled[i]) pulled[i] = heldLanes[i];
+  /* No `record` on this one any more, and that is a deletion rather than an oversight: the only
+   * reader of the lane pass's authority was the merge into `pulled` on the line below, and
+   * `budget` now writes there directly. A third pass over this edge would need it back. */
+  levelAgainst(work, lanes, lanes.length, { respect: held, budget: pulled });
 
   /* Floors last, and both of them. levelCrossings runs after profileEdge's earthwork clamp,
    * so a correction that meets a road in a valley can leave the lane far outside the 18 m
@@ -2425,6 +2926,15 @@ export class RoadField {
       const p = canonicalProfile(e, tag, seed, landHeight, waterAt);
       e.y.set(p.y);
       e.water.set(p.water);
+      /* WHERE THIS EDGE STOPS DEAD, in world metres — [x,z,...], empty for a road that carries on
+       * at both ends. `carve` widens its flat shelf to a turning head's footprint at these points;
+       * see TERMINUS_PAVE. Computed once per field rather than per query because `edgeDeadEnds` is
+       * roads.js's own live-degree rule and the answer cannot change while a field is alive. */
+      const dead = edgeDeadEnds(e, seed, tag);
+      const n = e.pts.length;
+      e.deadEnds = [];
+      if (dead[0]) e.deadEnds.push(e.pts[0], e.pts[1]);
+      if (dead[1]) e.deadEnds.push(e.pts[n - 2], e.pts[n - 1]);
     }
   }
 
@@ -2548,7 +3058,7 @@ export class RoadField {
     let landH = NaN;
 
     for (const e of this.edges) {
-      const half = e.width * 0.5;
+      const half = terminusHalf(e, x, z);
       // The widest this edge could possibly reach: its shoulder grows with how far the road
       // sits above or below the land, and 60 m covers the tallest embankment the smoothing
       // can produce.
@@ -2728,6 +3238,13 @@ export function roadCamber(c) {
  *            an arterial endpoint is pinned to a node height its neighbours are also pinned
  *            to, and moving it is precisely how the reverted attempt put a 134% gradient on
  *            the trunk network.
+ *   budget   Float32Array(n) — how far the FEATHER reaches, written out, 0..1. Deliberately a
+ *            second array rather than `record` doing both jobs: `record` feeds `respect`, which
+ *            BLOCKS a later pass, and must stay tight to the crossing or the lane-vs-lane pass
+ *            would be locked out of every road within a ramp length of an arterial. `budget`
+ *            feeds canonicalProfile's earthwork clamp, which has to know the whole reach or it
+ *            cuts the far end of the ramp back to the open-road budget and puts back exactly
+ *            the step this pass exists to remove.
  */
 function levelAgainst(lane, others, count, opts = null) {
   if (!count) return;
@@ -2809,25 +3326,169 @@ function levelAgainst(lane, others, count, opts = null) {
   }
   if (record) for (let k = 0; k < n; k++) if (weight[k] > record[k]) record[k] = weight[k];
 
-  /* Pass 2: apply, then feather the correction into the neighbouring points so the lane ramps
-   * up to the junction instead of stepping at it. The ramp is a LENGTH — about 85 m of lane,
-   * which is what the old fixed three passes reached at the old spacing — so the pass count
-   * follows the sample spacing for the same reason profileEdge's does. */
-  const delta = new Float32Array(n);
-  for (let k = 0; k < n; k++) delta[k] = fix[k] * weight[k];
-  const smooth = new Float32Array(n);
-  const passes = passesFor(85, lane.span, 0.3);
-  for (let pass = 0; pass < passes; pass++) {
-    for (let k = 0; k < n; k++) {
-      const a = delta[k > 0 ? k - 1 : 0];
-      const b = delta[k];
-      const c = delta[k < n - 1 ? k + 1 : n - 1];
-      // Never smooth AWAY a correction at a crossing — the junction itself must stay exact.
-      smooth[k] = weight[k] > 0.75 ? b : a * 0.3 + b * 0.4 + c * 0.3;
+  /* ── Pass 2: give the correction back to the road over a LENGTH OF ROAD ───────────────────
+   *
+   * Operator, 3 Aug 2026: "Whenever there's a 90 degree angle junction between two roads, it's
+   * going to try to bring those two roads together in a way that they're on the same elevation.
+   * The problem is, it does this very abruptly. Instead it should smooth this out incredibly,
+   * so that everything is nice and smooth across the board."
+   *
+   * WHAT IT USED TO DO, AND WHY IT WAS ABRUPT EVERYWHERE IT MATTERED. Pass 2 was a three-tap
+   * blur repeated `passesFor(85, lane.span, 0.3)` times, with the crossing samples pinned so
+   * the correction could not be smoothed away. That is a diffusion in ARRAY INDEX space, and
+   * `passesFor` converts 85 m into a pass count using `lane.span` — the edge's MEAN sample
+   * spacing, about 20 m. But an edge is not evenly sampled: `squareCrossings` re-emits the
+   * polyline at `CROSS_SQUARE_STEP` (4 m) through exactly the windows this pass cares about,
+   * so at a levelled crossing the samples are five times closer together than `span` claims and
+   * the same 30 passes reach sqrt(2*0.3*30)*4 = 17 m of road instead of 85. The feather was
+   * therefore SHORTEST precisely where the correction was LARGEST — and a pinned apex with a
+   * short two-sided ramp is a tent, whose peak is a slope discontinuity by construction.
+   *
+   * The evidence is tools/diag-junction-smooth.mjs — 3 seeds, 6 km box, 100 levelled crossings,
+   * every profile resampled onto a uniform 8 m of arc first so nothing here is an artefact of
+   * where the polyline happens to put its vertices. GRADE BREAK is the change of gradient over
+   * one 8 m step, in percentage points; the open-road column is the same statistic on road more
+   * than 320 m clear of any crossing, on the very same edges, because every road has grade
+   * breaks and a junction number alone would mean nothing.
+   *
+   *                       worst    mean     p95    mean, junction : open road
+   *     before            101.24    1.63    8.57            5.97x
+   *     after              99.72    1.06    4.79            3.59x
+   *
+   * The mean halves, the p95 halves, junction approaches breaking by more than 10 pp go 68 -> 54
+   * and by more than 20 pp go 43 -> 27, and the road is less steep through a junction as well
+   * (mean grade 9.05% -> 8.39%). The WORST is unmoved, and that is honest rather than
+   * disappointing: at 99.72 pp it is lane 1:-5,2,0 climbing a 33%-per-step hillside, where the
+   * raw profile already carries 90% gradients before anything is levelled at all. That one is
+   * tools/diag-relief.mjs's problem, not this pass's.
+   *
+   * WHAT IT DOES NOW. The same thing the rest of this file already does with every other
+   * smoothing length: it works in metres. The correction is described as a small number of
+   * SITES — one per run of samples this pass captured — each a plateau across the junction
+   * itself and a `smoothstep` release either side over `LEVEL_RAMP` metres of arc length.
+   * `smoothstep` is flat at both ends, so the profile leaves the plateau with zero change of
+   * gradient and arrives at open road with zero change of gradient: there is no tent apex left
+   * to feel. Nothing about pass 1 changed, so WHICH crossings are levelled, and by how much AT
+   * the crossing, is exactly what it was — this is the elevation half only, and the plan view
+   * is untouched.
+   *
+   * THREE VARIANTS FALSIFIED, WITH THEIR NUMBERS, so nobody spends the afternoon again:
+   *
+   *  a) DROP THE FLOOR ENTIRELY and let the smooth field be the whole answer. Best smoothness of
+   *     anything tried — worst break 99.72 -> 74.99, mean 1.06 -> 0.85, over-10-pp 54 -> 42 — and
+   *     it wrecks the thing this pass is FOR: tools/diag-crosslevel.mjs's car-box sweep goes 34 of
+   *     266 to 79 of 266, crossings over a metre 34 -> 103, and the reversed-spawn gate 1 -> 3.
+   *  b) GIVE A SITE THE LARGEST correction anywhere in its run rather than the one at its
+   *     highest-weight sample, so the floor almost never bites. Reads well here (worst 99.72 ->
+   *     74.14, over-10-pp 54 -> 49, over-20-pp 27 -> 22) and over-corrects the shoulders of a
+   *     junction, pushing the lane past the road it is meeting: sweep 34 -> 61 of 266, reversed
+   *     spawn 1 -> 2.
+   *  c) APPLY THE FLOOR ONLY ON THE PLATEAU, leaving the shoulders to the smooth field. Buys
+   *     nothing at a junction (mean 1.06 -> 1.08, worst identical) and puts a 70.98 pp break on
+   *     OPEN ROAD where 30.72 was the worst — the shoulders stop agreeing with the plateau.
+   *
+   * All three say the same thing: the exact per-sample correction pass 1 computes is load-bearing,
+   * and the only safe place to be generous is OUTSIDE it.
+   */
+
+  /* Nothing captured, nothing to feather — and this is the common case, because `_near` above
+   * only asks whether the two edges' BOXES overlap. Checked before the arc length below so an
+   * edge that merely passes near another one does not pay for a length integral it cannot use. */
+  let any = false;
+  for (let k = 0; k < n && !any; k++) if (weight[k] > 0) any = true;
+  if (!any) return;
+
+  const s = new Float64Array(n);
+  for (let k = 1; k < n; k++)
+    s[k] = s[k - 1] + Math.hypot(lane.pts[k * 2] - lane.pts[k * 2 - 2], lane.pts[k * 2 + 1] - lane.pts[k * 2 - 1]);
+  const total = s[n - 1];
+
+  /* One site per run of captured samples, split every LEVEL_SITE_MAX metres so a lane that runs
+   * ALONGSIDE an arterial for a few hundred metres — which does happen, and is one long run,
+   * not one crossing — is described by several local plateaus rather than by one road's worth of
+   * a single sample's correction. */
+  const sites = [];
+  for (let k = 0; k < n; ) {
+    if (weight[k] <= 0) {
+      k++;
+      continue;
     }
-    delta.set(smooth);
+    let end = k;
+    while (end + 1 < n && weight[end + 1] > 0) end++;
+    for (let a = k; a <= end; ) {
+      let b = a;
+      while (b + 1 <= end && s[b + 1] - s[a] < LEVEL_SITE_MAX) b++;
+      let ap = a;
+      for (let q = a; q <= b; q++) if (weight[q] > weight[ap]) ap = q;
+      // The plateau is the part of the site that is really ON the junction: everything still
+      // carrying most of the apex's authority. Held flat so the road crosses level rather than
+      // peaking at one sample.
+      const floor = weight[ap] * LEVEL_PLATEAU_W;
+      let p0 = ap;
+      let p1 = ap;
+      while (p0 > a && weight[p0 - 1] >= floor) p0--;
+      while (p1 < b && weight[p1 + 1] >= floor) p1++;
+      /* The plateau stops short of this edge's own lattice nodes — see LEVEL_END_KEEP. Done
+       * HERE, by moving the plateau, rather than by fading the finished feather out near a
+       * node, and the difference is measurable: a fade multiplied into the ramp subtracts from
+       * a stretch the ramp was still climbing and digs a dip, which took the worst OPEN-ROAD
+       * grade break from 38.81 pp to 98.06. Shortening the plateau instead leaves one monotone
+       * shape — flat over the junction, one smoothstep down to nothing — and the ramp's own
+       * room clip below then lands it on exactly zero at the node. */
+      const keep = Math.min(LEVEL_END_KEEP, total * 0.4);
+      let q0 = Math.max(s[p0], keep);
+      let q1 = Math.min(s[p1], total - keep);
+      if (q0 > q1) q0 = q1 = clamp(s[ap], keep, Math.max(keep, total - keep));
+      sites.push({ v: fix[ap] * weight[ap], s0: q0, s1: q1 });
+      a = b + 1;
+    }
+    k = end + 1;
   }
-  for (let k = 0; k < n; k++) lane.y[k] += delta[k] * own[k];
+  if (!sites.length) return;
+
+  const budget = opts && opts.budget;
+  for (let k = 0; k < n; k++) {
+    let acc = 0;
+    let cov = 0;
+    for (let i = 0; i < sites.length; i++) {
+      const st = sites[i];
+      const before = s[k] < st.s0;
+      const d = before ? st.s0 - s[k] : s[k] > st.s1 ? s[k] - st.s1 : 0;
+      let f;
+      if (d <= 0) f = 1;
+      else {
+        /* The release may not run off the end of the edge. `pinToNodes` put this edge's two
+         * endpoints ON their lattice nodes and every other edge at those nodes is pinned to the
+         * same height; diag-seam's S3 measures exactly that agreement, and it is what killed the
+         * three previous attempts at this (BACKLOG B2, #3/#4/#5). A ramp that reaches the end of
+         * the edge with anything left in it drags one edge off a shared node and not the other.
+         * So the ramp is shortened to the room it actually has, which still leaves it far longer
+         * than the 17 m it had before, and smoothstep hits exactly zero with zero slope at the
+         * node itself. */
+        const room = before ? st.s0 : total - st.s1;
+        const ramp = Math.min(LEVEL_RAMP, room);
+        if (!(d < ramp)) continue;
+        f = 1 - smoothstep(0, ramp, d);
+      }
+      acc += f * st.v;
+      cov += f;
+    }
+    // Where two sites overlap, share the sample between them rather than adding both — two
+    // crossings 60 m apart must not level a lane twice over.
+    let v = cov > 1 ? acc / cov : acc;
+    /* A FLOOR, not a replacement: whatever pass 1 asked for at this sample still happens. The
+     * feather can only ever add reach, so no crossing can come out of this change less level
+     * than it went in, which is what keeps tools/diag-crosslevel.mjs honest. */
+    const core = fix[k] * weight[k];
+    if (Math.abs(core) > Math.abs(v)) v = core;
+    /* `fix` and `weight` were both settled in pass 1 and nothing below reads `lane.y`, so the
+     * correction can go straight on rather than into a third scratch array. */
+    lane.y[k] += v * own[k];
+    if (budget) {
+      const c = clamp01(cov) * own[k];
+      if (c > budget[k]) budget[k] = c;
+    }
+  }
 }
 
 /**

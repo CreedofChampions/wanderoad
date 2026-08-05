@@ -15,7 +15,7 @@
  * cheat mode on mid-drive should not fire the same toast a real 500-sun drive earns.
  */
 
-import { cheatOn } from './garage.js';
+import { cheatOn, FIRST_CAR } from './garage.js';
 
 /** Suns needed to earn the boat outright. */
 /* 50, not 500. Suns are now ~1 per kilometre (see world/loot.js), so 500 was a 500 km
@@ -100,6 +100,15 @@ export function milestoneStart(i) {
 }
 
 /** Suns for one spare fuel can at a pump, and the most you may carry. */
+/* ── WHAT A TOWN COSTS, AND HOW FAR IT GOES ─────────────────────────────────
+ * Two tiers above the town every station already has, priced against the rest of the shop rather
+ * than picked: a fuel can is 8 suns and the boat is 50, so 120 is a real saving-up and 400 is the
+ * kind of number he set for the boat himself ("make it cost lets say 400 suns"). Tier 1 turns a
+ * cluster of props into something with a street; tier 2 makes it visible from much further out,
+ * which is the point of upgrading a place you keep driving back to. */
+export const TOWN_PRICES = [120, 400];
+export const TOWN_MAX_TIER = TOWN_PRICES.length;
+
 export const CAN_PRICE = 8;
 export const CAN_MAX = 3;
 
@@ -126,6 +135,12 @@ export class Wallet {
     /** Fuel-capacity upgrades bought, PER CAR: { [carId]: levels }. Per car because capacity
      *  belongs to the car (see game/fuel.js's own note) and so does the money spent on it. */
     this.tanks = {};
+    /** TOWNS UPGRADED, PER STATION: { [stationKey]: tier }. Keyed by the station's own world key
+     *  (`st:<edgeKey>` — see world/props.js), which is a pure function of the seed and the lattice,
+     *  so the same town is the same town on every load and in every player's copy of the world.
+     *  Same shape and same reasoning as `tanks` above: a thing you bought, attached to the thing
+     *  you bought it for, rather than a global counter that would make every town upgrade at once. */
+    this.towns = {};
     /** Metres of the CURRENT run, and which milestone bar it is on — see mintStreak. Per run, not
      *  persisted: leaving the road puts you back on the first bar, which is the whole design. */
     this._runM = 0;
@@ -166,6 +181,7 @@ export class Wallet {
       this.boat = !!d.boat;
       if (Array.isArray(d.owned)) this.owned = new Set(d.owned);
       if (d.tanks && typeof d.tanks === 'object') this.tanks = { ...d.tanks };
+      if (d.towns && typeof d.towns === 'object') this.towns = { ...d.towns };
       this._cans = Math.max(0, Math.min(CAN_MAX, +d.cans || 0));
       this.plane = !!d.plane;
     } catch {
@@ -185,6 +201,7 @@ export class Wallet {
           boat: this.boat,
           owned: [...this.owned],
           tanks: this.tanks,
+          towns: this.towns,
           cans: this._cans,
           plane: this.plane,
         })
@@ -227,7 +244,13 @@ export class Wallet {
    * @param {string} freeId the fleet's first car
    * @param {number} [earnAt] lifetime suns this car unlocks at, if it is one of the earned ones
    */
-  owns(carId, freeId = 'estate', earnAt = Infinity) {
+  /* THE DEFAULT COMES FROM THE FLEET, NOT FROM A STRING. It was `'estate'`, and the moment the
+   * operator asked for the Ford to be the starter car ("Starter car cant go up many hills -- replace
+   * with ford") that literal made the Estate free forever AND made it unbuyable — `buyCar` calls
+   * `owns()` with the default, saw true, and refused to take the money. Caught by bench-economy's
+   * "paying for Estate works" going red. `FIRST_CAR` is `FLEET[0].id`, so the free car is whichever
+   * car the fleet starts with, and reordering the fleet can never desynchronise the two again. */
+  owns(carId, freeId = FIRST_CAR, earnAt = Infinity) {
     if (carId === freeId || this.owned.has(carId) || cheatOn()) return true;
     return Number.isFinite(earnAt) && this.sunsEarned >= earnAt;
   }
@@ -268,6 +291,33 @@ export class Wallet {
     this._events.push({ kind: 'tank-bought', carId, level: this.tanks[carId], price });
     this.save();
     return true;
+  }
+
+  /* ── TOWNS ───────────────────────────────────────────────────────────────
+   * Operator: "Towns can be upgraded". A town is the cluster of buildings around a station; the
+   * tier decides how much of it exists. Priced in suns like everything else, because suns are the
+   * one currency in this game and a second one would be a second thing to explain. */
+
+  /** What tier the town at this station is. 0 is the town every station starts with. */
+  townLevel(stationKey) {
+    return Math.max(0, Math.min(TOWN_MAX_TIER, +this.towns[stationKey] || 0));
+  }
+
+  /** Price of the NEXT tier for this town, or null when it is already fully built. */
+  townPrice(stationKey) {
+    const t = this.townLevel(stationKey);
+    return t >= TOWN_MAX_TIER ? null : TOWN_PRICES[t];
+  }
+
+  /** Buy the next tier for one town. Returns the tier it is now, or 0 if nothing was bought. */
+  buyTown(stationKey) {
+    const price = this.townPrice(stationKey);
+    if (price === null || !stationKey) return 0;
+    if (!this.spend(price)) return 0;
+    this.towns[stationKey] = this.townLevel(stationKey) + 1;
+    this._events.push({ kind: 'town-bought', stationKey, level: this.towns[stationKey], price });
+    this.save();
+    return this.towns[stationKey];
   }
 
   /**

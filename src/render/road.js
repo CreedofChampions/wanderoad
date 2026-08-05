@@ -30,7 +30,7 @@ import {
 } from 'three';
 import { vertHead, fragHead, GL_HASH, GL_NOISE, GL_SKY, GL_SHADOW, GL_LIGHT, glCloudField } from '../core/glsl.js';
 import { sharedUniforms } from './uniforms.js';
-import { RoadField, TIERS, findCrossings, outranks, edgeDeadEnds } from '../world/roads.js';
+import { RoadField, TIERS, findCrossings, findNodeJunctions, outranks, edgeDeadEnds } from '../world/roads.js';
 import { Terrain, landFn, waterFn } from '../world/terrain.js';
 import { hash2i, clamp01, lerp } from '../core/math.js';
 import { RGB } from '../core/palette.js';
@@ -171,7 +171,7 @@ void main(){
 }
 `;
 
-function createRoadMaterial() {
+function createRoadMaterial(extra = {}) {
   return new RawShaderMaterial({
     glslVersion: '300 es',
     uniforms: sharedUniforms({
@@ -186,7 +186,38 @@ function createRoadMaterial() {
     // which stops it z-fighting the terrain but also lets it draw OVER the car sitting on
     // it — the road ate the player's own vehicle on the first build with roads. The 7 cm
     // physical lift is plenty of separation on its own.
+    ...extra,
   });
+}
+
+/* ── WHEN TWO ROADS OVERLAP, ONE OF THEM HAS TO LOSE ─────────────────────────
+ *
+ * Operator, with a GIF of it happening: "I think the road is the top thing forces 2 roads to top
+ * when crossing -- this means they flash as each competes for visual space".
+ *
+ * That reading is exactly right, and it is worth saying why it happens rather than just fixing it.
+ * Every ribbon is laid at `terrain height + LIFT`, with LIFT a single constant (0.07 m) and no
+ * per-edge term at all. Two ribbons crossing therefore occupy the SAME plane to the last bit, they
+ * share one material and one `renderOrder`, and three.js falls back to sorting them by distance —
+ * which flips as the camera moves. Two coplanar surfaces taking turns to win the depth test is the
+ * definition of z-fighting, and at speed it reads as a flicker.
+ *
+ * THE FIX IS IN DEPTH SPACE, NOT WORLD SPACE. Pushing the loser down by a few millimetres works up
+ * close and stops working at range, because depth precision falls off with distance — and range is
+ * exactly where the flashing is worst. `polygonOffset` is applied in depth-buffer units, so it
+ * scales with distance on its own.
+ *
+ * The offset here is POSITIVE, which pushes the losing ribbon AWAY from the viewer. The rejection
+ * recorded just above is of a NEGATIVE offset pulling the road TOWARDS the viewer, which let it draw
+ * over the car; a positive offset on the loser cannot do that, because it only ever moves a surface
+ * further back than a surface it was already tied with.
+ *
+ * Which ribbon loses is decided by `outranks` in world/roads.js — tier first, then the edge key
+ * string. That is a pure function of the two edges and a strict total order, so it is stable frame
+ * to frame, cannot cycle, and gives every multiplayer client the same answer. Anything derived from
+ * the camera would flash again, and differently for each player. */
+export function createRoadMaterialYield() {
+  return createRoadMaterial({ polygonOffset: true, polygonOffsetFactor: 1.0, polygonOffsetUnits: 1.0 });
 }
 
 /**
@@ -219,7 +250,7 @@ export function ribbonEdges(seed, x0, z0, x1, z1) {
  * Exported so tools/diag-seam.mjs and tools/diag-fallthrough.mjs can measure the triangles the
  * player is actually looking at instead of a replica of them.
  */
-export function buildRibbon(edge, seed, crossings = null) {
+export function buildRibbon(edge, seed, crossings = null, nodeJunctions = null) {
   const n = edge.pts.length / 2;
   /* THE GROUND, from the same class the car's wheels ask. Not a reproduction of it — this
    * file has now twice been the place where a second opinion about where the road is grew
@@ -335,6 +366,18 @@ export function buildRibbon(edge, seed, crossings = null) {
       });
     }
   }
+  /* AND THE NODE APRONS THIS EDGE RUNS INTO. Same job as the boxes above — stop painting before the
+   * junction — but a node apron is a DISC, so it needs its own test rather than a parallelogram's.
+   * Without this every leg of a T-split paints its edge lines and centre dashes straight across the
+   * others, which is the "lines everywhere" half of the operator's report. */
+  const discs = [];
+  if (nodeJunctions) {
+    for (const nj of nodeJunctions) {
+      if (!nj.legs.some((l) => l.key === edge.key)) continue;
+      discs.push({ x: nj.x, z: nj.z, r2: (nj.radius + 1.2) * (nj.radius + 1.2) });
+    }
+  }
+
   const index = new Uint32Array((rings - 1) * (ACROSS - 1) * 6);
 
   const half = halfW;
@@ -383,6 +426,18 @@ export function buildRibbon(edge, seed, crossings = null) {
       normal[k * 3 + 2] = 0;
       across[k * 2] = f;
       across[k * 2 + 1] = travelled;
+      if (discs.length) {
+        const vx = position[k * 3];
+        const vz = position[k * 3 + 2];
+        for (const d of discs) {
+          const dx = vx - d.x;
+          const dz = vz - d.z;
+          if (dx * dx + dz * dz <= d.r2) {
+            markAt[k] = 0;
+            break;
+          }
+        }
+      }
       if (boxes.length) {
         const vx = position[k * 3];
         const vz = position[k * 3 + 2];
@@ -649,6 +704,96 @@ export function inJunctionFootprint(f, x, z) {
  * Exported for tools/diag-junction-geom.mjs, the same reason buildRibbon and ribbonEdges are:
  * a diagnostic has to drive the exact geometry the game draws, not a description of it.
  */
+/**
+ * THE APRON OVER A T-SPLIT OR A FOUR-WAY.
+ *
+ * Operator, four times: "junctions still overlapping roads not t splits and 4 ways -- many issues."
+ *
+ * Until now this geometry did not exist. `buildJunction` above covers where two roads CROSS
+ * mid-edge, and it does that well — `diag-junction-cover` measures 0% of it uncovered. But the
+ * renderer took its whole junction list from `findCrossings`, which deliberately skips edges that
+ * share a lattice node, and a shared node is what almost every junction in this world IS. Measured
+ * on the shipped seed over the same four 4 km windows that check uses: 119 such nodes carrying
+ * 15,959 m2 of double-covered coplanar tarmac, 100% of it with no patch over it — 5.6 times the
+ * entire mid-edge overlap the junction system was built for. Two ribbons lying on each other with
+ * both sets of markings painted through is exactly what the operator has been photographing, and
+ * being coplanar is also why they flash.
+ *
+ * A node apron is a DISC, not a parallelogram: three or four legs leave a node in different
+ * directions and there is no major/minor pair to build a footprint from. A radial fan is the
+ * honest shape and it is also the cheap one.
+ *
+ * Sampled BY DISTANCE, at the same `JUNCTION_STEP` the crossing patch uses — not by a fixed ring
+ * count. A fan of fixed resolution stretched over a wide arterial node would span metres per quad
+ * and fly over the ground on a slope, which is the 40 m fall-through family this repo has already
+ * paid for once. Every vertex takes its own `terr.height`, so the apron follows the carved ground.
+ *
+ * @param {{x:number,z:number,radius:number,nodeKey:string}} nj from world/roads.js findNodeJunctions
+ * @param {number} seed
+ */
+export function buildNodeJunction(nj, seed) {
+  const s = seed >>> 0;
+  const R = nj.radius;
+  const reach = R + 6;
+  const terr = new Terrain(s, nj.x - reach, nj.z - reach, nj.x + reach, nj.z + reach, 48);
+  /* The same deterministic sub-millimetre stagger `buildJunction` uses, for the same reason: two
+   * aprons whose discs touch must not end up in one plane. Keyed off the node's own position so it
+   * is identical on every client. */
+  const tie = ((Math.abs((Math.round(nj.x) * 73856093) ^ (Math.round(nj.z) * 19349663)) >>> 0) % 8) * 0.0004;
+  const h = (x, z) => terr.height(x, z) + JUNCTION_LIFT + tie;
+
+  const position = [];
+  const normal = [];
+  const across = [];
+  const markAt = [];
+  const index = [];
+  const push = (x, z) => {
+    const i = position.length / 3;
+    position.push(x, h(x, z), z);
+    normal.push(0, 1, 0);
+    // AC_PLAIN across the whole apron: plain tarmac, no edge line, no centre dash. Markings that
+    // ran through each other are half of what "many issues" meant.
+    across.push(AC_PLAIN, 0);
+    markAt.push(0);
+    return i;
+  };
+
+  const centre = push(nj.x, nj.z);
+  // rings and spokes both at roughly JUNCTION_STEP, so quad size is bounded on a big node too
+  const rings = Math.max(2, Math.round(R / JUNCTION_STEP));
+  const spokes = Math.max(8, Math.round((2 * Math.PI * R) / JUNCTION_STEP));
+  const ringIdx = [];
+  for (let r = 1; r <= rings; r++) {
+    const rad = (R * r) / rings;
+    const row = [];
+    for (let k = 0; k < spokes; k++) {
+      const a = (k / spokes) * Math.PI * 2;
+      row.push(push(nj.x + Math.cos(a) * rad, nj.z + Math.sin(a) * rad));
+    }
+    ringIdx.push(row);
+  }
+  // inner fan
+  for (let k = 0; k < spokes; k++) index.push(centre, ringIdx[0][k], ringIdx[0][(k + 1) % spokes]);
+  // and the rings between
+  for (let r = 0; r < rings - 1; r++)
+    for (let k = 0; k < spokes; k++) {
+      const a = ringIdx[r][k];
+      const b = ringIdx[r][(k + 1) % spokes];
+      const c2 = ringIdx[r + 1][(k + 1) % spokes];
+      const d = ringIdx[r + 1][k];
+      index.push(a, d, c2, a, c2, b);
+    }
+
+  const g = new BufferGeometry();
+  g.setAttribute('position', new BufferAttribute(new Float32Array(position), 3));
+  g.setAttribute('normal', new BufferAttribute(new Float32Array(normal), 3));
+  g.setAttribute('aCross', new BufferAttribute(new Float32Array(across), 2));
+  g.setAttribute('aMark', new BufferAttribute(new Float32Array(markAt), 1));
+  g.setIndex(new BufferAttribute(new Uint32Array(index), 1));
+  g.computeBoundingSphere();
+  return { geometry: g, x: nj.x, z: nj.z, radius: R };
+}
+
 export function buildJunction(c, seed) {
   const s = seed >>> 0;
   const f = junctionFootprint(c);
@@ -1204,7 +1349,16 @@ export class Roads {
     scene.add(this.group);
 
     this.material = createRoadMaterial();
+    /* The same program with a positive depth offset, for whichever of two overlapping ribbons loses
+     * the `outranks` order — see createRoadMaterialYield's own note for why this is depth-space and
+     * not a millimetre of world height. Two materials means at worst two draw batches instead of
+     * one; measured against bench-chunk before landing. */
+    this.materialYield = createRoadMaterialYield();
     this.paintedMaterial = createPaintedMaterial();
+    /* Marker posts, chevrons, bollards and closing boards are all InstancedMeshes, and a
+     * RawShaderMaterial does not get three's instancing rewrite — see PAINTED_VS_INSTANCED in
+     * render/painted.js for the measurement chain that found this (B28). */
+    this.paintedInstancedMaterial = createPaintedMaterial({ instanced: true });
     this.furniture = buildFurnitureGeometry();
 
     this.live = new Map(); // edge key -> { mesh, posts, chevrons }
@@ -1230,16 +1384,31 @@ export class Roads {
      * Two independent findCrossings calls would be two opinions about where a junction is. */
     const xings = findCrossings(edges);
     const wanted = new Set();
+    /* Worked out ONCE per update and handed to every ribbon, so a window's worth of ribbons does not
+     * re-derive the same node grouping dozens of times. */
+    const nodeJs = findNodeJunctions(edges, ctx);
 
     for (const e of edges) {
       wanted.add(e.key);
       if (this.live.has(e.key)) continue;
 
-      const { geometry, ring, half } = buildRibbon(e, ctx, xings);
-      const mesh = new Mesh(geometry, this.material);
+      const { geometry, ring, half } = buildRibbon(e, ctx, xings, nodeJs);
+      /* DOES ANYTHING OVERLAP THIS ONE AND BEAT IT? Only edges that actually cross it can fight it
+       * for the same pixels, and `xings` is already the list of crossings in this window, so the
+       * question costs a scan of that list rather than an all-pairs test. A ribbon that loses to any
+       * crossing partner takes the yielding material and draws first. */
+      let yields = false;
+      for (const x of xings) {
+        const other = x.a && x.a.key === e.key ? x.b : x.b && x.b.key === e.key ? x.a : null;
+        if (other && outranks(other, e)) {
+          yields = true;
+          break;
+        }
+      }
+      const mesh = new Mesh(geometry, yields ? this.materialYield : this.material);
       mesh.frustumCulled = true;
       mesh.matrixAutoUpdate = false;
-      mesh.renderOrder = 1;
+      mesh.renderOrder = yields ? 0 : 1;
       this.group.add(mesh);
 
       /* A road that stops gets a turning head and a closing bar instead of its markings
@@ -1275,7 +1444,7 @@ export class Roads {
         [this.furniture.endboard, endItems.filter((i) => i.kind === 'endboard')],
       ]) {
         if (!list.length) continue;
-        const im = new InstancedMesh(geo, this.paintedMaterial, list.length);
+        const im = new InstancedMesh(geo, this.paintedInstancedMaterial, list.length);
         const m = new Matrix4();
         const q = new Quaternion();
         const pos = new Vector3();
@@ -1288,6 +1457,13 @@ export class Roads {
         });
         im.instanceMatrix.needsUpdate = true;
         im.frustumCulled = false;
+        /* WHICH FURNITURE THIS IS. Every one of these is a `BufferGeometry` to anything walking the
+         * scene, so "is the closure at that road end actually standing there" could not be answered
+         * without guessing — a B28 probe found eight-vertex pieces a metre past a head and could not
+         * tell a bollard from a marker post. Naming them costs nothing and makes the scene
+         * self-describing. */
+        im.name = `road:${list[0].kind}`;
+        im.userData.kind = list[0].kind;
         this.group.add(im);
         rec.instanced.push(im);
       }
@@ -1335,6 +1511,24 @@ export class Roads {
       this.group.add(mesh);
       this.junctions.set(jkey, { mesh });
     }
+    /* AND THE T-SPLITS AND FOUR-WAYS, which had no geometry at all until now. Same map, same
+     * lifecycle, same eviction below — a node apron is just another junction as far as this class is
+     * concerned. Keyed by the node key, which is unique and stable, so an apron is built once and
+     * survives every re-query of the window. See buildNodeJunction for the measurement that made
+     * this necessary. */
+    for (const nj of nodeJs) {
+      const jkey = `node~${nj.nodeKey}`;
+      wantedJ.add(jkey);
+      if (this.junctions.has(jkey)) continue;
+      const { geometry } = buildNodeJunction(nj, ctx);
+      const mesh = new Mesh(geometry, this.material);
+      mesh.frustumCulled = true;
+      mesh.matrixAutoUpdate = false;
+      mesh.renderOrder = 2;
+      this.group.add(mesh);
+      this.junctions.set(jkey, { mesh, node: nj });
+    }
+
     for (const [key, rec] of this.junctions) {
       if (wantedJ.has(key)) continue;
       this.group.remove(rec.mesh);
