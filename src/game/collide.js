@@ -57,19 +57,40 @@ const SOFT = 4;
 
 /**
  * Closing speed, in m/s straight into the obstacle, above which a hit is a DEAD STOP rather
- * than a scrape. 2.5 m/s is about 9 km/h: below it you are nosing into a trunk at walking
- * pace and being frozen would read as a bug, above it you drove into a tree.
+ * than a scrape. NOT the car's own speed — `-vn`, the component of it pointed at THIS
+ * obstacle, which is `severity * speed` by definition (severity IS `-vn/speed`). That
+ * multiplication is why the original 2.5 m/s quietly demanded a much higher severity than
+ * GRAZE's own line the moment a car was going faster than a crawl: at a very ordinary 30 km/h
+ * (8.3 m/s), clearing 2.5 m/s of closing speed alone needs severity >= 0.30 — comfortably
+ * above GRAZE regardless of where GRAZE is set, so GRAZE was never the binding constraint at
+ * real driving speeds and lowering it alone (B102's first attempt here) measurably changed
+ * nothing. Measured on the live tree field: two real, unmistakable clips through a deadpine
+ * at 22-30 km/h scored severity 0.19 and 0.24 — both well past GRAZE's new 0.12 line — and
+ * both still slid through, because -vn worked out to 1.15-2.0 m/s, under the old 2.5. 1.0 m/s
+ * (3.6 km/h) keeps the original intent — a genuine crawl, parking-lot pace, into a trunk still
+ * only bumps — while no longer asking a car that is unmistakably DRIVING to also be nearly
+ * dead-on before a solid trunk stops it.
  */
-const STOP_CLOSING = 2.5;
+const STOP_CLOSING = 1.0;
 
 /**
  * How square a hit has to be to count as driving into the thing rather than past it.
  * `severity` is cos(angle between your velocity and the contact normal), which for a circle
- * is sqrt(1 - (b/minD)^2) where b is how far the trunk centre misses your line by. 0.35
- * therefore means "the outer 6% of the contact band is a graze, everything else is a hit" —
- * deliberately a narrow let-off, because a trunk is a post and not a wall you can lean on.
- */
-const GRAZE = 0.35;
+ * is sqrt(1 - (b/minD)^2) where b is how far the trunk centre misses your line by, and `minD`
+ * is `s.r + radius` — SCALED BY THE TRUNK'S OWN RADIUS. That scaling is what made 0.35 too
+ * generous in practice: the same absolute miss distance `b` produces a smaller minD (so a
+ * BIGGER b/minD, so a LOWER severity) against a thin trunk than a fat one, which means thin
+ * species are structurally easier to "graze" for the identical physical clearance. Measured
+ * on the live tree field (`tools/diag-collide.mjs`, a real Vehicle steered straight at a real
+ * tree): two deadpines — one of the thinner species, TRUNK_R 0.48 — registered severity 0.25
+ * and 0.19 while the car was unmistakably ramming through them at 30+ km/h on the way to its
+ * actual target, and both slid through keeping 86-89% of their speed. B102, operator: "trees
+ * need to actually have collisions" / "you can clip a trunk and keep 86% of your speed."
+ * 0.12 pulls the line in under both measured cases with margin, so only a genuinely marginal,
+ * near-tangential brush (severity below ~83° off dead-on) still gets the soft slide response —
+ * everything a player would call "driving into a tree" now does not merely slow you, it stops
+ * you, on every species, not just the fat ones. */
+const GRAZE = 0.12;
 
 /**
  * After a swept hit the car is left this far clear of the thing it hit, so the discrete pass
@@ -353,7 +374,11 @@ export class Solids {
       const tx = car.vx - vn * nx;
       const tz = car.vz - vn * nz;
       const restitution = s.kind === 'rock' ? 0.18 : 0.06;
-      const slide = 1 - 0.55 * severity;
+      // 0.7, not the original 0.55 — GRAZE's own note above has the measurement: even the
+      // narrower band this now lets through must still read as a real brush, not a near-free
+      // pass, and 0.55 left a severity-0.1 clip (just under the old and new GRAZE line) at 94%
+      // of its speed.
+      const slide = 1 - 0.7 * severity;
       car.vx = tx * slide - vn * nx * restitution;
       car.vz = tz * slide - vn * nz * restitution;
       // A hit also scrubs rotation, otherwise clipping a tree sets the car spinning.
