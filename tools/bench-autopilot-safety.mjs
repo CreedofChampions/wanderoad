@@ -320,11 +320,17 @@ console.log(`dead end found: edge ${edge.key}, dir ${dir}, edge length ${path.to
    * `auto.on` would still read true. Running the clock the rest of the way out first is not
    * working around the lock, it is the honest way to test what happens once it has actually
    * expired, which is the only moment a real "off" is possible. 1100 more frames at 120 Hz is
-   * ~9.17 s, on top of the 2 s already elapsed above — past the ten seconds with margin. */
-  for (let i = 0; i < 1100; i++) {
-    const cmd = auto.update(car, NOTHING, PHYSICS_DT) || NOTHING;
-    car._step(PHYSICS_DT, cmd);
-  }
+   * ~9.17 s, on top of the 2 s already elapsed above — past the ten seconds with margin.
+   *
+   * update() only, no car._step() this time — deliberately. Stepping the car for a further
+   * real 9+ seconds risks it actually reaching this edge's own end (this file's own check 1
+   * a few dozen lines up exists exactly because this road DOES end somewhere), which would
+   * turn auto.on off for a completely different reason (the dead-end handoff) and make this
+   * check fail while telling a true story about the wrong bug. The cooldown countdown is pure
+   * elapsed time (`this._cooldown -= dt`, unconditional at the top of update()) and does not
+   * need the car to actually be moving — freezing car.speed at its already-cruising value from
+   * the 240-frame warm-up above also keeps it safely clear of the stuck detector's threshold. */
+  for (let i = 0; i < 1100; i++) auto.update(car, NOTHING, PHYSICS_DT);
   check('ping: the lock has run out by the time we try to switch off', auto.cooldownLeft === 0, `${auto.cooldownLeft}s left`);
 
   auto.toggle(car); // off — the lock has expired, so this one actually lands
